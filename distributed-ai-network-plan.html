@@ -1,0 +1,1686 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NEURON Network — Complete Project Plan v2.0</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap');
+
+  :root {
+    --bg:        #0a0e1a;
+    --surface:   #111827;
+    --border:    #1e2d45;
+    --accent:    #00d4ff;
+    --accent2:   #7c3aed;
+    --green:     #00ff88;
+    --warn:      #ff6b35;
+    --text:      #e2e8f0;
+    --muted:     #64748b;
+    --card:      #0f1929;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 15px;
+    line-height: 1.7;
+  }
+
+  /* HERO */
+  .hero {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    padding: 60px 24px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .hero::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(ellipse 80% 60% at 50% 40%, rgba(0,212,255,0.07) 0%, transparent 70%),
+      radial-gradient(ellipse 60% 40% at 20% 80%, rgba(124,58,237,0.08) 0%, transparent 60%);
+    pointer-events: none;
+  }
+
+  .hero-tag {
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.2em;
+    color: var(--accent);
+    text-transform: uppercase;
+    margin-bottom: 24px;
+    border: 1px solid rgba(0,212,255,0.3);
+    padding: 6px 16px;
+    border-radius: 100px;
+  }
+
+  .hero h1 {
+    font-size: clamp(48px, 8vw, 96px);
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    line-height: 1;
+    margin-bottom: 8px;
+  }
+
+  .hero h1 span {
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent2) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .hero-sub {
+    font-size: clamp(14px, 2vw, 18px);
+    color: var(--muted);
+    max-width: 560px;
+    margin: 24px auto 0;
+  }
+
+  .hero-stats {
+    display: flex;
+    gap: 48px;
+    margin-top: 60px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .stat {
+    text-align: center;
+  }
+
+  .stat-n {
+    font-family: 'Space Mono', monospace;
+    font-size: 32px;
+    font-weight: 700;
+    color: var(--accent);
+    display: block;
+  }
+
+  .stat-l {
+    font-size: 12px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-top: 4px;
+  }
+
+  /* LAYOUT */
+  .container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+
+  /* SECTION */
+  section {
+    padding: 80px 0;
+    border-top: 1px solid var(--border);
+  }
+
+  .section-label {
+    font-family: 'Space Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.25em;
+    color: var(--accent);
+    text-transform: uppercase;
+    margin-bottom: 12px;
+  }
+
+  h2 {
+    font-size: clamp(24px, 4vw, 36px);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin-bottom: 40px;
+    line-height: 1.2;
+  }
+
+  h3 {
+    font-size: 17px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    color: var(--text);
+  }
+
+  p {
+    color: #94a3b8;
+    margin-bottom: 16px;
+  }
+
+  /* PHASE TIMELINE */
+  .phases {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .phase {
+    display: grid;
+    grid-template-columns: 180px 1fr;
+    gap: 0 32px;
+    position: relative;
+  }
+
+  .phase-left {
+    padding: 32px 32px 32px 0;
+    border-right: 2px solid var(--border);
+    position: relative;
+    text-align: right;
+  }
+
+  .phase-left::after {
+    content: '';
+    position: absolute;
+    right: -7px;
+    top: 38px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid var(--bg);
+  }
+
+  .phase.warn .phase-left::after { background: var(--warn); }
+  .phase.go .phase-left::after   { background: var(--green); }
+  .phase.purple .phase-left::after { background: var(--accent2); }
+
+  .phase-num {
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    color: var(--accent);
+    letter-spacing: 0.1em;
+  }
+
+  .phase.warn .phase-num  { color: var(--warn); }
+  .phase.go .phase-num    { color: var(--green); }
+  .phase.purple .phase-num { color: var(--accent2); }
+
+  .phase-time {
+    font-size: 13px;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+
+  .phase-right {
+    padding: 28px 0 28px 0;
+  }
+
+  /* CARDS */
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+  }
+
+  .card-icon {
+    font-size: 24px;
+    margin-bottom: 12px;
+  }
+
+  .card h3 {
+    font-size: 15px;
+    margin-bottom: 8px;
+  }
+
+  .card p {
+    font-size: 13px;
+    margin: 0;
+  }
+
+  /* CODE BLOCK */
+  .code {
+    background: #060d18;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 24px;
+    font-family: 'Space Mono', monospace;
+    font-size: 12px;
+    color: #7dd3fc;
+    overflow-x: auto;
+    margin: 16px 0;
+    line-height: 1.8;
+  }
+
+  .code .cm { color: var(--muted); }
+  .code .gr { color: var(--green); }
+  .code .ac { color: var(--accent); }
+  .code .wn { color: var(--warn); }
+
+  /* CHECKLIST */
+  .checklist {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .checklist li {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    font-size: 14px;
+    color: #94a3b8;
+  }
+
+  .checklist li::before {
+    content: '→';
+    color: var(--accent);
+    font-family: 'Space Mono', monospace;
+    font-size: 12px;
+    margin-top: 2px;
+    flex-shrink: 0;
+  }
+
+  .checklist.warn li::before { color: var(--warn); content: '!'; }
+  .checklist.green li::before { color: var(--green); content: '✓'; }
+
+  /* TABLE */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+
+  th {
+    text-align: left;
+    padding: 10px 14px;
+    background: rgba(0,212,255,0.06);
+    color: var(--accent);
+    font-family: 'Space Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border);
+  }
+
+  td {
+    padding: 12px 14px;
+    color: #94a3b8;
+    border-bottom: 1px solid rgba(30,45,69,0.5);
+    vertical-align: top;
+  }
+
+  td strong {
+    color: var(--text);
+    font-weight: 500;
+  }
+
+  tr:last-child td { border-bottom: none; }
+
+  /* ALERT BOX */
+  .alert {
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin: 24px 0;
+    font-size: 14px;
+    border-left: 3px solid;
+  }
+
+  .alert.info {
+    background: rgba(0,212,255,0.05);
+    border-color: var(--accent);
+    color: #7dd3fc;
+  }
+
+  .alert.danger {
+    background: rgba(255,107,53,0.06);
+    border-color: var(--warn);
+    color: #fca5a5;
+  }
+
+  .alert.success {
+    background: rgba(0,255,136,0.05);
+    border-color: var(--green);
+    color: #6ee7b7;
+  }
+
+  .alert strong {
+    display: block;
+    margin-bottom: 6px;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-family: 'Space Mono', monospace;
+  }
+
+  /* ARCH DIAGRAM */
+  .arch {
+    background: #060d18;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 32px;
+    font-family: 'Space Mono', monospace;
+    font-size: 12px;
+    line-height: 2;
+    color: #64748b;
+    overflow-x: auto;
+  }
+
+  .arch .node  { color: var(--accent); }
+  .arch .arrow { color: #334155; }
+  .arch .label { color: var(--green); }
+  .arch .warn  { color: var(--warn); }
+  .arch .purple { color: #a78bfa; }
+
+  /* STACK */
+  .stack {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 16px 0;
+  }
+
+  .stack-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 16px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    font-size: 13px;
+  }
+
+  .stack-row:first-child { border-radius: 8px 8px 0 0; }
+  .stack-row:last-child  { border-radius: 0 0 8px 8px; }
+
+  .stack-layer {
+    font-family: 'Space Mono', monospace;
+    font-size: 10px;
+    color: var(--muted);
+    width: 80px;
+    flex-shrink: 0;
+  }
+
+  .stack-name {
+    color: var(--text);
+    font-weight: 500;
+  }
+
+  .stack-tech {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--accent);
+    font-family: 'Space Mono', monospace;
+  }
+
+  /* MILESTONE */
+  .milestone-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+  }
+
+  .milestone {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    text-align: center;
+  }
+
+  .milestone-week {
+    font-family: 'Space Mono', monospace;
+    font-size: 10px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 8px;
+  }
+
+  .milestone-goal {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .milestone-desc {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 6px;
+  }
+
+  /* FOOTER */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 48px 0;
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  footer strong {
+    color: var(--accent);
+    font-family: 'Space Mono', monospace;
+  }
+
+  /* DIVIDER */
+  .divider {
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--border), transparent);
+    margin: 32px 0;
+  }
+
+  @media (max-width: 640px) {
+    .phase { grid-template-columns: 1fr; }
+    .phase-left {
+      border-right: none;
+      border-bottom: 2px solid var(--border);
+      text-align: left;
+      padding: 20px 0 16px;
+    }
+    .phase-left::after { display: none; }
+    .phase-right { padding: 16px 0 8px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- HERO -->
+<div class="hero">
+  <div class="hero-tag">Project Blueprint — Confidential</div>
+  <h1>NEU<span>RON</span></h1>
+  <p style="font-family:'Space Mono',monospace;font-size:13px;color:var(--muted);margin-top:8px;letter-spacing:0.05em;">
+    Network of Existing Utilised Resources — Open Nodes
+  </p>
+  <p class="hero-sub">
+    A distributed AI inference network that harvests idle compute from millions of consumer devices worldwide — greener, larger, and more resilient than any existing data center.
+  </p>
+  <div class="hero-stats">
+    <div class="stat">
+      <span class="stat-n">3M+</span>
+      <div class="stat-l">Target Nodes</div>
+    </div>
+    <div class="stat">
+      <span class="stat-n">1–2%</span>
+      <div class="stat-l">CPU per Device</div>
+    </div>
+    <div class="stat">
+      <span class="stat-n">0</span>
+      <div class="stat-l">New Hardware</div>
+    </div>
+    <div class="stat">
+      <span class="stat-n">∞</span>
+      <div class="stat-l">Scalability</div>
+    </div>
+  </div>
+</div>
+
+<!-- SECTION 1: THE CONCEPT -->
+<section>
+  <div class="container">
+    <div class="section-label">01 — The Concept</div>
+    <h2>What NEURON Is</h2>
+
+    <div class="arch">
+<span class="node">[User Request]</span>
+        <span class="arrow">───────────────────────────────────────────────────────</span>▶
+                                                                    <span class="node">[NEURON Coordinator]</span>
+                                                                           <span class="arrow">│</span>
+                          <span class="arrow">┌──────────────────────────────────────────────┴──────────────────────────────────────────────┐</span>
+                          <span class="arrow">▼</span>                                                                                              <span class="arrow">▼</span>
+              <span class="label">[NL Cluster]</span>                                                                              <span class="label">[India Cluster]</span>
+         <span class="purple">500,000 nodes</span>                                                                            <span class="purple">500,000 nodes</span>
+    <span class="arrow">Each node = 1MB agent</span>                                                                      <span class="arrow">Each node = 1MB agent</span>
+    <span class="warn">Holds model layer slice</span>                                                                    <span class="warn">Holds model layer slice</span>
+    <span class="arrow">Earns NEURON coin</span>                                                                          <span class="arrow">Earns NEURON coin</span>
+    </div>
+
+    <div class="alert info">
+      <strong>Core Insight</strong>
+      The world's idle compute already exists. Every laptop, desktop, and smart device runs at 2–5% capacity most of the time. NEURON harvests that unused capacity — no new hardware, no new power draw, no new data centers.
+    </div>
+
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-icon">🌍</div>
+        <h3>Geographic Clustering</h3>
+        <p>Nodes grouped by region. NL serves NL users. India serves India users. Sub-5ms latency within clusters.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">🔁</div>
+        <h3>BitTorrent Redundancy</h3>
+        <p>Every model layer lives on 1,000+ nodes. If 900 go offline — inference continues. No single point of failure.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">🪙</div>
+        <h3>NEURON Coin</h3>
+        <p>Nodes earn coins for serving requests. Users spend coins for inference. Coordinator takes a protocol fee.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">🌱</div>
+        <h3>Zero Carbon Footprint</h3>
+        <p>No new manufacturing. Existing power draw. 1% extra CPU = ~0.1W per device. Greener than any data center.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- SECTION 2: ARCHITECTURE -->
+<section>
+  <div class="container">
+    <div class="section-label">02 — Technical Architecture</div>
+    <h2>Full System Design</h2>
+
+    <h3>Technology Stack</h3>
+    <div class="stack">
+      <div class="stack-row">
+        <div class="stack-layer">AGENT</div>
+        <div class="stack-name">Node Agent — installed on contributor machines</div>
+        <div class="stack-tech">Python + llama.cpp</div>
+      </div>
+      <div class="stack-row">
+        <div class="stack-layer">NETWORK</div>
+        <div class="stack-name">Peer Discovery + Layer Registry</div>
+        <div class="stack-tech">libp2p / WebRTC</div>
+      </div>
+      <div class="stack-row">
+        <div class="stack-layer">ROUTING</div>
+        <div class="stack-name">Coordinator Server — request routing + cluster management</div>
+        <div class="stack-tech">FastAPI + Redis</div>
+      </div>
+      <div class="stack-row">
+        <div class="stack-layer">INFERENCE</div>
+        <div class="stack-name">Distributed Layer Pipeline — model split across nodes</div>
+        <div class="stack-tech">Petals protocol</div>
+      </div>
+      <div class="stack-row">
+        <div class="stack-layer">LEDGER</div>
+        <div class="stack-name">NEURON Coin — compute rewards + user payments</div>
+        <div class="stack-tech">Solana / ERC-20</div>
+      </div>
+      <div class="stack-row">
+        <div class="stack-layer">VERIFY</div>
+        <div class="stack-name">Proof of Compute — honest work verification</div>
+        <div class="stack-tech">Challenge-response</div>
+      </div>
+      <div class="stack-row">
+        <div class="stack-layer">API</div>
+        <div class="stack-name">Public API — OpenAI-compatible endpoint for developers</div>
+        <div class="stack-tech">FastAPI + JWT</div>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <h3>How a Request Flows</h3>
+    <div class="code">
+<span class="cm"># 1. User sends request to NEURON API</span>
+POST api.neuron.network/v1/chat
+{ "model": "neuron-7b", "messages": [...] }
+
+<span class="cm"># 2. Coordinator identifies nearest cluster</span>
+user_ip → <span class="ac">geolocate</span> → "Netherlands" → <span class="gr">NL_CLUSTER</span>
+
+<span class="cm"># 3. Route to available nodes in that cluster</span>
+NL_CLUSTER.<span class="ac">get_available_nodes</span>(layer_count=32) → [node_4, node_17, node_203 ...]
+
+<span class="cm"># 4. Each node processes its layer slice</span>
+node_4   → <span class="gr">layers 1-8</span>   → forward activations to node_17
+node_17  → <span class="gr">layers 9-16</span>  → forward activations to node_203
+node_203 → <span class="gr">layers 17-24</span> → forward activations to node_91
+node_91  → <span class="gr">layers 25-32</span> → return token to coordinator
+
+<span class="cm"># 5. Token returned, coin deducted from user</span>
+user_wallet -= <span class="wn">0.001 NRN</span>
+node_wallets += <span class="gr">0.0009 NRN</span>  <span class="cm"># split between 4 nodes</span>
+protocol_fee = <span class="ac">0.0001 NRN</span>   <span class="cm"># 10% coordinator fee</span>
+    </div>
+
+    <div class="divider"></div>
+
+    <h3>The 1MB Agent — What It Does</h3>
+    <div class="code">
+<span class="cm">neuron-agent/</span>
+├── <span class="ac">agent.py</span>          <span class="cm"># main loop — phones home, accepts tasks</span>
+├── <span class="ac">model_slice.py</span>    <span class="cm"># holds + runs assigned model layer range</span>
+├── <span class="ac">resource_guard.py</span> <span class="cm"># enforces 1-2% CPU cap, idles when user active</span>
+├── <span class="ac">wallet.py</span>         <span class="cm"># NEURON coin balance, auto-withdraw threshold</span>
+├── <span class="ac">updater.py</span>        <span class="cm"># silent auto-update from coordinator</span>
+└── <span class="ac">tray.py</span>           <span class="cm"># system tray icon — status, earnings, pause</span>
+
+<span class="cm"># Agent behaviour rules:</span>
+- Activates ONLY when machine is idle &gt; 5 minutes
+- Hard cap: 2% CPU, 200MB RAM (for itself)
+- Model weights streamed in chunks — not all at once
+- Never touches user files, network traffic, or screen
+- All comms encrypted TLS 1.3 to coordinator
+- Open source — anyone can audit the code
+    </div>
+  </div>
+</section>
+
+<!-- SECTION 3: PHASES -->
+<section>
+  <div class="container">
+    <div class="section-label">03 — Build Plan</div>
+    <h2>Phase by Phase — With Claude Code</h2>
+
+    <div class="phases">
+
+      <div class="phase">
+        <div class="phase-left">
+          <div class="phase-num">PHASE 0</div>
+          <div class="phase-time">Week 1–2</div>
+        </div>
+        <div class="phase-right">
+          <h3>Foundation — Proof of Concept on Your Own Machines</h3>
+          <p>Use your Pavilion (192.168.1.x) and OptiPlex (192.168.1.10) as the first two nodes. No coin, no internet. Just prove the layer-split inference works locally.</p>
+          <ul class="checklist">
+            <li>Install llama.cpp on both machines</li>
+            <li>Download a 3B model, split layers manually between machines</li>
+            <li>Write basic Python socket communication between nodes</li>
+            <li>Run one inference request end-to-end across two machines</li>
+            <li>Measure latency: local LAN should be under 1ms per hop</li>
+          </ul>
+          <div class="alert success">
+            <strong>Success Metric</strong>
+            One sentence generated across two machines. Doesn't need to be fast — just needs to work.
+          </div>
+        </div>
+      </div>
+
+      <div class="phase go">
+        <div class="phase-left">
+          <div class="phase-num">PHASE 1</div>
+          <div class="phase-time">Week 3–6</div>
+        </div>
+        <div class="phase-right">
+          <h3>Coordinator Server</h3>
+          <p>Build the central brain. This is a FastAPI server on your OptiPlex that manages node registration, layer assignment, and request routing.</p>
+          <ul class="checklist">
+            <li>Node registration endpoint — nodes phone home on startup</li>
+            <li>Layer assignment algorithm — which node holds which layers</li>
+            <li>Health checking — detect dead nodes, reassign layers</li>
+            <li>Request queue — accept inference requests, route to nodes</li>
+            <li>Basic dashboard — see active nodes, requests, health</li>
+          </ul>
+          <div class="code">
+<span class="cm"># Coordinator core endpoints</span>
+POST /node/register   <span class="cm"># node announces itself</span>
+GET  /node/layers     <span class="cm"># what layers am I responsible for?</span>
+POST /infer           <span class="cm"># user submits inference request</span>
+GET  /status          <span class="cm"># network health dashboard</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="phase">
+        <div class="phase-left">
+          <div class="phase-num">PHASE 2</div>
+          <div class="phase-time">Week 7–10</div>
+        </div>
+        <div class="phase-right">
+          <h3>The Agent — Installable Node Software</h3>
+          <p>Package everything into a single installer. This is what volunteers install. Must be trustworthy, lightweight, and easy to remove.</p>
+          <ul class="checklist">
+            <li>Python packaged as standalone executable (PyInstaller)</li>
+            <li>Windows (.exe), Linux (.deb/.AppImage), Mac (.dmg)</li>
+            <li>Resource governor — hard 2% CPU ceiling</li>
+            <li>Idle detection — only runs when user is away</li>
+            <li>System tray UI — shows earnings, pause button, status</li>
+            <li>Auto-updater — pulls new versions from coordinator silently</li>
+            <li>Signed binaries — code signing certificate so OS trusts it</li>
+          </ul>
+          <div class="alert info">
+            <strong>Critical</strong>
+            The agent must be fully open source from day one. This is the only way to build trust with contributors. Anyone should be able to read every line of what runs on their machine.
+          </div>
+        </div>
+      </div>
+
+      <div class="phase purple">
+        <div class="phase-left">
+          <div class="phase-num">PHASE 3</div>
+          <div class="phase-time">Week 11–16</div>
+        </div>
+        <div class="phase-right">
+          <h3>NEURON Coin — Incentive Layer</h3>
+          <p>Add the economic layer. Start simple: an ERC-20 token on Polygon (low gas fees). Upgrade to own chain later when volume justifies it.</p>
+          <ul class="checklist">
+            <li>Deploy ERC-20 token contract on Polygon testnet first</li>
+            <li>Integrate wallet into agent — auto-generate keypair on install</li>
+            <li>Coordinator mints rewards per verified inference contribution</li>
+            <li>User payment flow — buy NRN, spend on inference</li>
+            <li>Proof of Compute — challenge-response to verify honest work</li>
+            <li>Anti-cheat — detect nodes faking work without contributing</li>
+          </ul>
+          <div class="code">
+<span class="cm"># Token economics (initial)</span>
+Total supply:    <span class="ac">1,000,000,000 NRN</span>
+Node rewards:    <span class="gr">60%</span>  <span class="cm"># earned by contributors over time</span>
+Foundation:      <span class="ac">20%</span>  <span class="cm"># you — for development + operations</span>
+Ecosystem fund:  <span class="ac">15%</span>  <span class="cm"># grants, partnerships</span>
+Liquidity:       <span class="wn">5%</span>   <span class="cm"># DEX liquidity pool at launch</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="phase warn">
+        <div class="phase-left">
+          <div class="phase-num">PHASE 4</div>
+          <div class="phase-time">Month 5–8</div>
+        </div>
+        <div class="phase-right">
+          <h3>Public Launch — First 1,000 Nodes</h3>
+          <p>Open the network to the public. Target: developers and tech-savvy early adopters who like the green AI story and want to earn crypto passively.</p>
+          <ul class="checklist">
+            <li>Landing page with one-click installer download</li>
+            <li>Public dashboard — live node map, total compute, requests served</li>
+            <li>Developer API — OpenAI-compatible so existing apps can switch</li>
+            <li>Discord community for node operators</li>
+            <li>Referral system — earn bonus NRN for bringing new nodes</li>
+          </ul>
+          <div class="alert success">
+            <strong>Success Metric</strong>
+            1,000 active nodes in 3 different countries. At least 100 real inference requests per day from external users.
+          </div>
+        </div>
+      </div>
+
+      <div class="phase go">
+        <div class="phase-left">
+          <div class="phase-num">PHASE 5</div>
+          <div class="phase-time">Month 9–18</div>
+        </div>
+        <div class="phase-right">
+          <h3>Scale — 100K Nodes, Regional Clusters</h3>
+          <p>Expand clusters geographically. India, EU, US, SEA. Begin running larger models as network density increases.</p>
+          <ul class="checklist">
+            <li>Geographic cluster management in coordinator</li>
+            <li>Automated cluster rebalancing as nodes join/leave</li>
+            <li>Support 7B, 13B models as cluster size allows</li>
+            <li>Mobile agent — Android/iOS background service (limited)</li>
+            <li>Enterprise API tier — SLA guarantees, dedicated node pools</li>
+            <li>NRN listed on a DEX (Uniswap / Raydium)</li>
+          </ul>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- SECTION 4: LEGAL -->
+<section>
+  <div class="container">
+    <div class="section-label">04 — Legal Structure</div>
+    <h2>From Day One, Built Correctly</h2>
+
+    <div class="alert danger">
+      <strong>Do This Before Writing Any Public Code</strong>
+      Legal structure must be established before public launch. Running a crypto token without proper legal entity exposes you personally to unlimited liability. This is not optional.
+    </div>
+
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-icon">🏢</div>
+        <h3>Entity Structure</h3>
+        <p><strong>Option A:</strong> BV in Netherlands (you're already there). ~€500 setup. Good for EU operations, clean tax structure.<br><br>
+        <strong>Option B:</strong> Foundation (Stichting) for the protocol + BV for commercial operations. Common in crypto (Ethereum Foundation model).</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">🪙</div>
+        <h3>Token Legal</h3>
+        <p>NRN must be structured as a <strong>utility token</strong>, not a security. Key requirement: token gives access to compute, not profit-sharing.<br><br>
+        Get a Dutch crypto lawyer to review tokenomics before launch. Budget: €2,000–5,000.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">🔒</div>
+        <h3>Privacy / GDPR</h3>
+        <p>Agent runs in EU — GDPR applies. Agent must:<br>
+        • Collect zero personal data<br>
+        • Log only compute metrics<br>
+        • Have clear privacy policy<br>
+        • Easy uninstall = full removal</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">📄</div>
+        <h3>Terms for Node Operators</h3>
+        <p>Contributors must agree to:<br>
+        • What the agent does/doesn't do<br>
+        • Resource usage limits<br>
+        • How earnings work<br>
+        • Liability waiver<br>
+        • Right to audit agent code</p>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <h3>Legal Checklist — Phase 0 (Before Any Public Code)</h3>
+    <ul class="checklist">
+      <li>Register BV or Stichting in Netherlands</li>
+      <li>Open business bank account</li>
+      <li>Consult Dutch crypto lawyer on token classification (utility vs security)</li>
+      <li>Draft contributor Terms of Service and Privacy Policy</li>
+      <li>Register NEURON trademark in EU</li>
+      <li>Open source license decision — Apache 2.0 recommended for agent code</li>
+      <li>Get code signing certificate for agent binaries (DigiCert, ~€300/year)</li>
+    </ul>
+
+    <div class="divider"></div>
+
+    <h3>Regulatory Landscape</h3>
+    <table>
+      <tr>
+        <th>Area</th>
+        <th>Regulation</th>
+        <th>Impact</th>
+        <th>Action</th>
+      </tr>
+      <tr>
+        <td><strong>Crypto Token (EU)</strong></td>
+        <td>MiCA (Markets in Crypto Assets)</td>
+        <td>Medium — utility tokens have lighter requirements than asset tokens</td>
+        <td>Classify NRN as utility token, get legal opinion letter</td>
+      </tr>
+      <tr>
+        <td><strong>Data Privacy</strong></td>
+        <td>GDPR</td>
+        <td>High — agent runs on user machines</td>
+        <td>Zero personal data collection by design, privacy policy, DPA registration</td>
+      </tr>
+      <tr>
+        <td><strong>AI Act (EU)</strong></td>
+        <td>EU AI Act 2024</td>
+        <td>Low-Medium — infrastructure layer, not AI application</td>
+        <td>Monitor — you provide compute, not the AI application itself</td>
+      </tr>
+      <tr>
+        <td><strong>Money Transmission</strong></td>
+        <td>PSD2 / EMD2</td>
+        <td>Low if NRN stays as utility, not fiat conversion</td>
+        <td>Do not handle fiat in-app — use external exchanges for fiat conversion</td>
+      </tr>
+      <tr>
+        <td><strong>Export Control</strong></td>
+        <td>Wassenaar / US EAR</td>
+        <td>Low — not selling AI technology, providing compute layer</td>
+        <td>Monitor if model weights distribution becomes part of the product</td>
+      </tr>
+    </table>
+  </div>
+</section>
+
+<!-- SECTION 5: RISKS -->
+<section>
+  <div class="container">
+    <div class="section-label">05 — Risks & Mitigations</div>
+    <h2>What Can Go Wrong</h2>
+
+    <table>
+      <tr>
+        <th>Risk</th>
+        <th>Severity</th>
+        <th>Mitigation</th>
+      </tr>
+      <tr>
+        <td><strong>Malicious nodes return false outputs</strong></td>
+        <td style="color:var(--warn)">HIGH</td>
+        <td>Redundant computation — send same layer to 3 nodes, use majority vote. Slash coin stake of cheaters.</td>
+      </tr>
+      <tr>
+        <td><strong>Antivirus flags agent as malware</strong></td>
+        <td style="color:var(--warn)">HIGH</td>
+        <td>Code signing certificate + open source + submit to major AV vendors for whitelisting before launch.</td>
+      </tr>
+      <tr>
+        <td><strong>Latency too high for useful inference</strong></td>
+        <td style="color:var(--warn)">HIGH</td>
+        <td>Geographic clustering keeps hops local. Start with small models (1B-3B) that need fewer layer hops.</td>
+      </tr>
+      <tr>
+        <td><strong>Token classified as security by regulators</strong></td>
+        <td style="color:var(--warn)">HIGH</td>
+        <td>Legal opinion letter before launch. Design tokenomics as pure utility. No profit-sharing, no dividends.</td>
+      </tr>
+      <tr>
+        <td><strong>Users don't trust agent on their machine</strong></td>
+        <td style="color:var(--accent)">MEDIUM</td>
+        <td>Full open source. Independent security audit. No data collection by design. Easy one-click uninstall.</td>
+      </tr>
+      <tr>
+        <td><strong>Coordinator is single point of failure</strong></td>
+        <td style="color:var(--accent)">MEDIUM</td>
+        <td>Run 3 coordinator instances in different regions. Move to fully decentralized coordinator in Phase 5.</td>
+      </tr>
+      <tr>
+        <td><strong>Competing project launches first</strong></td>
+        <td style="color:var(--accent)">MEDIUM</td>
+        <td>Your differentiation is green AI + consumer devices (not GPU miners). Different market from Render/Akash.</td>
+      </tr>
+      <tr>
+        <td><strong>Node operator loses money (electricity &gt; earnings)</strong></td>
+        <td style="color:var(--muted)">LOW</td>
+        <td>1% CPU = ~0.1W extra. Negligible cost. Earnings dashboard must show real-time ROI clearly.</td>
+      </tr>
+    </table>
+  </div>
+</section>
+
+<!-- SECTION 6: WEEK 1 -->
+<section>
+  <div class="container">
+    <div class="section-label">06 — Start Now</div>
+    <h2>Week 1 — Exact Tasks</h2>
+
+    <div class="alert info">
+      <strong>Rule</strong>
+      Nothing gets built until the PoC works on your two machines. No coin, no website, no branding. Just: can two machines share a model and run inference?
+    </div>
+
+    <div class="milestone-grid">
+      <div class="milestone">
+        <div class="milestone-week">Day 1–2</div>
+        <div class="milestone-goal">Environment Setup</div>
+        <div class="milestone-desc">llama.cpp on Pavilion + OptiPlex. Download Qwen2.5-1.5B-Instruct GGUF. Confirm both can run inference independently.</div>
+      </div>
+      <div class="milestone">
+        <div class="milestone-week">Day 3–4</div>
+        <div class="milestone-goal">Layer Split</div>
+        <div class="milestone-desc">Write Python script: Pavilion runs layers 0-15, sends activations over TCP socket to OptiPlex running layers 16-28.</div>
+      </div>
+      <div class="milestone">
+        <div class="milestone-week">Day 5</div>
+        <div class="milestone-goal">First Token</div>
+        <div class="milestone-desc">Complete one inference request: "Hello" → [both machines process] → "Hello! How can I help you?" Measure latency.</div>
+      </div>
+      <div class="milestone">
+        <div class="milestone-week">Day 6–7</div>
+        <div class="milestone-goal">Basic Coordinator</div>
+        <div class="milestone-desc">FastAPI server on OptiPlex. Both machines register. Route a request through coordinator instead of direct socket. Log everything.</div>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <h3>Claude Code Session Structure</h3>
+    <div class="code">
+<span class="cm"># How to work with Claude Code on this project</span>
+
+<span class="ac">Session 1:</span> Layer splitting — split a GGUF model, run on 2 machines
+<span class="ac">Session 2:</span> TCP communication — activation tensors over network
+<span class="ac">Session 3:</span> Coordinator v0 — FastAPI node registry + request routing
+<span class="ac">Session 4:</span> Resource governor — CPU cap, idle detection
+<span class="ac">Session 5:</span> Agent packager — PyInstaller, system tray, installer
+<span class="ac">Session 6:</span> Wallet integration — ERC-20 keypair generation, balance tracking
+<span class="ac">Session 7:</span> Proof of Compute — challenge-response verification
+<span class="ac">Session 8:</span> Public API — OpenAI-compatible endpoint
+<span class="ac">Session 9:</span> Dashboard — live node map, metrics, earnings
+<span class="ac">Session 10:</span> Security audit — pen test coordinator + agent
+
+<span class="cm"># Each session: one thing, working, tested, committed to GitHub</span>
+    </div>
+  </div>
+</section>
+
+<!-- SECTION 7: WHAT THIS IS NOT -->
+<section>
+  <div class="container">
+    <div class="section-label">07 — Honest Assessment</div>
+    <h2>What This Is and Is Not</h2>
+
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-icon">✅</div>
+        <h3>This Is</h3>
+        <ul class="checklist green" style="margin-top:8px;">
+          <li>A genuinely novel approach to distributed AI inference</li>
+          <li>Technically feasible — Petals already proved the core works</li>
+          <li>A real environmental story — no new hardware, no data centers</li>
+          <li>A viable business if network effects kick in</li>
+          <li>Buildable by one person with Claude Code over 12–18 months</li>
+        </ul>
+      </div>
+      <div class="card">
+        <div class="card-icon">❌</div>
+        <h3>This Is Not</h3>
+        <ul class="checklist warn" style="margin-top:8px;">
+          <li>A 3-month project</li>
+          <li>A replacement for GPT-4 on day one</li>
+          <li>Guaranteed to work at 3M nodes without major engineering</li>
+          <li>A get-rich-quick crypto scheme — the coin only works if the network works</li>
+          <li>Something you can build without legal structure first</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="alert success">
+      <strong>The Real Opportunity</strong>
+      You have two things most builders don't: a clear technical vision AND an environmental narrative. The green AI angle is genuinely differentiated. No existing distributed compute project leads with "we run on hardware that already exists." That's your headline.
+    </div>
+  </div>
+</section>
+
+<!-- SECTION 8: STRATEGIC OPTIONS -->
+<section>
+  <div class="container">
+    <div class="section-label">08 — Strategic Options</div>
+    <h2>Three Paths — Pick One</h2>
+
+    <div class="alert danger">
+      <strong>New Intelligence — Updated After Competitor Research</strong>
+      Bittensor ($3.5B), Gensyn ($80M, just launched April 2026), and io.net (80,000 CPUs already) all exist. This changes the strategic picture. You must pick one of three paths before writing a single line of code.
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- PATH A -->
+    <div class="card" style="margin-bottom:16px; border-color: rgba(0,212,255,0.4);">
+      <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px;">
+        <div style="font-family:'Space Mono',monospace; font-size:11px; color:var(--accent); border:1px solid var(--accent); padding:4px 10px; border-radius:4px;">PATH A</div>
+        <h3 style="margin:0;">Launch as a Bittensor Subnet</h3>
+        <div style="margin-left:auto; font-size:12px; color:var(--green); font-family:'Space Mono',monospace;">FASTEST</div>
+      </div>
+      <p>Build NEURON as a subnet inside Bittensor's existing network. Their blockchain, their validators, their liquidity — you build the consumer-agent layer on top as a specialized subnet focused on CPU-based inference from normal devices.</p>
+      <div class="divider"></div>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:24px;">
+        <div>
+          <div style="font-size:11px; color:var(--green); font-family:'Space Mono',monospace; margin-bottom:8px;">ADVANTAGES</div>
+          <ul class="checklist green">
+            <li>No blockchain to build — already exists</li>
+            <li>No token launch — use TAO subnet emissions</li>
+            <li>Existing community of 10,000+ miners</li>
+            <li>Regulatory clarity — TAO is established</li>
+            <li>Can launch subnet in weeks not years</li>
+            <li>Bitstarter crowdfunding available for subnets</li>
+          </ul>
+        </div>
+        <div>
+          <div style="font-size:11px; color:var(--warn); font-family:'Space Mono',monospace; margin-bottom:8px;">DISADVANTAGES</div>
+          <ul class="checklist warn">
+            <li>Dependent on Bittensor's success</li>
+            <li>Subnet registration costs TAO upfront</li>
+            <li>Limited control over protocol rules</li>
+            <li>Revenue split with Bittensor network</li>
+            <li>Competitive — 128 subnets already exist</li>
+          </ul>
+        </div>
+      </div>
+      <div class="alert info" style="margin-top:16px; margin-bottom:0;">
+        <strong>Best If</strong>
+        You want to ship something real in 3–6 months, validate the consumer-device idea, and build a user base before committing to a standalone network.
+      </div>
+    </div>
+
+    <!-- PATH B -->
+    <div class="card" style="margin-bottom:16px; border-color: rgba(124,58,237,0.4);">
+      <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px;">
+        <div style="font-family:'Space Mono',monospace; font-size:11px; color:var(--accent2); border:1px solid var(--accent2); padding:4px 10px; border-radius:4px;">PATH B</div>
+        <h3 style="margin:0;">Build Standalone — Own Chain, Own Coin</h3>
+        <div style="margin-left:auto; font-size:12px; color:var(--accent2); font-family:'Space Mono',monospace;">HARDEST</div>
+      </div>
+      <p>The original plan. NEURON as a fully independent network with its own blockchain, own token (NRN), own coordinator, own agent. Maximum control, maximum upside, maximum risk.</p>
+      <div class="divider"></div>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:24px;">
+        <div>
+          <div style="font-size:11px; color:var(--green); font-family:'Space Mono',monospace; margin-bottom:8px;">ADVANTAGES</div>
+          <ul class="checklist green">
+            <li>Full control of protocol and economics</li>
+            <li>100% of token value stays in ecosystem</li>
+            <li>Can design specifically for consumer CPUs</li>
+            <li>No dependency on other networks</li>
+            <li>Highest potential upside if it works</li>
+          </ul>
+        </div>
+        <div>
+          <div style="font-size:11px; color:var(--warn); font-family:'Space Mono',monospace; margin-bottom:8px;">DISADVANTAGES</div>
+          <ul class="checklist warn">
+            <li>2+ years to build properly</li>
+            <li>Competing with Gensyn ($80M) and io.net directly</li>
+            <li>Token launch in 2026 is a crowded, skeptical market</li>
+            <li>Needs funding — can't be built alone for free</li>
+            <li>Regulatory exposure as token issuer</li>
+          </ul>
+        </div>
+      </div>
+      <div class="alert info" style="margin-top:16px; margin-bottom:0;">
+        <strong>Best If</strong>
+        You secure €500K+ in funding, have a technical co-founder, and are willing to commit 3+ years full time.
+      </div>
+    </div>
+
+    <!-- PATH C -->
+    <div class="card" style="margin-bottom:0; border-color: rgba(0,255,136,0.4);">
+      <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px;">
+        <div style="font-family:'Space Mono',monospace; font-size:11px; color:var(--green); border:1px solid var(--green); padding:4px 10px; border-radius:4px;">PATH C</div>
+        <h3 style="margin:0;">Partner with io.net as Consumer CPU Layer</h3>
+        <div style="margin-left:auto; font-size:12px; color:var(--green); font-family:'Space Mono',monospace;">MOST REALISTIC</div>
+      </div>
+      <p>io.net has 80,000 CPUs but their onboarding requires staking, 12-hour verification, and technical setup. You build the missing piece — the frictionless consumer agent — and pitch it to io.net as a partnership or acquisition target. You solve their supply problem. They give you distribution.</p>
+      <div class="divider"></div>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:24px;">
+        <div>
+          <div style="font-size:11px; color:var(--green); font-family:'Space Mono',monospace; margin-bottom:8px;">ADVANTAGES</div>
+          <ul class="checklist green">
+            <li>Existing network to plug into immediately</li>
+            <li>No blockchain, no token needed initially</li>
+            <li>Acquisition potential — valuable exit</li>
+            <li>Proof of concept is enough to start conversations</li>
+            <li>Fastest path to 1M nodes</li>
+          </ul>
+        </div>
+        <div>
+          <div style="font-size:11px; color:var(--warn); font-family:'Space Mono',monospace; margin-bottom:8px;">DISADVANTAGES</div>
+          <ul class="checklist warn">
+            <li>You build the tech, they own the upside</li>
+            <li>Dependent on io.net's direction</li>
+            <li>Less founder control</li>
+            <li>Partnership talks take time</li>
+          </ul>
+        </div>
+      </div>
+      <div class="alert success" style="margin-top:16px; margin-bottom:0;">
+        <strong>Best If</strong>
+        You want to validate the agent first, show it works at 100 nodes, then open conversations with io.net, Gensyn, or Bittensor from a position of demonstrated value — not just an idea.
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <h3>Recommended Sequence</h3>
+    <div class="code">
+<span class="cm"># The pragmatic path for one person with no funding</span>
+
+<span class="gr">Step 1 (Now → Month 3):</span>
+  Build the agent. Prove it works on 10 machines.
+  Language: Python. Zero blockchain. Zero coin.
+  Just: installs silently, caps at 2% CPU, runs inference.
+
+<span class="gr">Step 2 (Month 3 → Month 6):</span>
+  Launch as Bittensor subnet (Path A).
+  Get first 500 real nodes. Prove the consumer UX works.
+  This is your proof of concept AND your case study.
+
+<span class="gr">Step 3 (Month 6 → Month 12):</span>
+  Decision point based on traction:
+  - Subnet doing well → keep building on Bittensor
+  - io.net notices you → explore partnership (Path C)
+  - Raising money → go standalone (Path B)
+
+<span class="cm"># Never build a blockchain before you have 1,000 users.</span>
+<span class="cm"># Never launch a coin before you have a working product.</span>
+    </div>
+  </div>
+</section>
+
+<!-- SECTION 9: GO-TO-MARKET -->
+<section>
+  <div class="container">
+    <div class="section-label">09 — Go-to-Market</div>
+    <h2>Getting the First 1,000 Nodes</h2>
+
+    <div class="alert danger">
+      <strong>The Missing Section from v1.0</strong>
+      The original plan had no answer for: why would anyone install your unknown agent on their machine? Technology without distribution is nothing. This section fixes that.
+    </div>
+
+    <div class="divider"></div>
+
+    <h3>The Core Problem</h3>
+    <p>You are asking strangers to install software on their personal computers from someone they have never heard of. This is the hardest trust problem in software. Solving it requires one thing above everything else:</p>
+
+    <div class="alert info">
+      <strong>The Rule</strong>
+      Open source code + independent security audit + zero data collection = the only foundation that works. Without these three, no marketing will help. With them, word of mouth does the work.
+    </div>
+
+    <div class="divider"></div>
+
+    <h3>Acquisition by Channel — Staged</h3>
+
+    <div class="phases">
+
+      <div class="phase go">
+        <div class="phase-left">
+          <div class="phase-num">NODES 1–10</div>
+          <div class="phase-time">Your own machines</div>
+        </div>
+        <div class="phase-right">
+          <h3>Start With What You Control</h3>
+          <p>Pavilion + OptiPlex. Prove it works. Then recruit 8 friends or family in India and Netherlands. These are your beta nodes. No marketing. Just functionality.</p>
+        </div>
+      </div>
+
+      <div class="phase">
+        <div class="phase-left">
+          <div class="phase-num">NODES 10–100</div>
+          <div class="phase-time">Month 1–2</div>
+        </div>
+        <div class="phase-right">
+          <h3>Developer Communities</h3>
+          <ul class="checklist">
+            <li>Post a technical write-up on Hacker News — "I built a 1MB agent that turns any laptop into an AI inference node"</li>
+            <li>Reddit: r/MachineLearning, r/LocalLLaMA, r/bittensor</li>
+            <li>Post on GitHub with clear README and one-line install command</li>
+            <li>Discord servers: Bittensor, Petals, LocalLLaMA</li>
+            <li>Target: developers who already run local LLMs — they trust the concept</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="phase purple">
+        <div class="phase-left">
+          <div class="phase-num">NODES 100–1K</div>
+          <div class="phase-time">Month 2–4</div>
+        </div>
+        <div class="phase-right">
+          <h3>The Green AI Narrative</h3>
+          <ul class="checklist">
+            <li>Write one blog post: "Your laptop is already on. It's already using power. Here's how to make it run AI for free — and earn crypto doing it."</li>
+            <li>Target sustainability / tech blogs — Medium, Substack</li>
+            <li>Reach out to Dutch tech press — Tweakers.net, Bright.nl — local hero story</li>
+            <li>Indian optometry network for DrishtiConnect — crossover audience already trusts you</li>
+            <li>Post live node map publicly — nothing builds trust like seeing real nodes on a real map</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="phase warn">
+        <div class="phase-left">
+          <div class="phase-num">NODES 1K–10K</div>
+          <div class="phase-time">Month 4–8</div>
+        </div>
+        <div class="phase-right">
+          <h3>Referral + Crypto Community</h3>
+          <ul class="checklist">
+            <li>Referral system: install the agent, get a link, earn 5% of what your referrals earn — forever</li>
+            <li>Crypto Twitter / X: post earnings screenshots from early nodes</li>
+            <li>Bittensor Discord: if you're a subnet, their community does your marketing</li>
+            <li>YouTube: one demo video — "I earned €X in 30 days running NEURON on my laptop while I slept"</li>
+            <li>Target: passive income communities, crypto communities, student communities</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="phase go">
+        <div class="phase-left">
+          <div class="phase-num">NODES 10K+</div>
+          <div class="phase-time">Month 8+</div>
+        </div>
+        <div class="phase-right">
+          <h3>Press + Partnerships</h3>
+          <ul class="checklist">
+            <li>By 10K nodes you have a real story — pitch TechCrunch, CoinDesk, VentureBeat</li>
+            <li>University partnerships: student laptops idle 16hrs/day — natural node operators</li>
+            <li>Enterprise: companies with 500 idle office PCs — NEURON as CSR/green initiative</li>
+            <li>Hugging Face integration — they already route inference to decentralized networks</li>
+          </ul>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="divider"></div>
+
+    <h3>The One Message That Works</h3>
+    <div class="code">
+<span class="cm"># Don't say:</span>
+<span class="wn">"Install our distributed AI compute agent and contribute to decentralized inference"</span>
+
+<span class="cm"># Say:</span>
+<span class="gr">"Your laptop is already running. Already using electricity.</span>
+<span class="gr"> Install NEURON, earn crypto while you sleep.</span>
+<span class="gr"> We use 1% of what's already there — nothing more."</span>
+
+<span class="cm"># Three sentences. One benefit. Zero jargon.</span>
+    </div>
+
+    <div class="divider"></div>
+
+    <h3>Trust Signals — Non-Negotiable Before Any Marketing</h3>
+    <ul class="checklist">
+      <li>GitHub repo public with full agent source code before first install</li>
+      <li>Independent security audit — even a free community audit from r/netsec</li>
+      <li>Privacy policy: one page, plain English, "we collect zero personal data"</li>
+      <li>Live public dashboard showing real node count, real requests served, real earnings paid</li>
+      <li>One-command uninstall that removes everything — prominently documented</li>
+      <li>Real name and face behind the project — anonymous projects don't get installed</li>
+    </ul>
+  </div>
+</section>
+
+<!-- SECTION 10: FUNDING -->
+<section>
+  <div class="container">
+    <div class="section-label">10 — Funding Path</div>
+    <h2>Zero-Cost Path — No Money Needed to Start</h2>
+
+    <div class="alert success">
+      <strong>Corrected from v2.0</strong>
+      The previous version assumed €1,500 from your own pocket. That was wrong. The real cost to reach 100 working nodes is €0. Every tool, every service, every resource needed for Phase 0 has a free tier or a free alternative. Spend nothing until grant money is in your account.
+    </div>
+
+    <div class="divider"></div>
+
+    <h3>Phase 0 — Absolute Zero Cost (Now → Month 3)</h3>
+    <p>Everything needed to build a working 100-node proof of concept is free. No exceptions.</p>
+
+    <div class="code">
+<span class="cm"># Real cost breakdown to reach 100 working nodes</span>
+
+Claude Code (build tool):          <span class="gr">FREE</span>
+Python + llama.cpp (inference):    <span class="gr">FREE</span>
+GitHub (code hosting):             <span class="gr">FREE</span>  <span class="cm"># public repo = free forever</span>
+Oracle Cloud Free Tier             <span class="gr">FREE</span>  <span class="cm"># 2 CPU, 24GB RAM, permanent free tier</span>
+  → coordinator server             <span class="gr">FREE</span>  <span class="cm"># enough for 100 nodes</span>
+  → public dashboard               <span class="gr">FREE</span>
+Your Pavilion (node 1):            <span class="gr">FREE</span>  <span class="cm"># already running</span>
+Your OptiPlex (node 2):            <span class="gr">FREE</span>  <span class="cm"># already running</span>
+Family/friends nodes 3–10:         <span class="gr">FREE</span>  <span class="cm"># they already have machines</span>
+                                   <span class="gr">──────</span>
+Total cost to 100 nodes:           <span class="gr">€0</span>
+
+<span class="cm"># Code signing, BV registration, legal — all deferred</span>
+<span class="cm"># until grant money arrives. Not needed for private beta.</span>
+    </div>
+
+    <div class="alert info">
+      <strong>Oracle Cloud Free Tier</strong>
+      Oracle's Always Free tier gives 2 AMD CPUs, 24GB RAM, 200GB storage — permanently, no credit card required after signup. This is enough to run the coordinator server for all of Phase 0. Sign up at cloud.oracle.com.
+    </div>
+
+    <div class="divider"></div>
+
+    <h3>Free Compute Credits — Get GPU/CPU Power Without Paying</h3>
+    <p>Several programs give free compute credits specifically for distributed AI projects. Apply to these in parallel with building.</p>
+
+    <table>
+      <tr>
+        <th>Program</th>
+        <th>What You Get</th>
+        <th>How to Apply</th>
+      </tr>
+      <tr>
+        <td><strong>Prime Intellect Compute Grants</strong></td>
+        <td style="color:var(--green);">$500–$100K compute credits</td>
+        <td>GitHub application — describe your distributed compute project</td>
+      </tr>
+      <tr>
+        <td><strong>Oracle for Startups</strong></td>
+        <td style="color:var(--green);">$500 free credits</td>
+        <td>Online form — no revenue required</td>
+      </tr>
+      <tr>
+        <td><strong>Google for Startups</strong></td>
+        <td style="color:var(--green);">$2,000 GCP credits</td>
+        <td>Online form — open source projects eligible</td>
+      </tr>
+      <tr>
+        <td><strong>Cloudflare Workers Free</strong></td>
+        <td style="color:var(--green);">100K requests/day free</td>
+        <td>Sign up — no application, instant</td>
+      </tr>
+      <tr>
+        <td><strong>GitHub Student / Open Source</strong></td>
+        <td style="color:var(--green);">Free Actions minutes, packages</td>
+        <td>Verify open source repo</td>
+      </tr>
+    </table>
+
+    <div class="divider"></div>
+
+    <h3>Phase 1 — Apply for Grants While Building (Month 2–6)</h3>
+    <p>You apply while the PoC is being built. By the time grants are reviewed (~2 months), you have a demo ready. Working code makes the application far stronger than an idea alone.</p>
+
+    <div class="alert danger">
+      <strong>NLnet Status — Important</strong>
+      NLnet's regular open call is temporarily paused until after summer 2026 while they transition programs. This is actually good timing — use the pause to build your demo, then apply the moment the call reopens. A working 50-node demo beats any pitch deck.
+    </div>
+
+    <table>
+      <tr>
+        <th>Grant</th>
+        <th>Amount</th>
+        <th>Apply When</th>
+        <th>Cost to Apply</th>
+      </tr>
+      <tr>
+        <td><strong>NLnet / NGI Zero</strong></td>
+        <td style="color:var(--green);">€5K–€50K</td>
+        <td>When call reopens post-summer 2026</td>
+        <td style="color:var(--green);">€0 — 6-question form</td>
+      </tr>
+      <tr>
+        <td><strong>SIDN Fund (Dutch internet)</strong></td>
+        <td style="color:var(--green);">€25K–€125K</td>
+        <td>Now — rolling deadline</td>
+        <td style="color:var(--green);">€0 — online form</td>
+      </tr>
+      <tr>
+        <td><strong>Ethereum Foundation ESP</strong></td>
+        <td style="color:var(--green);">$10K–$250K</td>
+        <td>Month 2 — once GitHub is live</td>
+        <td style="color:var(--green);">€0 — online form</td>
+      </tr>
+      <tr>
+        <td><strong>Gitcoin Grants Round</strong></td>
+        <td style="color:var(--accent);">Community funded</td>
+        <td>Next round opens — check grants.gitcoin.co</td>
+        <td style="color:var(--green);">€0 — create project profile</td>
+      </tr>
+      <tr>
+        <td><strong>Startup in Residence Rotterdam</strong></td>
+        <td style="color:var(--green);">€25K + free office space</td>
+        <td>Annual intake — next cycle</td>
+        <td style="color:var(--green);">€0 — application form</td>
+      </tr>
+      <tr>
+        <td><strong>Bittensor Bitstarter</strong></td>
+        <td style="color:var(--accent);">TAO tokens</td>
+        <td>When launching subnet</td>
+        <td style="color:var(--green);">€0 — community pitch</td>
+      </tr>
+    </table>
+
+    <div class="alert success" style="margin-top: 24px;">
+      <strong>Grant Application Rule</strong>
+      Every grant listed above costs €0 to apply. Apply to all of them simultaneously. Most take under 2 hours to complete. Even a 20% success rate across 6 applications gives you funding. Rejection costs you nothing.
+    </div>
+
+    <div class="divider"></div>
+
+    <h3>Phase 2 — First Money In (Month 4–8)</h3>
+    <p>The moment any grant lands — even €5K — use it in strict priority order. Nothing gets spent before legal and security. Nothing gets spent on branding or marketing until the network actually works.</p>
+
+    <div class="code">
+<span class="cm"># First €5K–€10K received — spending order</span>
+
+Priority 1:  <span class="gr">BV registration Netherlands</span>         ~€400
+             <span class="cm"># Must exist before any public token activity</span>
+
+Priority 2:  <span class="gr">Code signing certificate</span>               ~€300/yr
+             <span class="cm"># So antivirus doesn't flag the agent</span>
+
+Priority 3:  <span class="gr">Legal consultation (token structure)</span>    ~€500
+             <span class="cm"># One session with Dutch crypto lawyer — classify NRN correctly</span>
+
+Priority 4:  <span class="gr">Better VPS (if Oracle free tier limits hit)</span>  ~€20/mo
+             <span class="cm"># Only if coordinator is struggling under load</span>
+
+Priority 5:  <span class="gr">Everything else</span>
+             <span class="cm"># Domain, design, marketing — last, not first</span>
+
+<span class="wn">Never spend on:</span>
+  - Branding before product works
+  - Marketing before 100 real nodes
+  - Token launch before legal structure confirmed
+    </div>
+
+    <div class="divider"></div>
+
+    <h3>Phase 3 — Investor Conversations (Month 9+)</h3>
+    <p>Only after: working agent, 1,000+ real nodes, real earnings paid, grant money received. Before that — no investor will take you seriously anyway, and you don't need them.</p>
+
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-icon">🌍</div>
+        <h3>DePIN VCs</h3>
+        <p>Multicoin Capital, Borderless Capital, Escape Velocity — all invested in io.net, Render, Akash. They know the category. Target: €500K–€2M pre-seed.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">🇮🇳</div>
+        <h3>Indian Angels</h3>
+        <p>iSPIRT, LetsVenture, 100X.VC — your India connection is real leverage here. India cluster is your second largest market.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">🇳🇱</div>
+        <h3>Dutch Deep Tech</h3>
+        <p>Icos Capital, Inkef Capital, Velocity Capital. Rotterdam founder with EU grant already received is a strong signal to Dutch investors.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">🤝</div>
+        <h3>Strategic Acquirer</h3>
+        <p>io.net or Bittensor buying your agent technology is the highest-probability exit for a solo founder. 1,000 nodes is enough to start that conversation.</p>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <h3>Full Financial Timeline — Revised</h3>
+    <div class="code">
+<span class="cm"># Zero to funded — realistic month by month</span>
+
+<span class="gr">Now → Month 3:</span>
+  Spend:    <span class="ac">€0</span>
+  Build:    PoC on Pavilion + OptiPlex
+  Host:     Oracle Cloud free tier
+  Apply:    SIDN Fund + Ethereum Foundation ESP
+
+<span class="gr">Month 3 → Month 6:</span>
+  Spend:    <span class="ac">€0</span> (still waiting on grants)
+  Build:    Agent installer, 50 beta nodes
+  Apply:    NLnet when call reopens, Gitcoin round
+  Demo:     Working 50-node network for grant applications
+
+<span class="gr">Month 6 → Month 9:</span>
+  Receive:  <span class="gr">€5K–€50K grant</span> (SIDN or NLnet most likely first)
+  Spend:    BV registration + code signing + legal consult (~€1,200)
+  Build:    Public launch, referral system, live dashboard
+  Scale:    100 → 1,000 nodes
+
+<span class="gr">Month 9 → Month 15:</span>
+  Receive:  <span class="gr">€50K–€500K</span> (EIC or angel if 1K nodes achieved)
+  Spend:    First hire (developer), scale infrastructure
+  Scale:    1,000 → 10,000 nodes
+  Launch:   Token on Bittensor subnet
+
+<span class="gr">Month 15 → Month 24:</span>
+  Revenue:  <span class="gr">Protocol fees from real inference requests</span>
+  Scale:    10,000 → 100,000 nodes
+  Raise:    Series A only if needed
+
+<span class="wn">The rule: never spend your own money.</span>
+<span class="wn">Never quit Labomed until grant money is confirmed.</span>
+<span class="wn">Build nights and weekends until then.</span>
+    </div>
+  </div>
+</section>
+
+<!-- SECTION 11: COMPETITOR COMPARISON -->
+<section>
+  <div class="container">
+    <div class="section-label">11 — Competitive Reality</div>
+    <h2>Where You Stand vs The Field</h2>
+
+    <table>
+      <tr>
+        <th>Project</th>
+        <th>Funding</th>
+        <th>Status</th>
+        <th>Consumer CPUs</th>
+        <th>1-Click Install</th>
+        <th>Green Narrative</th>
+        <th>Your Edge</th>
+      </tr>
+      <tr>
+        <td><strong>Bittensor</strong></td>
+        <td>$3.5B mkt cap</td>
+        <td style="color:var(--green);">Live</td>
+        <td style="color:var(--warn);">❌ GPU only</td>
+        <td style="color:var(--warn);">❌ Complex setup</td>
+        <td style="color:var(--warn);">❌ None</td>
+        <td style="color:var(--green);">All three gaps</td>
+      </tr>
+      <tr>
+        <td><strong>Gensyn</strong></td>
+        <td>$80M raised</td>
+        <td style="color:var(--accent);">Just launched</td>
+        <td style="color:var(--accent);">Partial</td>
+        <td style="color:var(--warn);">❌ Technical</td>
+        <td style="color:var(--warn);">❌ None</td>
+        <td style="color:var(--green);">UX + narrative</td>
+      </tr>
+      <tr>
+        <td><strong>io.net</strong></td>
+        <td>Well funded</td>
+        <td style="color:var(--green);">Live — 80K CPUs</td>
+        <td style="color:var(--green);">✅ Yes</td>
+        <td style="color:var(--warn);">❌ 12hr setup</td>
+        <td style="color:var(--warn);">❌ None</td>
+        <td style="color:var(--green);">Frictionless + green</td>
+      </tr>
+      <tr>
+        <td><strong>Petals</strong></td>
+        <td>Academic</td>
+        <td style="color:var(--muted);">Stagnant</td>
+        <td style="color:var(--accent);">Partial</td>
+        <td style="color:var(--warn);">❌ Developer only</td>
+        <td style="color:var(--warn);">❌ None</td>
+        <td style="color:var(--green);">Incentive + UX</td>
+      </tr>
+      <tr>
+        <td><strong>Render Network</strong></td>
+        <td>$3B mkt cap</td>
+        <td style="color:var(--green);">Live</td>
+        <td style="color:var(--warn);">❌ GPU only</td>
+        <td style="color:var(--warn);">❌ Complex</td>
+        <td style="color:var(--warn);">❌ None</td>
+        <td style="color:var(--green);">Full differentiation</td>
+      </tr>
+      <tr>
+        <td><strong style="color:var(--accent);">NEURON</strong></td>
+        <td style="color:var(--muted);">€0 today</td>
+        <td style="color:var(--muted);">Not built yet</td>
+        <td style="color:var(--green);">✅ Core focus</td>
+        <td style="color:var(--green);">✅ Core focus</td>
+        <td style="color:var(--green);">✅ Core story</td>
+        <td style="color:var(--accent);">The gap in market</td>
+      </tr>
+    </table>
+
+    <div class="alert success" style="margin-top:24px;">
+      <strong>The Conclusion</strong>
+      No funded project has combined all three: consumer CPUs + frictionless install + green AI narrative. That three-way gap is real and it is yours to fill. The question is only whether you can get there before one of the funded players pivots to fill it themselves. Speed matters.
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p><strong>NEURON NETWORK</strong> — Project Blueprint v3.0</p>
+    <p style="margin-top:8px; color: var(--muted);">Updated: competitor research + zero-cost funding path. No personal money required.</p>
+    <p style="margin-top:16px;">Two machines. One model. One working inference. Zero euros spent.<br>That is the entire Week 1 plan.</p>
+  </div>
+</footer>
+
+</body>
+</html>

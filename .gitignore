@@ -1,0 +1,34 @@
+# --- Python virtualenv (multi-GB — never commit) ---
+.venv/
+venv/
+env/
+
+# --- Byte-compiled / cache ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# --- Secrets / environment ---
+.env
+.env.*
+*.env
+
+# --- Model weights & caches (keep anything >100MB out of git) ---
+*.safetensors
+*.gguf
+*.bin
+*.pt
+*.pth
+*.onnx
+models--*/
+model_cache/
+hf_cache/
+**/huggingface/
+.cache/
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
