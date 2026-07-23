@@ -27,6 +27,13 @@ hf_cache/
 **/huggingface/
 .cache/
 
+# --- coordinator runtime state / secrets (never commit) ---
+# SQLite DB holds real node auth tokens — must never be pushed
+*.db
+*.db-wal
+*.db-shm
+coordinator/node_tokens.json
+
 # --- OS / editor cruft ---
 .DS_Store
 Thumbs.db

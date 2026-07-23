@@ -40,6 +40,8 @@ Files in `C:\Users\optin\neuron\`:
 - `selftest.py` — proves the split is bit-exact vs. the full model, and that the
   KV cache produces identical tokens to brute-force generation.
 - `selftest_shard.py` — same checks, but for the sharded (partial-load) path.
+- `coordinator/` — the network brain (S6): FastAPI + SQLite registry, health,
+  routing, and the NRN ledger. See `coordinator/README.md`.
 
 ---
 
@@ -257,6 +259,103 @@ and can't absorb them — hence 9/9/10, not fewer on node_a); and **more concurr
 
 ---
 
+## Session 6 (2026-07-24) — the coordinator (network brain)
+
+**Goal:** build the NEURON coordinator — a FastAPI + SQLite service for node
+registry, health-checking, request routing, and an NRN ledger — so nodes stop
+connecting by hardcoded address and instead ask the coordinator for the chain.
+
+**What was built** (new `coordinator/` package; deps: `fastapi`, `uvicorn`):
+- `main.py` — FastAPI app: `/node/register|list|{id}|{id}/ping`, `/infer`,
+  `/infer/{id}/complete`, `/ledger/{id}`, `/status`, `/dashboard` (auto-refresh
+  HTML), token auth, and a 60 s background health sweep that logs offline nodes.
+- `models.py` — SQLite (nodes / ledger / requests), no ORM; status computed from
+  `last_seen` so it's accurate between sweeps.
+- `router.py` — assemble a contiguous 0..27 chain from online nodes; report gaps.
+- `ledger.py` — NRN split. `config.py` — settings. `register_nodes.py` — register
+  the 3 nodes + a liveness-probing heartbeat. `README.md`.
+- `node_a.py` gained **`--coordinator URL`**: it asks `/infer` for the chain, runs
+  it, and POSTs `/complete` so NRN is credited. `--host-c/--host-b` still work as a
+  direct fallback. (No changes to `common.py`, `node_b.py`, `node_c.py`.)
+
+**Economics reconciliation.** The spec said both "a node gets layers/28 of 1.0"
+*and* "coordinator keeps 10% always" — which conflict. The `/status` example
+resolves it (47 requests → 42.3 NRN distributed = 47 × 0.9): the **10% fee comes
+off the top**, and nodes split the remaining **0.9 by layer share** (`0.9·L/28`).
+
+**Health for unmodified node servers.** Offline detection needs a liveness signal,
+but the brief said don't modify `node_b.py`/`node_c.py`. So `register_nodes.py`
+runs a **liveness-probing heartbeat**: it checks whether each server node's port is
+really listening and pings the coordinator on its behalf (node_a, the driver, has
+no server port so it's always pinged). Kill a node's server → port down → pings
+stop → offline after 90 s. (A decentralised build would have each node self-ping.)
+
+**Test results — all 7 steps pass:**
+
+| # | test | result |
+|---|------|--------|
+| 1 | start coordinator | ✓ up on `:8000`, SQLite auto-created |
+| 2 | register 3 nodes | ✓ node_a 0–9, node_c 10–18, node_b 19–27 |
+| 3 | `GET /status` | ✓ 3/3 online, 28 layers covered, healthy |
+| 4 | `POST /infer` | ✓ returns ordered `a→c→b` chain + `request_id` |
+| 5 | `node_a --coordinator` inference | ✓ correct Rayleigh answer, completion reported |
+| 6 | `GET /ledger` | ✓ a=0.3214, c=0.2893, b=0.2893, fee=0.10, distributed 0.9 |
+| 7 | node offline → routing fails | ✓ node_c offline after 90 s (logged), `/infer` → **503 "incomplete chain - missing layers 10-18"** |
+| — | security | ✓ register w/o secret → 401; ping wrong token → 401; correct token → 200 |
+
+> Pavilion (node_c) was powered off this session, so node_c ran **locally on
+> Windows (port 51000)** as a host-agnostic stand-in — the coordinator doesn't care
+> which machine hosts a layer range. The offline test was therefore shown on node_c
+> ("missing 10-18") rather than node_b ("missing 19-27"); identical mechanism.
+> Tomorrow, point node_c back at the Pavilion (`register_nodes.py` defaults to it).
+
+---
+
+## Session 7 (2026-07-24) — coordinator to an always-on host + public on GitHub
+
+**Goal:** move the coordinator off the laptop onto an always-on host, and publish the
+whole project to GitHub.
+
+### Part 1 — deploy the coordinator (OptiPlex, `:8001`)
+
+Oracle Cloud wasn't set up, so per the brief the **always-on OptiPlex** hosts the
+coordinator (it already runs node_b, so a separate port 8001 keeps them apart).
+- `scp` the `coordinator/` package (`.py` + README only — **not** the local `neuron.db`
+  or `node_tokens.json`) to `~/neuron-coordinator/coordinator/`; installed `fastapi` +
+  `uvicorn` into the OptiPlex's existing `~/neuron/.venv`.
+- `uvicorn coordinator.main:app --host 0.0.0.0 --port 8001`; `sudo ufw allow in on
+  tailscale0 to any port 8001`. Reachable from Windows: `GET /status` → 200.
+- `register_nodes.py` default coordinator URL updated to `http://100.114.189.46:8001`.
+
+**Full flow verified through the cloud coordinator** (Pavilion still off → node_c ran
+locally on Windows `:51000` again): 3/3 online + healthy; `node_a --coordinator
+http://100.114.189.46:8001` produced the correct answer; ledger credited a=0.3214 /
+c=0.2893 / b=0.2893, fee 0.10, distributed 0.9; dashboard renders HEALTHY. Because the
+host is always on, the network stays reachable without the laptop.
+
+### Part 2 — public on GitHub
+
+- **README** rewritten to stand alone for a stranger: what NEURON is, an ASCII
+  architecture diagram (User → Coordinator → [node_a → node_c → node_b] → Coordinator →
+  User), scaling table, **how to run a node**, **how to run the coordinator**, dashboard
+  description, **what hardware you need**, **how to earn NRN** (1.0/req, 10% fee, 0.9 by
+  layer share), repo layout, status.
+- `.gitignore` hardened: excludes `*.db` (+ `-wal/-shm`) and `node_tokens.json` so the
+  token-bearing SQLite is never pushed, alongside `.venv/`, `__pycache__/`,
+  `*.safetensors`, `models--*/`.
+- Branch renamed `master → main`; committed as **v0.2** and pushed.
+- **Public repo: https://github.com/raman011sharma-code/neuron**
+
+Trap: probing the repo URL with `git ls-remote` triggered **Git Credential Manager's**
+GitHub OAuth sign-in (a browser popup) — expected first-push behaviour on Windows;
+authorising GCM stores the credential so `git push` works non-interactively after.
+
+### Part 3 — stranger check
+Read the README cold against the five questions (what is it / run a node / run the
+coordinator / hardware / earn NRN) — all answered; no fixes needed.
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load
@@ -280,6 +379,22 @@ balances this trio).
 ```bash
 C:\Users\optin\neuron\.venv\Scripts\python.exe C:\Users\optin\neuron\selftest_shard.py
 ```
+
+**4. Via the coordinator (S6/S7).** The coordinator runs on the always-on OptiPlex
+(`:8001`). Register the nodes, then let node_a discover the chain itself.
+```bash
+ssh homeadmin@100.114.189.46 "cd ~/neuron-coordinator && ~/neuron/.venv/bin/python -m uvicorn coordinator.main:app --host 0.0.0.0 --port 8001"
+```
+```bash
+C:\Users\optin\neuron\.venv\Scripts\python.exe coordinator\register_nodes.py
+```
+```bash
+C:\Users\optin\neuron\.venv\Scripts\python.exe node_a.py --coordinator http://100.114.189.46:8001 --prompt "Why is the sky blue"
+```
+Dashboard at http://100.114.189.46:8001/dashboard. (When the Pavilion is off, run
+node_c locally: `node_c.py --port 51000` + `register_nodes.py --node-c-host 127.0.0.1
+--node-c-port 51000`. To run the coordinator locally instead, use `python -m uvicorn
+coordinator.main:app --port 8000`.)
 
 **Stop the servers** (self-safe pattern — no literal script name in the kill):
 ```bash
