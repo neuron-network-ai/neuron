@@ -466,6 +466,6 @@ Build the agent. Get the first stranger. Everything else follows.
 
 ---
 
-*Last updated: Session 9 complete. Session 10 active.*
+*Last updated: Session 11 complete. Session 12 active.*
 *Founder: Raman Kumar Sharma, Rotterdam, Netherlands*
 *Contact: via GitHub*

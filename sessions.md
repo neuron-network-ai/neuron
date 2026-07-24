@@ -485,6 +485,157 @@ no x86-specific code):**
 
 ---
 
+## Session 10 (2026-07-24) — chat UI (talk to the network in a browser)
+
+**Goal:** a web page where anyone types a prompt and gets a streamed answer from
+the node network — no local model on the user's side.
+
+**Built (`ui/`, nothing in common/node_*/coordinator modified):**
+- `ui/app.py` — FastAPI server that **is** the node_a driver: loads the
+  embed+layers 0..S1-1+lm_head shard once, and per prompt asks the coordinator
+  `/infer` for a live chain, runs the autoregressive loop, and **streams each token
+  over SSE**. Reuses `node_a.coord_get_chain` / `coord_complete` and `common`'s
+  stage primitives, so it credits NRN via `/infer/{id}/complete` exactly like
+  node_a.py. Endpoints: `GET /` (page), `GET /network` (live node count/health,
+  fetched from the coordinator server-side so the browser never talks to it),
+  `POST /chat` (SSE frames: `meta` → `token`* → `done`, or `error`).
+- `ui/static/chat.html` — clean single-file chat (no external assets): streams
+  tokens into the bubble; header shows **"Powered by N nodes worldwide"** + a
+  health dot; a banner warns when the chain is incomplete; each answer shows
+  **Cost: 1.0 NRN** + tokens + tok/s. Light/dark aware.
+
+**Design:** the driver holds the model, so ui/app.py must run on the node_a machine
+(this Windows PC). SSE (not websockets) — a plain sync generator yielded through
+StreamingResponse (Starlette runs it in a threadpool); node_a's own compute is
+serialised with a lock. Incremental decode = decode the growing id list each step
+and emit the new text suffix (robust across BPE merges). Env overrides:
+`NEURON_COORDINATOR`, `NEURON_S1`, `NEURON_MAX_TOKENS`.
+
+**Verified (against the LIVE coordinator on OptiPlex :8001):**
+
+| # | check | result |
+|---|-------|--------|
+| 1 | `GET /` | serves chat.html |
+| 2 | `GET /network` | live: 2 nodes online, 19/28 layers, healthy=false; lists node_a+node_b |
+| 3 | `POST /chat` (degraded) | clean SSE `error`: "coordinator /infer 503: incomplete chain - missing layers 10-18" |
+| 4 | frontend (in-browser) | header "Powered by 2 nodes worldwide", red dot, degraded banner "19/28 layers", NRN hint all rendered |
+
+**LIVE DEMO — success metric MET (Pavilion reconnected same session):** the spec
+wants a *streamed response from the 3-node network*, and it now works end-to-end.
+Restored node_c (`node_c.py --port 50999` on the Pavilion, killed the two stale
+Windows heartbeats, re-registered the trio) → network healthy, 3 nodes, 28/28 layers.
+Streamed real answers through the Chat UI:
+- "Why is the sky blue? Answer in two sentences." → correct 35-token answer arriving
+  token-by-token (meta: 3 nodes → 35 `token` frames → done). First request 35 s @
+  1.0 tok/s — node_c + node_b **cold-started their shards** on first connect.
+- Warm: "Name three primary colors." → "red, blue, and yellow." (12 tok, 9.5 s). Short
+  answers look slow because prefill + per-request chain setup amortise over few tokens.
+NRN credited via `/complete`: network 2→4 requests served, 1.8→3.6 NRN distributed;
+**node_c ledger 0 → 1.157 NRN** (served 4). Coordinator/node/common code all unchanged,
+so selftest_shard.py is unaffected. Note: the Pavilion suspends/roams off Tailscale
+when idle — keep it awake for a persistent public node.
+
+---
+
+## Session 11 (2026-07-24) — OpenAI-compatible API (switch by changing one URL)
+
+**Goal:** any app built on OpenAI's API works against NEURON by changing only
+`base_url`. Zero code changes for the developer.
+
+**Refactor first (DRY):** extracted the node_a driver loop into a shared
+`neuron_driver.py` — a `DRIVER` singleton that loads the shard once and exposes
+`stream(input_ids, max_new, coordinator, router_prompt)` yielding `meta`/`token`/
+`done`/`error` events. Rewired `ui/app.py` (Session 10) to use it; chat UI behavior
+unchanged (regression: /chat still streams meta→token→done). Nothing in common.py /
+node_*.py touched, so selftest_shard.py is unaffected.
+
+**Built `api/openai_compat.py`** (also mounted into ui.app at the same /v1 paths, so
+one process + one model load serves the chat page AND the API):
+- `GET /v1/models` — lists `Qwen/Qwen2.5-1.5B-Instruct` + alias `neuron`.
+- `POST /v1/chat/completions` — OpenAI chat shape; `stream` supported (role chunk →
+  content chunks → finish chunk → `data: [DONE]`), `stream_options.include_usage`
+  honored. Applies the chat template to the messages array.
+- `POST /v1/completions` — legacy text completion; `stream` supported; raw tokenize.
+- Auth: `Authorization: Bearer <NRN wallet>` (required; OpenAI-shaped 401 if absent).
+  Each request = 1.0 NRN, reported in `usage.nrn_cost` + `X-NRN-Cost`/`X-NRN-Wallet`
+  headers; credits nodes via the coordinator `/complete` (same path as node_a).
+- `GET /docs` (standalone) / `/api-docs` (ui) — self-contained usage page (curl +
+  Python SDK examples). Pydantic bodies `extra="ignore"` so real payloads never 422;
+  greedy generation, so temperature/top_p are accepted and ignored.
+
+**Verified — success metric MET (`pip install openai`, openai 2.48.0 in the venv):**
+
+| # | check | result |
+|---|-------|--------|
+| 1 | real OpenAI SDK, base_url only | `models.list()`, `chat.completions.create()`, and `stream=True` all work unchanged |
+| 2 | non-stream chat | correct "sky is blue" answer, finish=stop, usage 26+36=62 |
+| 3 | stream chat | "Red, Blue, Green" arrives token-by-token via the SDK |
+| 4 | legacy /v1/completions | "The capital of France is" → " Paris. ..." usage 5+8=13 |
+| 5 | auth | missing key → OpenAI-shaped 401 `invalid_api_key` |
+| 6 | standalone app | `uvicorn api.openai_compat:app` serves /v1/* + /docs (HTTP 200) |
+| 7 | Chat UI regression | /chat still streams after the driver refactor |
+
+**Honest limits:** generation is greedy (no sampling); `n>1`, logprobs, tool/function
+calling, and vision content are not implemented. The wallet is recorded and the cost
+reported, but a **per-wallet balance debit is not persisted** — that's coordinator-side
+economics (ties to S17 on-chain NRN). Quirk: this FastAPI version stores an included
+router as a nested `_IncludedRouter` (routes resolve at request time; they don't appear
+flattened in `app.routes` — introspection only, endpoints all respond).
+
+---
+
+## Session 12 (IN PROGRESS, 2026-07-24) — coordinator to the cloud (first-stranger groundwork)
+
+**Goal (S12):** first stranger node. Found the hard blocker first: the whole network assumed
+ONE Tailscale net (coordinator Tailscale-only; nodes dial each other's `tailscale_ip`), so no
+outside machine could join — not a bug, an architecture gap. See `PROBLEMS.md` [P10]/[P11].
+
+**Decision + done this session — coordinator moved to a free CLOUD VM** so the founder's personal
+OptiPlex/Pavilion are never the public front door:
+- Oracle **Always Free** VM, Amsterdam, **x86 `VM.Standard.E2.1.Micro`** (ARM A1.Flex was out of
+  capacity — chronic in AMS), Ubuntu 22.04, 1 GB RAM. Public IP **`150.230.22.250:8001`**.
+- Deployed `~/neuron/coordinator/` via a venv (fastapi/uvicorn/requests, **no torch**) as a
+  **systemd service** (auto-restart). **Strong `NEURON_REGISTER_SECRET`** (saved locally, gitignored
+  `.env.coordinator`). Opened 8001 in BOTH the VM **iptables** (Oracle Ubuntu REJECTs non-22) and the
+  Oracle VCN **security list** (two separate firewalls — a classic gotcha). New `coordinator/DEPLOY.md`
+  + `coordinator/requirements.txt`. `register_nodes.py` now reads the secret from env (was hardcoded).
+- **Migrated the live network onto it and PROVED inference end-to-end:** registered
+  node_a/node_c/node_b against the cloud coordinator (healthy, 28/28), ran a prompt via
+  `node_a.py --coordinator http://150.230.22.250:8001` → correct answer; NRN credited on the CLOUD
+  ledger (a 0.3214 / c 0.2893 / b 0.2893, fee 0.10). Nodes still use Tailscale for pipeline traffic;
+  only the coordinator moved. `/dashboard` is public at `http://150.230.22.250:8001/dashboard`.
+
+**Stranger-NAT relay — BUILT, PROVEN, DEPLOYED (this session).** New `relay.py` (public host) +
+`tunnel_client.py` (node), pure stdlib / ARM-safe / protocol-agnostic byte-splice → **zero changes to
+node_*/common**. A node makes only OUTBOUND connections to the relay (behind NAT); the relay exposes a
+public port and reverse-tunnels to it (a tiny self-hosted ngrok). Local selftest PASS (50 KB binary +
+8 concurrent, byte-exact). Deployed on the cloud VM as systemd `neuron-relay` (control 8010, data 8011,
+public 9000-9100). **LIVE PROOF PASSED:** opened `8010-9100` in the Oracle security list, ran
+`tunnel_client` on node_b (OptiPlex, outbound-only), and ran a real inference with the node_c→node_b hop
+forced through the relay (`node_a.py --host-b 150.230.22.250 --port-b 9002`) — over the **public
+internet, no Tailscale** for that hop → correct answer. That's the exact path a stranger's NAT'd machine
+uses. Test tunnel torn down after; node_b back to normal Tailscale.
+
+**Scaling plan captured in new `SCALING.md`** (prototype → worldwide: P2P + relay fabric, regional →
+DHT coordination, many-small-pipelines-not-one; Petals as the proven reference; rule: don't build the
+scale layer before the first stranger). The 1-VM coordinator+relay is a Phase-1 prototype (~100 relayed
+nodes ceiling), which is correct for now.
+
+**Relay onboarding AUTOMATED (this session).** Coordinator `/node/register` accepts `behind_nat` →
+auto-assigns a relay port from the pool (config `RELAY_*`) + stores the node at the relay endpoint +
+returns a `relay` block; `agent.py` auto-starts `tunnel_client` from it (via new
+`tunnel_client.run_tunnel()`, persisted in config for re-runs) → **a NAT'd node self-configures with
+zero manual steps**. Isolated test PASS (behind_nat → port 9000 → reachable via the cloud relay
+byte-exact using only the coordinator's response); redeployed to the cloud coordinator (DB persisted,
+3 nodes intact, `behind_nat` register live-verified).
+
+**Still pending for S12 (a real stranger):** an actual outside person installs the agent — plus the
+open-join model (registration still needs a shared secret; a real open network wants proof-of-compute /
+reputation, ROADMAP S16). Repo still PRIVATE. Model output quality (small 1.5B) still to discuss.
+Speed: int8 3.46× but naive breaks quality (`PROBLEMS.md` [P2]/[P9]).
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load
@@ -524,6 +675,22 @@ Dashboard at http://100.114.189.46:8001/dashboard. (When the Pavilion is off, ru
 node_c locally: `node_c.py --port 51000` + `register_nodes.py --node-c-host 127.0.0.1
 --node-c-port 51000`. To run the coordinator locally instead, use `python -m uvicorn
 coordinator.main:app --port 8000`.)
+
+**5. Chat UI (Session 10) — talk to the network in a browser.** Runs on the node_a
+machine (holds the driver shard). Needs a healthy chain (all 28 layers online).
+```bash
+C:\Users\optin\neuron\.venv\Scripts\python.exe -m uvicorn ui.app:app --host 0.0.0.0 --port 8080
+```
+Then open http://localhost:8080. `NEURON_COORDINATOR` env var points it at a
+different coordinator; defaults to the OptiPlex `:8001`.
+
+**6. OpenAI-compatible API (Session 11).** Already mounted into the Chat UI server
+above at `/v1/*` (usage docs at `/api-docs`), or run it standalone:
+```bash
+C:\Users\optin\neuron\.venv\Scripts\python.exe -m uvicorn api.openai_compat:app --host 0.0.0.0 --port 8081
+```
+Point any OpenAI SDK at `http://<node_a-host>:8081/v1` with your NRN wallet as the API
+key (`pip install openai`). Standalone usage docs at `/docs`.
 
 **Stop the servers** (self-safe pattern — no literal script name in the kill):
 ```bash
