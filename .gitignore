@@ -27,6 +27,12 @@ hf_cache/
 **/huggingface/
 .cache/
 
+# --- agent runtime state (never commit; config.json gets node_token after 1st run) ---
+agent/model_slice*/
+agent/*.log
+agent/config.test.json
+agent/config.bad.json
+
 # --- coordinator runtime state / secrets (never commit) ---
 # SQLite DB holds real node auth tokens — must never be pushed
 *.db

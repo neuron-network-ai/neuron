@@ -427,6 +427,64 @@ and writes a ready-to-load slice dir. (Manual mode: `--model-id --layer-start
 
 ---
 
+## Session 9 (2026-07-24) — the agent (turn any machine into a node)
+
+**Goal:** a background agent that auto-configures a machine into a NEURON node.
+Pushed v0.3 first (byte-range slice downloader).
+
+**Built (`agent/`, ARM-compatible — pure Python + psutil/requests/pystray/PIL/ctypes,
+no x86-specific code):**
+- `agent.py` — main loop: read config → register (sends cores/RAM/Tailscale IP) →
+  `GET /node/{id}/slice-info` → auto-download only its slice → start the server →
+  heartbeat every 30 s (gated by the resource guard) → log to `agent.log`.
+- `node_server.py` — **one generalized server for ANY layer range.** Loads the
+  downloaded *slice* (not the full model) and, from the incoming config, acts as a
+  MIDDLE relay (`host_b` present → node_c role) or LAST stage (`s2/n` → node_b role).
+  Reuses `common.py`; stays compatible with node_a.py's wire protocol.
+- `resource_guard.py` — only use TRULY idle capacity. Pauses if system CPU > 2%,
+  user active (Win `GetLastInputInfo` / Linux `xprintidle`, headless = always idle),
+  on battery, or < 500 MB free. "Pause" = stop heartbeating so the coordinator routes
+  elsewhere; in-flight requests finish.
+- `tray.py` — pystray/Pillow tray: green=active, grey=idle, yellow=downloading,
+  red=error; menu shows NRN balance, Pause/Resume, Open Dashboard, Quit.
+- `updater.py` — polls `GET /agent/version`; self-downloads + restarts if newer.
+- `install.py` / `uninstall.py` — one-command setup / clean removal (Windows HKCU
+  Run key or Linux systemd `--user`; deregisters + deletes slice + config on uninstall).
+- `config.json` — template. Coordinator gains `GET /agent/version` and `total_layers`
+  in slice-info. **No existing node/common scripts modified.**
+
+**Design decisions:**
+- Registration needs a layer range (auto-assignment is Session 14), so the agent's
+  config carries `layer_start/layer_end`; the installer sets them. Register-secret
+  defaults to `neuron-dev-secret` in code so the config template stays clean.
+- The resource guard gates the *heartbeat* (availability), not mid-request compute —
+  the honest, non-disruptive way to "pause" a pipeline node.
+
+**Tests — ALL 5 PASS:**
+
+| # | test | result |
+|---|------|--------|
+| 1 | fresh install | agent registered as node_c, auto-downloaded its 0.84 GB slice, served on :51000, heartbeat active; `install.py` writes correct config |
+| 2 | resource guard | correctly paused on a busy machine (`cpu 7%>2%, user active 3s`) |
+| 3 | coordinator unreachable | enters `error` state, retries every 60 s |
+| 4 | uninstall | deregistered node_c, stopped agent, deleted slice + config, printed lifetime NRN |
+| 5 | inference through agent | agent participated in the live chain; NRN **0.2893 → 0.5786** (served 1 → 2) |
+
+**Traps / honest limits:**
+- Single-file model (from S8): the agent downloads its slice by byte-range, ~2 min.
+- `uninstall.py` kills agent processes by cmdline match (`agent.agent`/`agent.py`);
+  if the agent shares a process group with the caller this can signal the caller
+  (cosmetic exit 15) — the cleanup still completes.
+- The **tray icon can't be visually verified in this headless session** (it builds
+  and imports cleanly); and I did **not** add auto-start to the real Windows machine
+  or run a permanent background service — install/uninstall were tested in a sandbox
+  and via a permissive test config.
+- After the uninstall test, **node_c is deregistered** — the live network is now
+  node_a + node_b only (DEGRADED). Restore by running a node_c (Pavilion when on, or
+  a local stand-in / the agent again).
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load

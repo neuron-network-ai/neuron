@@ -1,0 +1,11 @@
+{
+  "coordinator": "http://100.114.189.46:8001",
+  "node_id": null,
+  "node_token": null,
+  "layer_start": 10,
+  "layer_end": 18,
+  "slice_dir": "./model_slice/",
+  "max_cpu_pct": 2,
+  "idle_threshold_seconds": 60,
+  "log_level": "INFO"
+}

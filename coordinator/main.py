@@ -271,6 +271,14 @@ def dashboard():
 </body></html>"""
 
 
+# --------------------------------------------------------------------------- #
+# Agent auto-update (Session 9)
+# --------------------------------------------------------------------------- #
+@app.get("/agent/version")
+def agent_version():
+    return {"version": config.AGENT_VERSION}
+
+
 @app.get("/")
 def root():
     return {"service": "NEURON Coordinator", "docs": "/docs", "dashboard": "/dashboard"}

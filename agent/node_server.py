@@ -1,0 +1,127 @@
+"""
+agent/node_server.py — one generalized NEURON node server for ANY layer range.
+
+Loads this node's downloaded SLICE (not the full model) and serves whichever role
+the incoming config implies, staying compatible with node_a.py's existing wire
+protocol so it drops straight into the chain:
+  - MIDDLE relay  (config carries host_b/port_b): run my layers, forward the hidden
+    to the next hop, relay its result back  (the node_c role)
+  - LAST stage    (config carries s2/n only):     run my layers + final norm, return
+    the normed hidden  (the node_b role)
+
+Reuses common.py (first/mid/last_stage, KV cache, TCP framing) and the slice
+loader — does NOT modify any existing node script. A per-machine compute lock
+serialises this node's own math (pipelining across concurrent requests).
+
+Usage (normally launched by agent.py):
+  python node_server.py --slice-dir ./model_slice --layer-start 10 --layer-end 18 --port 50999
+"""
+import argparse
+import os
+import socket
+import sys
+import threading
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root
+import common                                    # noqa: E402
+from slice_downloader import load_slice_model    # noqa: E402
+
+compute_lock = threading.Lock()
+
+
+class NodeServer:
+    def __init__(self, slice_dir, layer_start, layer_end, total_layers, paused_flag=None):
+        self.lo, self.hi, self.n = layer_start, layer_end, total_layers
+        self.paused = paused_flag if paused_flag is not None else threading.Event()  # set = paused
+        print(f"[node] loading slice from {slice_dir} (layers {layer_start}-{layer_end}) ...")
+        t0 = time.time()
+        self.model = load_slice_model(slice_dir)
+        print(f"[node] slice ready in {time.time()-t0:.1f}s | serving layers {layer_start}-{layer_end}")
+
+    def serve(self, conn, addr):
+        cache, past, role, s1, s2, bconn = None, 0, None, None, None, None
+        try:
+            while True:
+                msg = common.recv_msg(conn)
+                mtype = msg.get("type")
+
+                if mtype == "config":
+                    cache, past = common.new_cache(), 0
+                    if "host_b" in msg:                      # MIDDLE relay role
+                        role, s1, s2 = "middle", msg["s1"], msg["s2"]
+                        bconn = socket.create_connection((msg["host_b"], msg["port_b"]), timeout=30)
+                        common.send_msg(bconn, {"type": "config", "s2": s2, "n": msg.get("n", self.n)})
+                        back = common.recv_msg(bconn)
+                        assert back.get("ok"), f"next hop refused: {back}"
+                        common.send_msg(conn, {"ok": True, "layers": self.n, "s1": s1, "s2": s2})
+                    else:                                     # LAST stage role
+                        role, s2 = "last", msg["s2"]
+                        common.send_msg(conn, {"ok": True, "layers": msg.get("n", self.n), "s2": s2})
+
+                elif mtype == "act":
+                    hidden = msg["hidden"]
+                    q = hidden.shape[1]
+                    if role == "middle":
+                        with compute_lock:
+                            tc = time.time()
+                            h2 = common.mid_stage(self.model, s1, s2, hidden, cache, past)
+                            c_ms = (time.time() - tc) * 1000
+                        past += q
+                        common.send_msg(bconn, {"type": "act", "hidden": h2})
+                        resp = common.recv_msg(bconn)
+                        common.send_msg(conn, {"hidden": resp["hidden"], "c_compute_ms": c_ms,
+                                               "b_compute_ms": resp["b_compute_ms"]})
+                    else:  # last
+                        with compute_lock:
+                            tb = time.time()
+                            out = common.last_stage(self.model, s2, hidden, cache, past)
+                            b_ms = (time.time() - tb) * 1000
+                        past += q
+                        common.send_msg(conn, {"hidden": out, "b_compute_ms": b_ms})
+
+                elif mtype == "bye":
+                    if bconn:
+                        common.send_msg(bconn, {"type": "bye"})
+                    return
+        finally:
+            if bconn:
+                try:
+                    bconn.close()
+                except OSError:
+                    pass
+
+    def run(self, host, port):
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind((host, port))
+        srv.listen(16)
+        print(f"[node] listening on {host}:{port}  (Ctrl-C to stop)")
+        while True:
+            conn, addr = srv.accept()
+            threading.Thread(target=self._handle, args=(conn, addr), daemon=True).start()
+
+    def _handle(self, conn, addr):
+        try:
+            self.serve(conn, addr)
+        except (ConnectionError, EOFError) as e:
+            print(f"[node] conn {addr} ended: {e}")
+        finally:
+            conn.close()
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--slice-dir", required=True)
+    ap.add_argument("--layer-start", type=int, required=True)
+    ap.add_argument("--layer-end", type=int, required=True)
+    ap.add_argument("--total-layers", type=int, default=28)
+    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--port", type=int, default=50999)
+    args = ap.parse_args()
+    NodeServer(args.slice_dir, args.layer_start, args.layer_end, args.total_layers).run(
+        args.host, args.port)
+
+
+if __name__ == "__main__":
+    main()

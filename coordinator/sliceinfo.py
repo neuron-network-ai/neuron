@@ -63,6 +63,7 @@ def slice_info(model_id, layer_start, layer_end, total_layers, revision="main"):
         "model_id": model_id,
         "layer_start": layer_start,
         "layer_end": layer_end,
+        "total_layers": total_layers,
         "shards_needed": ["model.safetensors"],   # single-file model, sliced by byte-range
         "tensors_needed": ntensors,
         "tokenizer_needed": is_first,

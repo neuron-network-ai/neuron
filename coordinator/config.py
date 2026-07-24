@@ -34,3 +34,7 @@ TOKEN_BYTES = 24               # per-node auth token length (in bytes, hex-encod
 
 # Special ledger key that accumulates the coordinator's fee.
 COORDINATOR_LEDGER_ID = "__coordinator__"
+
+# --- agent auto-update (Session 9) ------------------------------------------ #
+# Bump this when a new agent is published; agents poll /agent/version and update.
+AGENT_VERSION = os.environ.get("NEURON_AGENT_VERSION", "0.3.0")
