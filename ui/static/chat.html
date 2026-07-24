@@ -80,7 +80,7 @@
       <textarea id="input" rows="1" placeholder="Type a message and press Enter…"></textarea>
       <button id="send">Send</button>
     </div>
-    <div class="foothint" id="hint">Each response costs 1.0 NRN, paid to the nodes that computed it.</div>
+    <div class="foothint" id="hint"><label style="cursor:pointer"><input type="checkbox" id="rag"> 🌐 Web search — answer with current info</label> &nbsp;·&nbsp; Each response costs 1.0 NRN.</div>
   </div>
 </footer>
 
@@ -140,6 +140,7 @@ async function send(){
   busy = true; $("#send").disabled = true;
   input.value = ""; input.style.height = "auto";
 
+  const useRag = $("#rag").checked;
   addMsg("user","you").textContent = prompt;
   const body = addMsg("bot","neuron");
   body.classList.add("cursor");
@@ -148,7 +149,7 @@ async function send(){
   try{
     const res = await fetch("/chat", {
       method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({prompt, max_tokens:128})
+      body: JSON.stringify({prompt, max_tokens:128, use_rag:useRag})
     });
     const reader = res.body.getReader();
     const dec = new TextDecoder();
@@ -167,6 +168,7 @@ async function send(){
         }
         const d = data ? JSON.parse(data) : {};
         if(event==="meta"){ meta = d; }
+        else if(event==="sources"){ renderSources(body, d); }
         else if(event==="token"){ gotToken = true; body.textContent += d.text; scroll(); }
         else if(event==="done"){ finishBot(body, meta, d); }
         else if(event==="error"){ showError(body, d.detail); }
@@ -179,6 +181,21 @@ async function send(){
     body.classList.remove("cursor");
     busy = false; $("#send").disabled = false; input.focus();
   }
+}
+
+function renderSources(body, d){
+  const el = document.createElement("div");
+  el.className = "meta";
+  if(!d.used || !(d.sources||[]).length){
+    el.textContent = "🌐 web search: no results — answering from the model only";
+  } else {
+    const links = d.sources.slice(0,4).map(s =>
+      "<a href='" + (s.href||"#") + "' target='_blank' rel='noopener' style='color:var(--brand)'>"
+      + (s.title||"source").replace(/</g,"&lt;").slice(0,48) + "</a>").join(" · ");
+    el.innerHTML = "🌐 grounded on: " + links;
+  }
+  body.parentElement.appendChild(el);
+  scroll();
 }
 
 function finishBot(body, meta, d){

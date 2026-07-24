@@ -36,6 +36,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 import common
+from coordinator import model_registry
 from neuron_driver import DRIVER
 
 COORDINATOR = os.environ.get("NEURON_COORDINATOR", "http://100.114.189.46:8001").rstrip("/")
@@ -121,10 +122,10 @@ def _want_usage(body) -> bool:
 @router.get("/v1/models")
 def list_models():
     now = int(time.time())
-    ids = [MODEL_ID, "neuron"]
-    return {"object": "list",
-            "data": [{"id": i, "object": "model", "created": now, "owned_by": "neuron"}
-                     for i in ids]}
+    data = [{"id": m["id"], "object": "model", "created": now, "owned_by": "neuron"}
+            for m in model_registry.list_models()]
+    data.append({"id": "neuron", "object": "model", "created": now, "owned_by": "neuron"})
+    return {"object": "list", "data": data}
 
 
 @router.get("/v1/models/{model_id:path}")

@@ -37,6 +37,7 @@ from pydantic import BaseModel
 
 from neuron_driver import DRIVER
 from api.openai_compat import router as openai_router, docs_html
+from rag import retriever as rag
 
 COORDINATOR = os.environ.get("NEURON_COORDINATOR", "http://100.114.189.46:8001").rstrip("/")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -57,6 +58,7 @@ app.include_router(openai_router)          # Session 11: /v1/* on the same serve
 class ChatBody(BaseModel):
     prompt: str
     max_tokens: int = 128
+    use_rag: bool = False       # Session 15: retrieve current web context first
 
 
 def sse(event: str, data: dict) -> str:
@@ -106,8 +108,12 @@ def network():
 # --------------------------------------------------------------------------- #
 # Chat — stream tokens produced by the node chain (SSE for the browser)
 # --------------------------------------------------------------------------- #
-def _drive(prompt: str, max_new: int):
-    input_ids = DRIVER.encode_chat([{"role": "user", "content": prompt}])
+def _drive(prompt: str, max_new: int, use_rag: bool = False):
+    content = prompt
+    if use_rag:
+        content, sources = rag.retrieve_and_augment(prompt)
+        yield sse("sources", {"sources": sources, "used": bool(sources)})
+    input_ids = DRIVER.encode_chat([{"role": "user", "content": content}])
     for ev in DRIVER.stream(input_ids, max_new, COORDINATOR, prompt):
         if ev["type"] == "meta":
             yield sse("meta", {"request_id": ev["request_id"], "nodes": ev["nodes"],
@@ -129,7 +135,7 @@ def chat(body: ChatBody):
             yield sse("error", {"detail": "empty prompt"})
         return StreamingResponse(_empty(), media_type="text/event-stream")
     return StreamingResponse(
-        _drive(prompt, body.max_tokens),
+        _drive(prompt, body.max_tokens, body.use_rag),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                  "Connection": "keep-alive"},

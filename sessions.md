@@ -672,6 +672,34 @@ dynamic re-balance-on-join (auto-reload) is the natural extension.
 
 ---
 
+## Session 15 (2026-07-25) — model registry + RAG (current info despite the cutoff)
+
+**Goal:** NEURON isn't locked to the model's training cutoff — retrieve current web context
+before inference; and track available models so more can be added.
+
+**Built:**
+- `rag/retriever.py` — before inference, DuckDuckGo web search (via `ddgs`, no API key) →
+  compact context → inject into the prompt. Fails **soft** (no internet/results → original
+  prompt, inference still runs). `retrieve_and_augment(prompt) -> (augmented, sources)`.
+- `coordinator/model_registry.py` — config-driven catalog (id, layers, description);
+  `list/get/resolve`; env `NEURON_EXTRA_MODELS` to add more. Coordinator **`GET /models`**;
+  API **`/v1/models` now registry-driven**.
+- Wired RAG into the Chat UI: a **🌐 Web search** toggle; the driver retrieves + augments when
+  on, streams a `sources` event, chat.html shows "grounded on: [links]". **node_*/common
+  UNCHANGED.** New dep: `ddgs`.
+
+**Verified — success metric MET:** with web search ON, *"What are the latest AI model releases?"*
+→ grounded on real July-2026 sources → answered *"…include Claude Opus 5 by Anthropic, released
+July 24 2026…"* — info the 1.5B model (≈2023 cutoff) **could not know** without retrieval. Retriever
++ registry tested standalone; `/models` + `/v1/models` live (cloud coordinator redeployed, 3 nodes
+intact). RAG directly helps the small model's weak/incomplete replies by grounding it.
+
+**Scope note:** the model registry is the catalog + selection surface; nodes actually SERVING
+multiple models (per-request routing, extra RAM) is the extension — the network still serves the one
+default model. RAG uses search snippets (fast); full page-fetch + reranking is a later upgrade.
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load

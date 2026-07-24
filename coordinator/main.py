@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from coordinator import balancer, config, ledger, models, router
+from coordinator import balancer, config, ledger, model_registry, models, router
 
 
 # --------------------------------------------------------------------------- #
@@ -338,6 +338,12 @@ def dashboard():
 @app.get("/agent/version")
 def agent_version():
     return {"version": config.AGENT_VERSION}
+
+
+@app.get("/models")
+def models_catalog():
+    """Models the network can serve (Session 15). Today: the one default model."""
+    return {"default": model_registry.DEFAULT_MODEL, "models": model_registry.list_models()}
 
 
 @app.get("/")

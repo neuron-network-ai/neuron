@@ -466,6 +466,6 @@ Build the agent. Get the first stranger. Everything else follows.
 
 ---
 
-*Last updated: Session 14 (auto-balance) complete. S12 infra done, first stranger still pending; S13 (Android) skipped for now. Next: S13 or S15.*
+*Last updated: Session 15 (model registry + RAG) complete. S12 infra done (first stranger pending); S13 (Android) DEFERRED — needs the llama.cpp engine (consumer-app plan in SCALING.md, tokenomics in TOKENOMICS.md). Next: S16 (security / proof-of-compute).*
 *Founder: Raman Kumar Sharma, Rotterdam, Netherlands*
 *Contact: via GitHub*
