@@ -51,3 +51,12 @@ RELAY_CONTROL_PORT = int(os.environ.get("NEURON_RELAY_CONTROL_PORT", "8010"))
 RELAY_DATA_PORT = int(os.environ.get("NEURON_RELAY_DATA_PORT", "8011"))
 RELAY_PORT_MIN = int(os.environ.get("NEURON_RELAY_PORT_MIN", "9000"))
 RELAY_PORT_MAX = int(os.environ.get("NEURON_RELAY_PORT_MAX", "9100"))
+
+# --- security (Session 16) -------------------------------------------------- #
+# Proof-of-compute reputation: a node flagged once it has enough challenge samples and
+# its pass-rate falls below the threshold -> excluded from routing, earns nothing.
+REPUTATION_MIN_SAMPLES = int(os.environ.get("NEURON_REP_MIN_SAMPLES", "3"))
+REPUTATION_THRESHOLD = float(os.environ.get("NEURON_REP_THRESHOLD", "0.6"))
+# Basic per-IP rate limit (rough DDoS guard): N requests per window seconds.
+RATE_LIMIT_MAX = int(os.environ.get("NEURON_RATE_LIMIT", "120"))
+RATE_LIMIT_WINDOW_S = int(os.environ.get("NEURON_RATE_WINDOW", "60"))

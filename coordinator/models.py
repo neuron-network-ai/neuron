@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS nodes (
     ram_gb        REAL,
     ms_per_layer  REAL,
     head_ms       REAL,
+    challenges_passed INTEGER NOT NULL DEFAULT 0,
+    challenges_failed INTEGER NOT NULL DEFAULT 0,
     node_token    TEXT NOT NULL,
     status        TEXT NOT NULL DEFAULT 'online',
     last_seen     REAL NOT NULL,
@@ -64,11 +66,14 @@ def _db():
 def init_db():
     with _db() as c:
         c.executescript(SCHEMA)
-        # migration (S14): add speed columns to a pre-existing nodes table
+        # migration: add columns to a pre-existing nodes table
         cols = {r["name"] for r in c.execute("PRAGMA table_info(nodes)").fetchall()}
-        for col in ("ms_per_layer", "head_ms"):
+        for col in ("ms_per_layer", "head_ms"):            # S14
             if col not in cols:
                 c.execute(f"ALTER TABLE nodes ADD COLUMN {col} REAL")
+        for col in ("challenges_passed", "challenges_failed"):   # S16
+            if col not in cols:
+                c.execute(f"ALTER TABLE nodes ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
 
 
 def _status(last_seen, now=None):
@@ -80,7 +85,21 @@ def _node_dict(row, now=None):
     d = dict(row)
     d["status"] = _status(d["last_seen"], now)
     d["assigned_layers"] = [d["layer_start"], d["layer_end"]]
+    # proof-of-compute reputation (Session 16)
+    p, f = d.get("challenges_passed") or 0, d.get("challenges_failed") or 0
+    total = p + f
+    d["reputation"] = round(p / total, 3) if total else None
+    d["flagged"] = (total >= config.REPUTATION_MIN_SAMPLES
+                    and (p / total) < config.REPUTATION_THRESHOLD)
     return d
+
+
+def record_attestation(node_id, passed):
+    """Log one proof-of-compute challenge result for a node. Returns True if it exists."""
+    col = "challenges_passed" if passed else "challenges_failed"
+    with _db() as c:
+        cur = c.execute(f"UPDATE nodes SET {col} = {col} + 1 WHERE node_id=?", (node_id,))
+        return cur.rowcount > 0
 
 
 # --------------------------------------------------------------------------- #

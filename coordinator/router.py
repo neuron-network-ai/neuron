@@ -13,7 +13,8 @@ def build_chain(now=None):
               0..TOTAL_LAYERS-1 (usable only if `missing` is empty).
     missing : list of (start, end) layer ranges with no online node.
     """
-    nodes = models.online_nodes(now)
+    # Session 16: flagged nodes (failed proof-of-compute) get no requests
+    nodes = [n for n in models.online_nodes(now) if not n.get("flagged")]
     total = config.TOTAL_LAYERS
 
     by_start = {}
@@ -29,7 +30,8 @@ def build_chain(now=None):
             missing.append((cursor, gap_end))
             cursor = gap_end + 1
             continue
-        best = max(candidates, key=lambda n: n["layer_end"])   # reach farthest
+        # reach farthest; tie-break toward higher reputation (Session 16)
+        best = max(candidates, key=lambda n: (n["layer_end"], n.get("reputation") or 1.0))
         chain.append(best)
         cursor = best["layer_end"] + 1
 

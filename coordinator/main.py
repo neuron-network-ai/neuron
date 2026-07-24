@@ -46,6 +46,11 @@ class CompleteBody(BaseModel):
     node_ids: list[str]
 
 
+class AttestBody(BaseModel):
+    passed: bool
+    max_err: float | None = None
+
+
 # --------------------------------------------------------------------------- #
 # Auth
 # --------------------------------------------------------------------------- #
@@ -90,6 +95,26 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="NEURON Coordinator", version="0.1", lifespan=lifespan)
+
+
+# --- basic per-IP rate limit (Session 16 — rough DDoS guard) ---------------- #
+import collections  # noqa: E402
+from fastapi.responses import JSONResponse  # noqa: E402
+
+_rate_hits = collections.defaultdict(collections.deque)
+
+
+@app.middleware("http")
+async def _rate_limit(request, call_next):
+    ip = request.client.host if request.client else "?"
+    now = time.time()
+    dq = _rate_hits[ip]
+    while dq and dq[0] < now - config.RATE_LIMIT_WINDOW_S:
+        dq.popleft()
+    if len(dq) >= config.RATE_LIMIT_MAX:
+        return JSONResponse(status_code=429, content={"detail": "rate limit exceeded"})
+    dq.append(now)
+    return await call_next(request)
 
 
 # --------------------------------------------------------------------------- #
@@ -149,6 +174,19 @@ def unregister(node_id: str, _node=Depends(require_node_token)):
 def ping(node_id: str, _node=Depends(require_node_token)):
     models.touch_node(node_id)
     return {"status": "alive", "node_id": node_id, "last_seen": time.time()}
+
+
+@app.post("/node/{node_id}/attest")
+def attest(node_id: str, body: AttestBody, _=Depends(require_register_secret)):
+    """A trusted verifier reports a proof-of-compute result (Session 16). Failed
+    challenges drop reputation; a flagged node is excluded from routing and earns nothing."""
+    if models.get_node(node_id) is None:
+        raise HTTPException(status_code=404, detail=f"unknown node '{node_id}'")
+    models.record_attestation(node_id, body.passed)
+    n = models.get_node(node_id)
+    return {"node_id": node_id, "passed": body.passed, "reputation": n["reputation"],
+            "flagged": n["flagged"], "challenges_passed": n["challenges_passed"],
+            "challenges_failed": n["challenges_failed"]}
 
 
 # --- Session 8: tell a node exactly what to download before it downloads ----- #
@@ -250,13 +288,15 @@ def get_ledger(node_id: str):
 def _network_summary():
     nodes = models.list_nodes()
     online = [n for n in nodes if n["status"] == "online"]
+    usable = [n for n in online if not n.get("flagged")]     # flagged = failed PoC (S16)
     covered = set()
-    for n in online:
+    for n in usable:
         covered.update(range(n["layer_start"], n["layer_end"] + 1))
     total_covered = len(covered & set(range(config.TOTAL_LAYERS)))
     return {
         "total_nodes": len(nodes),
         "online_nodes": len(online),
+        "flagged_nodes": len(online) - len(usable),
         "total_layers_covered": total_covered,
         "network_healthy": total_covered == config.TOTAL_LAYERS,
     }, nodes

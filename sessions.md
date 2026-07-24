@@ -700,6 +700,38 @@ default model. RAG uses search snippets (fast); full page-fetch + reranking is a
 
 ---
 
+## Session 16 (2026-07-25) — security hardening (proof-of-compute, reputation, rate limiting)
+
+**Goal:** safe for strangers to install, safe for users to trust — catch nodes that return
+garbage to farm NRN, and add basic abuse protection.
+
+**Built:**
+- `security/proof_of_compute.py` — a verifier challenges a node (known input for its layer
+  range), runs the same layers locally, and compares. **Honest work matches ~1e-5; garbage or
+  lazy (echo-input) cheating is off by ~25+** (`atol=0.05` separates). Challenges a last-stage
+  node (`layers[s2:n]` + norm) over the wire protocol; reuses common. Middle-node = extension.
+- **Coordinator reputation:** `challenges_passed/failed` per node (models.py + migration);
+  reputation = pass-rate; a node with ≥3 samples and pass-rate <0.6 is **flagged** and excluded
+  from routing AND coverage (router.py + `_network_summary`). `POST /node/{id}/attest {passed}`
+  (register-secret gated). Config `REPUTATION_MIN_SAMPLES` / `THRESHOLD`.
+- **Rate limiting:** per-IP middleware, `RATE_LIMIT_MAX` (120) / `RATE_WINDOW` (60 s) → 429.
+- `SECURITY.md` — the trust model + manual pre-launch items. **node_*/common UNCHANGED.**
+
+**Verified:**
+- Proof-of-compute LIVE against real node_b: honest passed (max_err **5.5e-05**), garbage failed
+  (27.6), lazy-echo failed (25.3).
+- Reputation loop (isolated coordinator): node_b failed 3 → flagged → layers 19-27 dropped
+  (19/28, unhealthy, excluded from routing); node_a passed 3 → reputation 1.0.
+- Rate limit: 60-request burst → 32× 429.
+- LIVE end-to-end on the cloud coordinator (redeployed, DB migrated, nodes intact): challenged
+  real node_b → passed → `POST /attest` → node_b reputation 1.0 recorded.
+
+**Not built (needs a cert / ops):** agent **code signing** (Authenticode + Linux) — documented
+in SECURITY.md as a pre-distribution step. **Open join** (drop the shared secret, gate on
+proof-of-compute + reputation) is the natural next step now that the primitives exist.
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load
