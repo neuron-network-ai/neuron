@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS nodes (
     layer_end     INTEGER NOT NULL,
     cores         INTEGER,
     ram_gb        REAL,
+    ms_per_layer  REAL,
+    head_ms       REAL,
     node_token    TEXT NOT NULL,
     status        TEXT NOT NULL DEFAULT 'online',
     last_seen     REAL NOT NULL,
@@ -62,6 +64,11 @@ def _db():
 def init_db():
     with _db() as c:
         c.executescript(SCHEMA)
+        # migration (S14): add speed columns to a pre-existing nodes table
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(nodes)").fetchall()}
+        for col in ("ms_per_layer", "head_ms"):
+            if col not in cols:
+                c.execute(f"ALTER TABLE nodes ADD COLUMN {col} REAL")
 
 
 def _status(last_seen, now=None):
@@ -80,22 +87,32 @@ def _node_dict(row, now=None):
 # Nodes
 # --------------------------------------------------------------------------- #
 def register_node(node_id, tailscale_ip, port, layer_start, layer_end, cores,
-                  ram_gb, token):
+                  ram_gb, token, ms_per_layer=None, head_ms=None):
     now = time.time()
     with _db() as c:
         c.execute(
             """INSERT INTO nodes (node_id, tailscale_ip, port, layer_start, layer_end,
-                                  cores, ram_gb, node_token, status, last_seen, registered_at)
-               VALUES (?,?,?,?,?,?,?,?, 'online', ?, ?)
+                                  cores, ram_gb, ms_per_layer, head_ms, node_token,
+                                  status, last_seen, registered_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?, 'online', ?, ?)
                ON CONFLICT(node_id) DO UPDATE SET
                    tailscale_ip=excluded.tailscale_ip, port=excluded.port,
                    layer_start=excluded.layer_start, layer_end=excluded.layer_end,
                    cores=excluded.cores, ram_gb=excluded.ram_gb,
+                   ms_per_layer=COALESCE(excluded.ms_per_layer, nodes.ms_per_layer),
+                   head_ms=COALESCE(excluded.head_ms, nodes.head_ms),
                    node_token=excluded.node_token, status='online', last_seen=excluded.last_seen""",
             (node_id, tailscale_ip, port, layer_start, layer_end, cores, ram_gb,
-             token, now, now),
+             ms_per_layer, head_ms, token, now, now),
         )
         c.execute("INSERT OR IGNORE INTO ledger (node_id) VALUES (?)", (node_id,))
+
+
+def update_layers(node_id, layer_start, layer_end):
+    """Reassign a node's layer range (used by the auto-balancer)."""
+    with _db() as c:
+        c.execute("UPDATE nodes SET layer_start=?, layer_end=? WHERE node_id=?",
+                  (layer_start, layer_end, node_id))
 
 
 def get_node(node_id, now=None):

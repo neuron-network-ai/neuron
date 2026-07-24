@@ -76,9 +76,14 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
   but need more/bigger nodes and are slower. Every quality gain costs speed and vice-versa —
   the core three-way trade to manage deliberately.
 
-### [P7] 🟡 Heterogeneous nodes + manual layer split (S14 planned)
-- Pipeline runs at the speed of its slowest stage; layer split is hand-tuned (`--s1/--s2`).
-  Session 14 (auto-balancing) is the planned fix.
+### [P7] 🟢 Heterogeneous nodes + manual layer split — RESOLVED (S14)
+- Pipeline runs at the speed of its slowest stage; layer split WAS hand-tuned (`--s1/--s2`).
+- **Fixed (2026-07-25, Session 14):** `coordinator/balancer.py` solves for the time-equalizing
+  split from each node's self-measured `ms_per_layer` + the driver's `head_ms` (`benchmark.py`).
+  `GET /network/plan` computes it, `POST /network/rebalance` applies it. Reproduces the hand-tuned
+  9/9/10 automatically; live on the cloud coordinator. Remaining nicety: dynamic re-balance +
+  auto-reload when nodes join/leave mid-flight (today a range change needs the driver to reload
+  with the new S1).
 
 ### [P9] 🔴 Naive int8 quantization destroys output quality (found in the P2 spike)
 - **Symptom:** with 3.46× speed, the int8 model answered "Explain how a rainbow forms"

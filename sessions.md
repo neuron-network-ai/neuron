@@ -636,6 +636,42 @@ Speed: int8 3.46× but naive breaks quality (`PROBLEMS.md` [P2]/[P9]).
 
 ---
 
+## Session 14 (2026-07-25) — heterogeneity-aware auto-balancing
+
+**Goal:** the coordinator assigns each node an optimal layer slice from its MEASURED speed —
+no more manual `--s1/--s2`. Nodes differ: self-benchmarked node_a **8.87** ms/layer (+**38.3**
+ms head), node_b **12.22**, node_c **12.41**.
+
+**Built:**
+- `coordinator/balancer.py` — closed-form solver. Node i does k_i layers at s_i ms/layer plus
+  fixed cost H_i (lm_head on the driver); equalize stage times T = s_i·k_i + H_i with Σk_i = L
+  ⇒ **T = (L + Σ H_i/s_i) / Σ 1/s_i**, then round to ints summing to L (largest remainder).
+  Pure Python, no torch.
+- `benchmark.py` — a node self-measures ms/layer (times real Qwen2 decoder-layer decode passes)
+  + head_ms (lm_head GEMM), reports JSON. Reuses common; ARM-safe.
+- Coordinator: `/node/register` accepts `ms_per_layer`/`head_ms` (models.py schema + migration
+  for existing DBs); `GET /network/plan` (advisory balanced split + speedup vs equal),
+  `POST /network/rebalance` (applies it — updates stored ranges). register_nodes.py sends the
+  measured speeds. **node_*/common UNCHANGED.**
+
+**Verified:**
+- Solver reproduces the hand-tuned **9/9/10** from measured speeds (sanity cases pass too).
+- End-to-end (isolated coordinator): 3 nodes register with real speeds → `/network/plan` =
+  9/9/10 (node_a 0-8 / node_c 9-17 / node_b 18-27, stages 112–122 ms), bottleneck 122 vs
+  equal-split 127 ms = **1.04× faster**; `/rebalance` applied it with full 0-27 coverage. PASS.
+- **LIVE on the cloud coordinator:** redeployed (DB migrated, 3 nodes intact); nodes
+  re-registered with speeds; live `/network/plan` returns the balanced 9/9/10. Left the running
+  split at 10/9/9 (working) — applying a new split live needs the driver/nodes to reload with the
+  new ranges (proven in the isolated `/rebalance` test; on the live net = restart the driver with
+  the new S1).
+
+**Honest:** the 1.04× gain is small on this near-homogeneous trio (all similar CPUs); the win
+grows with heterogeneous hardware (a fast GPU node + slow phones). The real value is REMOVING
+manual tuning — the coordinator now derives the optimum that took hand-tuning in Session 5. Full
+dynamic re-balance-on-join (auto-reload) is the natural extension.
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load

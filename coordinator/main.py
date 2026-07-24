@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from coordinator import config, ledger, models, router
+from coordinator import balancer, config, ledger, models, router
 
 
 # --------------------------------------------------------------------------- #
@@ -30,7 +30,9 @@ class RegisterBody(BaseModel):
     layer_end: int
     cores: int | None = None
     ram_gb: float | None = None
-    behind_nat: bool = False   # if true, coordinator assigns a relay port (Session 12)
+    behind_nat: bool = False       # if true, coordinator assigns a relay port (Session 12)
+    ms_per_layer: float | None = None   # self-benchmark for auto-balancing (Session 14)
+    head_ms: float | None = None        # driver's lm_head cost (Session 14)
 
 
 class InferBody(BaseModel):
@@ -116,7 +118,8 @@ def register(body: RegisterBody, _=Depends(require_register_secret)):
         relay_block = {"host": config.RELAY_HOST, "control_port": config.RELAY_CONTROL_PORT,
                        "data_port": config.RELAY_DATA_PORT, "public_port": relay_port}
     models.register_node(body.node_id, tailscale_ip, port, body.layer_start,
-                         body.layer_end, body.cores, body.ram_gb, token)
+                         body.layer_end, body.cores, body.ram_gb, token,
+                         ms_per_layer=body.ms_per_layer, head_ms=body.head_ms)
     resp = {
         "status": "registered",
         "assigned_layers": [body.layer_start, body.layer_end],
@@ -188,6 +191,41 @@ def complete(request_id: str, body: CompleteBody):
     models.complete_request(request_id, body.tokens_generated, body.duration_ms, body.node_ids)
     rewards = ledger.distribute(body.node_ids)
     return {"status": "completed", "request_id": request_id, "rewards": rewards}
+
+
+# --------------------------------------------------------------------------- #
+# Auto-balance (Session 14) — assign layers by each node's measured speed
+# --------------------------------------------------------------------------- #
+def _balanced_plan():
+    nodes = [n for n in models.online_nodes() if n.get("ms_per_layer")]
+    # the driver (carries lm_head, head_ms > 0) goes first, then the rest
+    nodes.sort(key=lambda n: (0 if (n.get("head_ms") or 0) > 0 else 1, n["layer_start"]))
+    bnodes = [{"node_id": n["node_id"], "ms_per_layer": n["ms_per_layer"],
+               "head_ms": n.get("head_ms") or 0.0} for n in nodes]
+    return balancer.plan(bnodes, config.TOTAL_LAYERS)
+
+
+@app.get("/network/plan")
+def network_plan():
+    """The layer split the balancer recommends from nodes' measured speeds (advisory)."""
+    p = _balanced_plan()
+    if not p.get("assignment"):
+        return {"assignment": [], "note": "no online node has reported ms_per_layer yet"}
+    return p
+
+
+@app.post("/network/rebalance")
+def network_rebalance(_=Depends(require_register_secret)):
+    """Apply the balanced plan: update each node's stored layer range so /infer routes the
+    optimal split. Call when nodes join/leave; a node reloads only if its range moved."""
+    p = _balanced_plan()
+    changed = []
+    for a in p.get("assignment", []):
+        models.update_layers(a["node_id"], a["layer_start"], a["layer_end"])
+        changed.append({"node_id": a["node_id"], "layers": [a["layer_start"], a["layer_end"]]})
+    extra = {k: p[k] for k in ("balanced_bottleneck_ms", "equal_split_bottleneck_ms",
+                               "speedup_vs_equal") if k in p}
+    return {"status": "rebalanced", "assignments": changed, **extra}
 
 
 # --------------------------------------------------------------------------- #
