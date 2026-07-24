@@ -17,13 +17,16 @@ Usage:
 """
 import argparse
 import json
+import os
 import socket
 import time
 from pathlib import Path
 
 import requests
 
-REGISTER_SECRET = "neuron-dev-secret"   # must match coordinator config
+# Must match the coordinator's NEURON_REGISTER_SECRET. Defaults to the dev secret
+# for the local setup; set the env var to use a real (e.g. cloud) coordinator's secret.
+REGISTER_SECRET = os.environ.get("NEURON_REGISTER_SECRET", "neuron-dev-secret")
 PING_INTERVAL = 30
 
 # The three nodes, matching the real Tailscale setup. `probe` is the (ip, port) to

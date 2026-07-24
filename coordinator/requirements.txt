@@ -1,0 +1,9 @@
+# NEURON coordinator — dependencies (lightweight; NO torch/transformers).
+# The coordinator is pure FastAPI + SQLite (stdlib) + a small HTTP client.
+# Runs on any tiny always-on VM (~1GB RAM, ARM or x86).
+#
+# Tested with: fastapi 0.139.2, uvicorn 0.51.0, requests 2.34.2
+# (versions left open for portability; pin these if you want reproducible deploys).
+fastapi
+uvicorn[standard]
+requests

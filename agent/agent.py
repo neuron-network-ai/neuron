@@ -79,6 +79,7 @@ class Agent:
                       "layers": None, "coordinator": self.base, "detail": ""}
         self._stop = threading.Event()
         self.user_paused = threading.Event()   # set by the tray's Pause button
+        self.relay = self.cfg.get("relay")     # relay params if this node is behind NAT
 
     # -- config persistence -------------------------------------------------- #
     def _save(self):
@@ -95,6 +96,7 @@ class Agent:
             "layer_end": self.cfg["layer_end"],
             "cores": os.cpu_count(),
             "ram_gb": int(psutil.virtual_memory().total // 10**9),
+            "behind_nat": self.cfg.get("behind_nat", False),
         }
         secret = self.cfg.get("register_secret", DEFAULT_REGISTER_SECRET)
         r = requests.post(f"{self.base}/node/register", json=body,
@@ -103,6 +105,9 @@ class Agent:
         data = r.json()
         self.cfg["node_id"] = body["node_id"]
         self.cfg["node_token"] = data["node_token"]
+        self.relay = data.get("relay")          # set when behind_nat -> auto-tunnel
+        if self.relay:
+            self.cfg["relay"] = self.relay
         self._save()
         log.info("registered as %s, assigned layers %s (%d cores, %d GB, %s)",
                  body["node_id"], data["assigned_layers"], body["cores"], body["ram_gb"], ip)
@@ -149,6 +154,21 @@ class Agent:
                                  args=("0.0.0.0", self.cfg.get("port", 50999)),
                                  daemon=True).start()
                 log.info("node server started on port %d", self.cfg.get("port", 50999))
+                # Session 12: if we're behind NAT the coordinator handed us relay params
+                # at registration — start the outbound tunnel so peers can reach us with
+                # NO inbound port. One-click NAT traversal; nothing for the user to do.
+                relay = self.relay or self.cfg.get("relay")
+                if relay:
+                    import tunnel_client
+                    threading.Thread(
+                        target=tunnel_client.run_tunnel,
+                        kwargs=dict(node_id=self.cfg["node_id"], public_port=relay["public_port"],
+                                    relay_host=relay["host"], control_port=relay["control_port"],
+                                    data_port=relay["data_port"], local_host="127.0.0.1",
+                                    local_port=self.cfg.get("port", 50999), stop=self._stop),
+                        daemon=True).start()
+                    log.info("relay tunnel started — reachable via %s:%d (NAT-friendly)",
+                             relay["host"], relay["public_port"])
                 return
             except requests.RequestException as e:
                 self.state.update(status="error", detail=f"coordinator unreachable: {e}")

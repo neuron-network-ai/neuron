@@ -40,6 +40,15 @@ agent/config.bad.json
 *.db-shm
 coordinator/node_tokens.json
 
+# --- SSH / private keys (NEVER commit — belt-and-suspenders) ---
+*.key
+*.pem
+ssh-key-*
+id_rsa*
+id_ed25519*
+*_rsa
+*.ppk
+
 # --- OS / editor cruft ---
 .DS_Store
 Thumbs.db

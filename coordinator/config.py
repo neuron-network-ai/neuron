@@ -38,3 +38,16 @@ COORDINATOR_LEDGER_ID = "__coordinator__"
 # --- agent auto-update (Session 9) ------------------------------------------ #
 # Bump this when a new agent is published; agents poll /agent/version and update.
 AGENT_VERSION = os.environ.get("NEURON_AGENT_VERSION", "0.3.0")
+
+# --- stranger-NAT relay (Session 12) ---------------------------------------- #
+# A node behind NAT registers with behind_nat=true; the coordinator assigns it a
+# public port on the relay from the pool and stores its endpoint as the relay's, so
+# node_a/node_c reach it via the relay. The agent auto-starts tunnel_client from the
+# relay block returned at registration. Genericize RELAY_HOST before the repo goes
+# public (see PROBLEMS.md [P11]).
+RELAY_ENABLED = os.environ.get("NEURON_RELAY_ENABLED", "1") == "1"
+RELAY_HOST = os.environ.get("NEURON_RELAY_HOST", "150.230.22.250")
+RELAY_CONTROL_PORT = int(os.environ.get("NEURON_RELAY_CONTROL_PORT", "8010"))
+RELAY_DATA_PORT = int(os.environ.get("NEURON_RELAY_DATA_PORT", "8011"))
+RELAY_PORT_MIN = int(os.environ.get("NEURON_RELAY_PORT_MIN", "9000"))
+RELAY_PORT_MAX = int(os.environ.get("NEURON_RELAY_PORT_MAX", "9100"))

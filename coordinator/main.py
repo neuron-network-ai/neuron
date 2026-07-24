@@ -30,6 +30,7 @@ class RegisterBody(BaseModel):
     layer_end: int
     cores: int | None = None
     ram_gb: float | None = None
+    behind_nat: bool = False   # if true, coordinator assigns a relay port (Session 12)
 
 
 class InferBody(BaseModel):
@@ -92,16 +93,38 @@ app = FastAPI(title="NEURON Coordinator", version="0.1", lifespan=lifespan)
 # --------------------------------------------------------------------------- #
 # Part 1 — Node registry
 # --------------------------------------------------------------------------- #
+def _assign_relay_port(node_id: str) -> int:
+    """Give this NAT'd node a stable public port on the relay, from the pool."""
+    existing = models.get_node(node_id)
+    if existing and existing["tailscale_ip"] == config.RELAY_HOST \
+            and config.RELAY_PORT_MIN <= existing["port"] <= config.RELAY_PORT_MAX:
+        return existing["port"]                       # reuse on re-register
+    used = {n["port"] for n in models.list_nodes() if n["tailscale_ip"] == config.RELAY_HOST}
+    for p in range(config.RELAY_PORT_MIN, config.RELAY_PORT_MAX + 1):
+        if p not in used:
+            return p
+    raise HTTPException(status_code=503, detail="relay port pool exhausted")
+
+
 @app.post("/node/register")
 def register(body: RegisterBody, _=Depends(require_register_secret)):
     token = secrets.token_hex(config.TOKEN_BYTES)
-    models.register_node(body.node_id, body.tailscale_ip, body.port,
-                         body.layer_start, body.layer_end, body.cores, body.ram_gb, token)
-    return {
+    tailscale_ip, port, relay_block = body.tailscale_ip, body.port, None
+    if body.behind_nat and config.RELAY_ENABLED:
+        relay_port = _assign_relay_port(body.node_id)
+        tailscale_ip, port = config.RELAY_HOST, relay_port    # peers reach it via the relay
+        relay_block = {"host": config.RELAY_HOST, "control_port": config.RELAY_CONTROL_PORT,
+                       "data_port": config.RELAY_DATA_PORT, "public_port": relay_port}
+    models.register_node(body.node_id, tailscale_ip, port, body.layer_start,
+                         body.layer_end, body.cores, body.ram_gb, token)
+    resp = {
         "status": "registered",
         "assigned_layers": [body.layer_start, body.layer_end],
         "node_token": token,
     }
+    if relay_block:
+        resp["relay"] = relay_block         # agent auto-starts tunnel_client from this
+    return resp
 
 
 @app.get("/node/list")
