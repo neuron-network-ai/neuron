@@ -13,6 +13,7 @@ DB_PATH = os.environ.get("NEURON_DB", str(BASE_DIR / "neuron.db"))
 
 # --- model / network shape -------------------------------------------------- #
 TOTAL_LAYERS = int(os.environ.get("NEURON_TOTAL_LAYERS", "28"))   # Qwen2.5-1.5B
+MODEL_ID = os.environ.get("NEURON_MODEL_ID", "Qwen/Qwen2.5-1.5B-Instruct")
 
 # --- economics (NRN = the network's coin) ----------------------------------- #
 NRN_PER_REQUEST = 1.0     # total minted per completed request

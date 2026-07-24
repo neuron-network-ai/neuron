@@ -42,6 +42,8 @@ Files in `C:\Users\optin\neuron\`:
 - `selftest_shard.py` — same checks, but for the sharded (partial-load) path.
 - `coordinator/` — the network brain (S6): FastAPI + SQLite registry, health,
   routing, and the NRN ledger. See `coordinator/README.md`.
+- `slice_downloader.py` — a node downloads ONLY its layers' weights via safetensors
+  byte-range requests (S8), not the whole model. Pairs with `/node/{id}/slice-info`.
 
 ---
 
@@ -353,6 +355,75 @@ authorising GCM stores the credential so `git push` works non-interactively afte
 ### Part 3 — stranger check
 Read the README cold against the five questions (what is it / run a node / run the
 coordinator / hardware / earn NRN) — all answered; no fixes needed.
+
+---
+
+## Session 8 (2026-07-24) — slice downloader (only download your layers)
+
+**Goal:** a node should download ONLY the weights for its assigned layers, not the
+whole 3 GB model. This is the mechanism behind the "1 MB agent".
+
+**THE TRAP — the model is not sharded.** Qwen2.5-1.5B-Instruct on HF is a *single*
+`model.safetensors` (3.087 GB). There is **no `model.safetensors.index.json`** and
+no `model-0000N-of-M` files — so the whole premise of "pick which shard files to
+download" (and `hf_hub_download`, which only fetches whole files) does not apply.
+There is one shard and it holds all 28 layers.
+
+**The fix — per-tensor byte-range download.** A safetensors file begins with an
+8-byte length + a JSON header that lists *every tensor's exact byte range*
+(`data_offsets`). So `slice_downloader.py`:
+1. Fetches just the header (~38 KB) via HTTP Range — HF serves `Accept-Ranges:
+   bytes` (206), which is how `huggingface_hub` does resumable downloads.
+2. Picks the tensors for this node's layers (+ embedding on the first node, + norm
+   on the last), merges their byte ranges into contiguous spans, and Range-downloads
+   only those spans.
+3. Reassembles a small, valid `model.safetensors` (new header + concatenated data)
+   and downloads `config.json`/`generation_config.json` (+ tokenizer on node_a).
+This is *more* granular than shards — per tensor.
+
+**Shard map for Qwen2.5-1.5B-Instruct:** 1 file, **338 tensors**, 38 KB header.
+Naming: `model.embed_tokens.weight` (~0.9 GB, tied to `lm_head` → no separate
+`lm_head.weight`), `model.layers.{0..27}.{input_layernorm, post_attention_layernorm,
+self_attn.{q,k,v,o}_proj, mlp.{gate,up,down}_proj}.weight`, `model.norm.weight`.
+Each decoder layer ≈ **94 MB** (bf16). node_c/node_b's layer blocks are one
+contiguous span each; node_a is 3 spans (embedding sits apart from its layer block).
+
+**Download sizes per node (verified byte-identical to the full model, and node_a
+verified functionally identical — same hidden state):**
+
+| download | size | % of full |
+|---|---|---|
+| full model (old way, every node) | 3.087 GB | 100% |
+| node_a (0–9 + embed + tokenizer) | **1.403 GB** | 45% |
+| node_c (10–18) | **0.842 GB** | 27% |
+| node_b (19–27 + norm) | **0.842 GB** | 27% |
+| **sum across the 3-node network** | **3.087 GB (1×)** | vs **9.26 GB (3×)** downloading full on each |
+
+So slice-downloading cuts total network to **1×** the model (from 3×), and each node
+fetches **up to 3.7× less** than before.
+
+**Traps hit:**
+- Single-file safetensors (no index.json) — the whole "download selected shards"
+  plan is impossible; byte-range is the only real slice for this model.
+- `lm_head` is **tied to the embedding** (absent as its own tensor), so the FIRST
+  node (which owns the head in NEURON) needs `embed_tokens.weight`; there is no
+  separate head tensor to fetch on the last node.
+- Reassembling a valid safetensors slice: write `<u64 header-len><JSON header with
+  recomputed contiguous data_offsets><data>`; keep offsets gap-free.
+
+**Coordinator (Task 4):** new `GET /node/{id}/slice-info` (in `coordinator/
+sliceinfo.py`, stdlib + requests, header cached) returns `{model_id, layer_start,
+layer_end, shards_needed:["model.safetensors"], tensors_needed, tokenizer_needed,
+lm_head_needed, norm_needed, is_first/last_node, estimated_download_gb,
+full_model_gb}`. Deployed to the always-on OptiPlex coordinator (`:8001`).
+
+**How it's used (Task 5) — the command a fresh node runs:**
+```
+python slice_downloader.py --coordinator http://100.114.189.46:8001 --node-id node_a --output-dir ./model_slice
+```
+It asks the coordinator what it owns, downloads only that, verifies byte-identity,
+and writes a ready-to-load slice dir. (Manual mode: `--model-id --layer-start
+--layer-end [--first] [--last] --output-dir`.) `common.py`, `node_*.py` unchanged.
 
 ---
 

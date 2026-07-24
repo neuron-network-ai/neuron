@@ -125,6 +125,20 @@ def ping(node_id: str, _node=Depends(require_node_token)):
     return {"status": "alive", "node_id": node_id, "last_seen": time.time()}
 
 
+# --- Session 8: tell a node exactly what to download before it downloads ----- #
+@app.get("/node/{node_id}/slice-info")
+def slice_info(node_id: str):
+    node = models.get_node(node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail=f"unknown node '{node_id}'")
+    from coordinator import sliceinfo
+    try:
+        return sliceinfo.slice_info(config.MODEL_ID, node["layer_start"],
+                                    node["layer_end"], config.TOTAL_LAYERS)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"could not read model header: {e}")
+
+
 # --------------------------------------------------------------------------- #
 # Part 3 — Request routing
 # --------------------------------------------------------------------------- #
