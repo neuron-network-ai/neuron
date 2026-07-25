@@ -44,8 +44,8 @@ Stranger's machine (anywhere, behind NAT)  ── all OUTBOUND ──▶  coordi
 |---|---|---|---|
 | 1 | Tidy code for public — genericize leftover private IPs / secret defaults (env-driven) | me | ⬜ todo (repo audit done, clean) |
 | 2 | Make the GitHub repo public | **you** | ⬜ after step 1 |
-| 3 | Open join — drop the shared secret; register anyone at *probationary* reputation, earn only after passing proof-of-compute | me | ⬜ (S16 gave the primitives) |
-| 4 | Place a 4th node — re-split 28 layers across 4 (S14 balancer) OR the stranger takes one segment | me | ⬜ (design bit; simplest = they run one segment) |
+| 3 | Open join — drop the shared secret; register anyone at *probationary* reputation, earn only after passing proof-of-compute | me | ✅ done (open registration; probationary→verified via proof-of-compute; trusted fast-path keeps the secret; `coordinator/test_open_join.py` 17/17) |
+| 4 | Place a 4th node — chose REPLICATION over a 4-stage re-split: the 4th node mirrors an existing segment and the router load-balances across replicas (coordinator-only; each chain stays 3-stage so drivers/nodes are untouched; deeper pipeline rejected per [P8]) | me | ✅ coordinator done (`router.build_chain` replica-aware; `coordinator/test_replica.py` 9/9). Live demo with a real stranger's machine = steps 5–7 |
 | 5 | Package the agent — PyInstaller → one-file exe/AppImage | me | ⬜ best-effort (heavy ~GB; no code-signing here) |
 | 6 | Dead-simple 5-step install guide | me | ⬜ |
 | 7 | **A friend on a different network runs it → appears in /node/list → earns NRN** | **you** | 🎯 **the milestone** |

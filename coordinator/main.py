@@ -59,6 +59,20 @@ def require_register_secret(x_register_secret: str = Header(default=None)):
         raise HTTPException(status_code=401, detail="invalid or missing X-Register-Secret")
 
 
+def classify_registration(x_register_secret: str) -> bool:
+    """Decide a registration's standing (Session 12 — open join).
+
+    Returns True if the valid founder secret was presented -> the node is TRUSTED
+    (skips probation). With OPEN_JOIN on, a missing/invalid secret is allowed and the
+    node joins PROBATIONARY (False). With OPEN_JOIN off, a missing/invalid secret is
+    rejected (fully private network — legacy behaviour)."""
+    if x_register_secret == config.REGISTRATION_SECRET:
+        return True
+    if not config.OPEN_JOIN:
+        raise HTTPException(status_code=401, detail="invalid or missing X-Register-Secret")
+    return False
+
+
 def require_node_token(node_id: str, x_node_token: str = Header(default=None)):
     node = models.get_node(node_id)
     if node is None:
@@ -134,7 +148,16 @@ def _assign_relay_port(node_id: str) -> int:
 
 
 @app.post("/node/register")
-def register(body: RegisterBody, _=Depends(require_register_secret)):
+def register(body: RegisterBody, x_register_secret: str = Header(default=None)):
+    trusted = classify_registration(x_register_secret)
+    # open join: a secret-less registration must not hijack an existing TRUSTED node id.
+    if not trusted:
+        existing = models.get_node(body.node_id)
+        if existing and existing["trusted"]:
+            raise HTTPException(
+                status_code=409,
+                detail=f"node id '{body.node_id}' is reserved by a trusted node; "
+                       f"registering it requires the secret")
     token = secrets.token_hex(config.TOKEN_BYTES)
     tailscale_ip, port, relay_block = body.tailscale_ip, body.port, None
     if body.behind_nat and config.RELAY_ENABLED:
@@ -144,12 +167,17 @@ def register(body: RegisterBody, _=Depends(require_register_secret)):
                        "data_port": config.RELAY_DATA_PORT, "public_port": relay_port}
     models.register_node(body.node_id, tailscale_ip, port, body.layer_start,
                          body.layer_end, body.cores, body.ram_gb, token,
-                         ms_per_layer=body.ms_per_layer, head_ms=body.head_ms)
+                         ms_per_layer=body.ms_per_layer, head_ms=body.head_ms, trusted=trusted)
     resp = {
         "status": "registered",
+        "standing": "trusted" if trusted else "probationary",
         "assigned_layers": [body.layer_start, body.layer_end],
         "node_token": token,
     }
+    if not trusted:
+        resp["note"] = ("probationary — you are registered but will not receive live "
+                        "requests or earn NRN until a verifier confirms your node with a "
+                        "proof-of-compute challenge")
     if relay_block:
         resp["relay"] = relay_block         # agent auto-starts tunnel_client from this
     return resp
@@ -235,7 +263,9 @@ def complete(request_id: str, body: CompleteBody):
 # Auto-balance (Session 14) — assign layers by each node's measured speed
 # --------------------------------------------------------------------------- #
 def _balanced_plan():
-    nodes = [n for n in models.online_nodes() if n.get("ms_per_layer")]
+    # only nodes cleared for live traffic (excludes probationary/flagged) are planned,
+    # so the balancer never assigns layers to a node routing would skip (S12).
+    nodes = [n for n in models.online_nodes() if n.get("ms_per_layer") and n.get("eligible")]
     # the driver (carries lm_head, head_ms > 0) goes first, then the rest
     nodes.sort(key=lambda n: (0 if (n.get("head_ms") or 0) > 0 else 1, n["layer_start"]))
     bnodes = [{"node_id": n["node_id"], "ms_per_layer": n["ms_per_layer"],
@@ -288,7 +318,10 @@ def get_ledger(node_id: str):
 def _network_summary():
     nodes = models.list_nodes()
     online = [n for n in nodes if n["status"] == "online"]
-    usable = [n for n in online if not n.get("flagged")]     # flagged = failed PoC (S16)
+    usable = [n for n in online if n.get("eligible")]        # cleared for live traffic
+    # flagged = failed PoC (S16); probationary = open-join, not yet verified (S12)
+    flagged = [n for n in online if n.get("flagged")]
+    probationary = [n for n in online if n.get("standing") == "probationary"]
     covered = set()
     for n in usable:
         covered.update(range(n["layer_start"], n["layer_end"] + 1))
@@ -296,7 +329,9 @@ def _network_summary():
     return {
         "total_nodes": len(nodes),
         "online_nodes": len(online),
-        "flagged_nodes": len(online) - len(usable),
+        "eligible_nodes": len(usable),
+        "flagged_nodes": len(flagged),
+        "probationary_nodes": len(probationary),
         "total_layers_covered": total_covered,
         "network_healthy": total_covered == config.TOTAL_LAYERS,
     }, nodes
@@ -318,9 +353,13 @@ def dashboard():
     banner_color = "#137333" if healthy else "#c5221f"
     banner_text = "HEALTHY" if healthy else "DEGRADED — chain incomplete"
 
+    standing_colors = {"trusted": "#137333", "verified": "#1a73e8",
+                       "probationary": "#f9ab00", "flagged": "#c5221f"}
     rows = ""
     for n in nodes:
         badge = "#137333" if n["status"] == "online" else "#c5221f"
+        st = n.get("standing", "trusted")
+        sbadge = standing_colors.get(st, "#5f6368")
         led = ledgers.get(n["node_id"], {})
         rows += (
             f"<tr>"
@@ -328,6 +367,8 @@ def dashboard():
             f"<td>{n['layer_start']}–{n['layer_end']}</td>"
             f"<td><span style='color:#fff;background:{badge};padding:2px 8px;"
             f"border-radius:10px;font-size:12px'>{n['status']}</span></td>"
+            f"<td><span style='color:#fff;background:{sbadge};padding:2px 8px;"
+            f"border-radius:10px;font-size:12px'>{st}</span></td>"
             f"<td>{n['tailscale_ip']}:{n['port']}</td>"
             f"<td>{n.get('cores','-')}</td>"
             f"<td>{n.get('ram_gb','-')}</td>"
@@ -365,7 +406,7 @@ def dashboard():
     <div class="l">NRN distributed</div></div>
 </div>
 <table>
-  <tr><th>node</th><th>layers</th><th>status</th><th>address</th><th>cores</th>
+  <tr><th>node</th><th>layers</th><th>status</th><th>standing</th><th>address</th><th>cores</th>
       <th>RAM GB</th><th>NRN balance</th><th>served</th></tr>
   {rows}
 </table>

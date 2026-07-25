@@ -35,7 +35,6 @@ import slice_downloader                                   # noqa: E402
 
 CONFIG_PATH = os.path.join(HERE, "config.json")
 LOG_PATH = os.path.join(HERE, "agent.log")
-DEFAULT_REGISTER_SECRET = "neuron-dev-secret"
 RETRY_SECONDS = 60
 PING_SECONDS = 30
 
@@ -98,9 +97,14 @@ class Agent:
             "ram_gb": int(psutil.virtual_memory().total // 10**9),
             "behind_nat": self.cfg.get("behind_nat", False),
         }
-        secret = self.cfg.get("register_secret", DEFAULT_REGISTER_SECRET)
-        r = requests.post(f"{self.base}/node/register", json=body,
-                          headers={"X-Register-Secret": secret}, timeout=15)
+        # Open join (Session 12): register with NO secret by default — anyone can join.
+        # Only send the header if the operator explicitly set one (that path marks the
+        # node TRUSTED and is for the founder's own dev nodes, not strangers).
+        headers = {}
+        secret = self.cfg.get("register_secret")
+        if secret:
+            headers["X-Register-Secret"] = secret
+        r = requests.post(f"{self.base}/node/register", json=body, headers=headers, timeout=15)
         r.raise_for_status()
         data = r.json()
         self.cfg["node_id"] = body["node_id"]
@@ -109,8 +113,13 @@ class Agent:
         if self.relay:
             self.cfg["relay"] = self.relay
         self._save()
-        log.info("registered as %s, assigned layers %s (%d cores, %d GB, %s)",
-                 body["node_id"], data["assigned_layers"], body["cores"], body["ram_gb"], ip)
+        standing = data.get("standing", "trusted")
+        log.info("registered as %s [%s], assigned layers %s (%d cores, %d GB, %s)",
+                 body["node_id"], standing, data["assigned_layers"],
+                 body["cores"], body["ram_gb"], ip)
+        if standing == "probationary":
+            log.info("PROBATIONARY: serving challenges only — a verifier must confirm this "
+                     "node (proof-of-compute) before it receives live requests or earns NRN")
         return data["assigned_layers"]
 
     def slice_info(self):

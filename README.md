@@ -123,7 +123,7 @@ address, cores, RAM, and NRN balance. Interactive API docs live at `/docs`.
 
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
-| POST | `/node/register` | `X-Register-Secret` | register a node, get a `node_token` |
+| POST | `/node/register` | open* | register a node, get a `node_token` |
 | GET | `/node/list` | — | all nodes + status + layers |
 | DELETE | `/node/{id}` | `X-Node-Token` | unregister |
 | GET | `/node/{id}/ping` | `X-Node-Token` | heartbeat (every 30 s; offline after 90 s) |
@@ -133,10 +133,19 @@ address, cores, RAM, and NRN balance. Interactive API docs live at `/docs`.
 | GET | `/status` | — | network + stats JSON |
 | GET | `/dashboard` | — | HTML dashboard |
 
+\* **Open join.** Anyone can register a node — no secret required. A node that registers
+without the secret joins as **probationary**: it is reachable and can be challenged, but it
+does *not* receive live requests or earn NRN until a verifier confirms it with a
+proof-of-compute challenge (then it becomes **verified**). Presenting the valid
+`X-Register-Secret` marks a node **trusted** and skips probation (how the project's own dev
+nodes register). Set `NEURON_OPEN_JOIN=0` to require the secret for every registration (fully
+private network).
+
 ## How do I earn NRN?
 
-Run a node, register it with the coordinator, and stay online. Every completed inference
-request mints **1.0 NRN**:
+Run a node, register it with the coordinator (open join — no secret needed), and stay online.
+A new node starts **probationary** and earns nothing until it passes a proof-of-compute
+challenge; once **verified**, every completed inference request it serves mints **1.0 NRN**:
 
 - the coordinator keeps a **10% fee** (0.10 NRN),
 - the remaining **0.9 NRN is split across the chain in proportion to layers held** — a node

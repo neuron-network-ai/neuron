@@ -2,19 +2,33 @@
 
 Given the currently-online nodes, assemble an ordered pipeline that covers every
 layer 0..TOTAL_LAYERS-1 contiguously, or report which layers are uncovered.
+
+Replication (Session 18): when more than one eligible node covers the SAME farthest
+segment from a given cursor, those nodes are REPLICAS. `build_chain` picks one per call
+(default: at random), so concurrent requests spread across the replicas — the way to add
+a machine that lifts throughput rather than deepening the pipeline (PROBLEMS.md [P8]). Each
+assembled chain is still the usual driver -> middle -> last shape, so the drivers are
+unchanged; only which node fills a slot varies per request.
 """
+import random
+
 from coordinator import config, models
 
 
-def build_chain(now=None):
+def build_chain(now=None, pick=None):
     """Return (chain, missing).
 
-    chain   : online nodes ordered by layer_start that contiguously cover layers
+    chain   : eligible online nodes ordered by layer_start that contiguously cover layers
               0..TOTAL_LAYERS-1 (usable only if `missing` is empty).
-    missing : list of (start, end) layer ranges with no online node.
+    missing : list of (start, end) layer ranges with no eligible online node.
+    pick    : chooser used to break replica ties, `pick(list) -> node` (default random.choice;
+              injectable for tests / deterministic routing).
     """
-    # Session 16: flagged nodes (failed proof-of-compute) get no requests
-    nodes = [n for n in models.online_nodes(now) if not n.get("flagged")]
+    pick = pick or random.choice
+    # Only nodes cleared for live traffic are routed: excludes flagged nodes (failed
+    # proof-of-compute, Session 16) AND probationary nodes (open join, Session 12 — not
+    # yet verified). `eligible` = trusted or PoC-passed, and not flagged.
+    nodes = [n for n in models.online_nodes(now) if n.get("eligible")]
     total = config.TOTAL_LAYERS
 
     by_start = {}
@@ -30,10 +44,13 @@ def build_chain(now=None):
             missing.append((cursor, gap_end))
             cursor = gap_end + 1
             continue
-        # reach farthest; tie-break toward higher reputation (Session 16)
-        best = max(candidates, key=lambda n: (n["layer_end"], n.get("reputation") or 1.0))
-        chain.append(best)
-        cursor = best["layer_end"] + 1
+        # advance as far as possible; nodes tied at the farthest layer_end are replicas of
+        # that segment -> choose one (default random) so load spreads across them.
+        farthest = max(n["layer_end"] for n in candidates)
+        replicas = [n for n in candidates if n["layer_end"] == farthest]
+        chosen = pick(replicas)
+        chain.append(chosen)
+        cursor = chosen["layer_end"] + 1
 
     return chain, missing
 

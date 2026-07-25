@@ -30,6 +30,8 @@ def distribute(node_ids):
         node = models.get_node(node_id)
         if node is None:
             continue  # unknown node in the report -> earns nothing
+        if not node.get("eligible"):
+            continue  # probationary (open join, S12) or flagged (S16) -> earns nothing
         layers = node["layer_end"] - node["layer_start"] + 1
         amount = round(reward_for_layers(layers), 6)
         models.credit(node_id, amount, count_request=True)

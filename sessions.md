@@ -732,6 +732,91 @@ proof-of-compute + reputation) is the natural next step now that the primitives 
 
 ---
 
+## Session 17 (2026-07-25) — open join (drop the shared secret)
+
+**Goal:** a true stranger can register a node with NO shared secret, but cannot serve live
+traffic or earn NRN until proven — the front-door piece of the first-stranger milestone
+(FIRST_STRANGER.md Path A, step 3). Uses the S16 proof-of-compute/reputation primitives.
+
+**Design — three node standings:**
+- **trusted** — registered *with* the valid `X-Register-Secret`; skips probation (the dev
+  trio via `register_nodes.py`). Grandfathered: a migration sets `trusted=1` on every
+  pre-existing node so opening the door doesn't demote the live network.
+- **probationary** — registered *without* the secret (open join). Reachable/challengeable,
+  but **excluded from routing, balancing, coverage, and earning**.
+- **verified** — a probationary node that has passed proof-of-compute ≥ `PROBATION_MIN_PASSES`
+  (default 1). **flagged** (S16, failed PoC) still overrides everything → excluded.
+  Single predicate `eligible = (not flagged) and (trusted or passed)` gates routing + earning.
+
+**Built:**
+- `config.py` — `OPEN_JOIN` (env `NEURON_OPEN_JOIN`, default **on**), `PROBATION_MIN_PASSES`.
+- `models.py` — `trusted` column + CREATE + migration (backfills existing→1); `register_node(trusted=)`;
+  `_node_dict` computes `trusted`/`eligible`/`standing`.
+- `main.py` — `/node/register` no longer secret-gated: `classify_registration()` → trusted vs
+  probationary (or 401 when `OPEN_JOIN=0`); **hijack guard** (a secret-less register of an
+  existing *trusted* id → 409); response carries `standing` (+ note). `_network_summary` and
+  `_balanced_plan` now use `eligible`; dashboard shows a colored **standing** column;
+  `_network_summary` reports `probationary_nodes`.
+- `router.py` / `ledger.py` — route and credit **only `eligible` nodes** (probationary earns 0).
+- `agent/agent.py` — registers with **no secret by default** (only sends the header if the
+  operator sets `register_secret`); logs its standing; removed the hardcoded dev secret.
+- `security/proof_of_compute.py` — new `attest_via_coordinator()` + CLI `--coordinator/--node-id`:
+  look a node up in `/node/list`, challenge its last-stage slice, POST `/node/{id}/attest` →
+  a passing probationary node is promoted. (Last-stage only, as in S16; middle-node = extension.)
+
+**Verified:** `coordinator/test_open_join.py` — **17/17 PASS** (temp DB, real endpoint/router/
+ledger/models fns): secret→trusted, no-secret→probationary, probationary excluded from chain
++ earns 0, PoC pass→verified→routed→earns, trusted-id hijack→409, `OPEN_JOIN=0`→401, flagged
+overrides, legacy DB grandfathered→trusted. App imports/builds; all edited files byte-compile;
+`register_nodes.py` still sends the secret (trio stays trusted). **node_*/common UNCHANGED.**
+
+**Not done / next:** `/infer/{id}/complete` is still **unauthenticated** and mints from
+caller-supplied `node_ids` (PROBLEMS.md [P12]) — open join makes strangers able to reach it, so
+authenticating it + settling from the coordinator-recorded plan is the next security step. PoC
+still covers **last-stage nodes only** (place the first stranger on the final segment). **NOT
+deployed to the live cloud coordinator** — deploy = redeploy code + restart (DB auto-migrates,
+grandfathering the 3 nodes as trusted). Then FIRST_STRANGER steps 4-7 (4th-node placement,
+package agent, install guide, a friend runs it).
+
+---
+
+## Session 18 (2026-07-25) — the 4th node via REPLICATION (first-stranger Path A, step 4)
+
+**Goal:** let a 4th machine join and earn without deepening the pipeline. Considered three
+shapes; chose replication after tracing the code.
+
+**Why replication, not a 4-stage re-split:** a deeper pipeline is SLOWER per single request
+(PROBLEMS.md [P8]) and would force changes to `node_c.py`/relay/driver (risking
+`selftest_shard` bit-exactness). Replication is the [P8]-correct throughput shape AND -- the
+deciding factor -- **each assembled chain stays the usual 3-stage `driver->middle->last`**, so
+the drivers' hardwired `len(chain)==3` still holds. Net result: **coordinator-only change;
+`node_*.py`, `neuron_driver.py`, `common.py` all UNCHANGED.**
+
+**Built (router only):** `router.build_chain(now, pick=random.choice)` -- when several eligible
+nodes cover the SAME farthest segment from a cursor they are REPLICAS; the router picks one per
+call (default random), so concurrent requests spread across them and both earn. `pick` is
+injectable for deterministic routing/tests. A 4th node is placed simply by **registering with an
+existing node's layer range** (e.g. a second `19-27`); open-join means a stranger's replica joins
+probationary -> verified via proof-of-compute -> then becomes selectable. No new endpoints; the
+dashboard already shows two rows with the same range = replicas.
+
+**Verified:** `coordinator/test_replica.py` -- **9/9 PASS**: both replicas selected across 300
+calls (load spreads); every chain complete + 3-stage; injected picker forces either replica;
+earnings follow the chosen replica (the other earns nothing that request); a probationary replica
+is NEVER routed until a PoC pass; and the chain stays complete when only the stranger's replica
+remains. Open-join suite still 17/17; app builds; a live 4-node register yields a 3-node chain the
+drivers accept, last slot alternating `b`/`b2`.
+
+**Honest limits:** replication lifts THROUGHPUT under concurrent load (many requests / the
+parallel driver / multiple UI users); it does NOT speed a single request (correct, per [P8]). The
+auto-balancer (`_balanced_plan`) still assumes a contiguous partition, so replicas are a MANUAL
+placement -- don't run `/network/rebalance` on a replicated set (it would re-partition into 4
+contiguous stages, which the 3-stage driver can't run). **Not deployed to the live coordinator.**
+Next Path-A: package the agent + install guide, then a real stranger runs a last-segment replica
+end-to-end (steps 5-7). PoC still last-stage-only, which fits (place the stranger on `19-27`).
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load

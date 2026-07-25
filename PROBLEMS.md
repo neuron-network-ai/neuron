@@ -167,9 +167,13 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
   re-runs) → **a NAT'd node self-configures, zero manual steps**. Isolated test PASS (registered
   behind_nat → got port 9000 → reachable via the cloud relay byte-exact using only the coordinator's
   response). Deployed to the cloud coordinator (DB persisted, 3 nodes intact; `behind_nat` register
-  live-verified). **What's genuinely left for a first stranger:** an actual outside person installs
-  the agent — plus the open-join model (today registration needs a shared secret; a real open network
-  needs proof-of-compute / reputation instead, ROADMAP S16). Beyond ~100 relayed nodes: `SCALING.md`.
+  live-verified). **Open-join DONE (2026-07-25, Session 17):** registration no longer needs the
+  shared secret — a secret-less node joins *probationary* (excluded from routing/earning) and is
+  promoted to *verified* by a proof-of-compute pass; the secret now just marks a node *trusted*
+  (fast-path). `coordinator/test_open_join.py` 17/17; not yet deployed to the live coordinator.
+  **What's genuinely left for a first stranger:** an actual outside person installs the agent
+  (package + install guide + 4th-node placement), and `/complete` still needs auth ([P12]).
+  Beyond ~100 relayed nodes: `SCALING.md`.
 
 ### [P11] 🟡 Public-launch hygiene (before the repo goes public)
 - Hardcoded private Tailscale/LAN IPs across README/ROADMAP/agent/coordinator — genericize to
@@ -185,9 +189,38 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
   pipelines → ~linear aggregate throughput) and **bigger models** (split a model no single
   machine can hold). The coordinator currently assembles ONE chain; scaling throughput needs
   it to build and load-balance across **many** pipelines. This is the big future design step.
+  **Partial (2026-07-25, Session 18): REPLICATION landed at the segment level** — `router.build_chain`
+  now load-balances across nodes that share a segment (a 4th node registers with an existing node's
+  layer range; each request picks a replica at random, so both earn under concurrent load). This is
+  the throughput-via-replication shape for ONE pipeline slot; full many-pipeline / cross-driver
+  load-balancing (multiple driver hosts) is still the bigger open step.
   **→ Full prototype→worldwide scaling plan now written up in `SCALING.md`** (connectivity: P2P +
   relay fabric; coordination: regional → DHT; topology: many small pipelines; phased plan; Petals
   as the proven reference model; and the rule: don't build the scale layer before the first stranger).
+
+### [P12] 🔴 Ledger MINTS per request + payout path is unauthenticated (economics integrity)
+- `coordinator/ledger.py` creates 1.0 NRN out of nothing per completed request (node credit
+  at :35, and the 0.10 fee at :38-39 mints **unconditionally**, even for a 0-node chain) —
+  directly contradicts TOKENOMICS.md's fixed 1B supply ("all issuance from the emission
+  schedule, not open-ended minting"). No debit function exists anywhere ([P5] is the
+  user-side half of this).
+- `POST /infer/{id}/complete` (`coordinator/main.py:222-231`) has **no auth** and trusts
+  caller-supplied `node_ids` + `tokens_generated` — anyone who can reach the public cloud
+  coordinator can mint NRN to arbitrary registered nodes.
+- Price constant is duplicated (`coordinator/config.py:19` vs `api/openai_compat.py:45`) —
+  already drifted once; needs a single `GET /pricing` source.
+- **Fix designed (2026-07-25): TOKENOMICS.md §11** — genesis buckets + transfer-only
+  settlement + sum==1e9 invariant + authenticated /complete settling from the
+  coordinator-recorded pipeline plan. ~2-4 sessions.
+
+### [P13] 🟡 Prefill path is UNMEASURED — blocks token pricing AND may be a UX killer
+- Per-chat-turn compute spans **3.2×** (28 vs 91 node-seconds) depending on whether prefill
+  is batched or token-sequential; if sequential, TTFT on a 200-token prompt is ~152 s (fatal
+  for chat) and any discounted input-token price undercharges real compute ~4×.
+- Also a farming surface: under any work-metered subsidy, cheap batched prefill + expensive
+  metering = prompt-stuffing exploit (see TOKENOMICS.md §11.4/§11.8).
+- **Action: measure prefill (one selftest run with a long prompt, time the prefill pass)
+  before publishing any per-token price sheet; charge input at full weight until then.**
 
 ---
 

@@ -27,10 +27,21 @@ HEARTBEAT_TIMEOUT_S = 90       # mark offline if last_seen older than this
 HEALTH_CHECK_INTERVAL_S = 60   # background sweep cadence
 
 # --- security --------------------------------------------------------------- #
-# Shared secret required in the X-Register-Secret header to register a node.
-# Prevents random people registering fake nodes. Override in production.
+# Shared secret for the X-Register-Secret header. Presenting it marks a node TRUSTED
+# (skips probation). Override in production.
 REGISTRATION_SECRET = os.environ.get("NEURON_REGISTER_SECRET", "neuron-dev-secret")
 TOKEN_BYTES = 24               # per-node auth token length (in bytes, hex-encoded)
+
+# --- open join (Session 12 — the first stranger) ---------------------------- #
+# When on, ANYONE can register a node without the shared secret — that is the whole
+# point of an open network. A secret-less node joins as PROBATIONARY: it does NOT serve
+# live traffic and earns NO NRN until a verifier confirms it computes correctly
+# (proof-of-compute, Session 16). Presenting the valid secret still works and marks a
+# node TRUSTED (the founder's own dev nodes register that way). Set NEURON_OPEN_JOIN=0
+# to require the secret for every registration (fully private network).
+OPEN_JOIN = os.environ.get("NEURON_OPEN_JOIN", "1") == "1"
+# Proof-of-compute passes a probationary node needs before it may serve live traffic and earn.
+PROBATION_MIN_PASSES = int(os.environ.get("NEURON_PROBATION_MIN_PASSES", "1"))
 
 # Special ledger key that accumulates the coordinator's fee.
 COORDINATOR_LEDGER_ID = "__coordinator__"
