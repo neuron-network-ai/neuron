@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NEURON — distributed chat</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --panel:#ffffff; --ink:#1f2328; --muted:#6a737d; --line:#e3e6ea;
+    --user:#eef2ff; --user-ink:#1e293b; --bot:#ffffff; --brand:#4f46e5;
+    --ok:#137333; --bad:#c5221f; --warn:#a16207;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#0e1116; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e; --line:#2a2f37;
+      --user:#1f2a44; --user-ink:#dbe4ff; --bot:#161b22; --brand:#8b8cf7; }
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+    display:flex;flex-direction:column;height:100vh}
+  header{background:var(--panel);border-bottom:1px solid var(--line);
+    padding:.7rem 1rem;display:flex;align-items:center;gap:.75rem;flex-wrap:wrap}
+  .logo{font-weight:800;letter-spacing:.5px}
+  .logo span{color:var(--brand)}
+  .tag{color:var(--muted);font-size:12.5px}
+  .net{margin-left:auto;display:flex;align-items:center;gap:.5rem;font-size:13px;
+    color:var(--muted)}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--muted);flex:none}
+  .dot.ok{background:var(--ok)} .dot.bad{background:var(--bad)}
+  #warn{display:none;background:#fff7e6;color:var(--warn);border-bottom:1px solid var(--line);
+    padding:.5rem 1rem;font-size:13px}
+  #warn.show{display:block}
+  main{flex:1;overflow-y:auto;padding:1.1rem;display:flex;justify-content:center}
+  .thread{width:100%;max-width:760px;display:flex;flex-direction:column;gap:.85rem}
+  .msg{padding:.7rem .9rem;border-radius:12px;border:1px solid var(--line);white-space:pre-wrap;
+    word-wrap:break-word}
+  .msg.user{background:var(--user);color:var(--user-ink);align-self:flex-end;max-width:85%}
+  .msg.bot{background:var(--bot);align-self:flex-start;max-width:92%}
+  .msg.err{border-color:var(--bad);color:var(--bad)}
+  .who{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);
+    margin-bottom:.25rem}
+  .meta{font-size:12px;color:var(--muted);margin-top:.45rem;display:flex;gap:.75rem;flex-wrap:wrap}
+  .cursor::after{content:"▋";color:var(--brand);animation:blink 1s steps(2) infinite}
+  @keyframes blink{50%{opacity:0}}
+  .empty{color:var(--muted);text-align:center;margin-top:3rem;font-size:14px}
+  footer{background:var(--panel);border-top:1px solid var(--line);padding:.7rem 1rem;
+    display:flex;justify-content:center}
+  .bar{width:100%;max-width:760px;display:flex;gap:.5rem}
+  textarea{flex:1;resize:none;border:1px solid var(--line);border-radius:10px;
+    padding:.6rem .7rem;font:inherit;background:var(--panel);color:var(--ink);max-height:140px}
+  button{border:0;border-radius:10px;padding:0 1.1rem;background:var(--brand);color:#fff;
+    font-weight:600;cursor:pointer}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .foothint{max-width:760px;width:100%;margin:.35rem auto 0;color:var(--muted);font-size:11.5px;
+    text-align:center}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">NE<span>U</span>RON</div>
+  <div class="tag">distributed inference · no local model</div>
+  <div class="net">
+    <span class="dot" id="netdot"></span>
+    <span id="netlabel">checking network…</span>
+  </div>
+</header>
+<div id="warn"></div>
+
+<main>
+  <div class="thread" id="thread">
+    <div class="empty" id="empty">Ask anything. Your prompt is answered by a chain of
+      volunteer machines, each running a slice of the model.</div>
+  </div>
+</main>
+
+<footer>
+  <div>
+    <div class="bar">
+      <textarea id="input" rows="1" placeholder="Type a message and press Enter…"></textarea>
+      <button id="send">Send</button>
+    </div>
+    <div class="foothint" id="hint"><label style="cursor:pointer"><input type="checkbox" id="rag"> 🌐 Web search — answer with current info</label> &nbsp;·&nbsp; Each response costs 1.0 NRN.</div>
+  </div>
+</footer>
+
+<script>
+const $ = s => document.querySelector(s);
+const thread = $("#thread");
+let busy = false;
+let onlineNodes = 0;
+
+// ---- live network status --------------------------------------------------
+async function refreshNetwork(){
+  try{
+    const n = await (await fetch("/network")).json();
+    const dot = $("#netdot"), label = $("#netlabel"), warn = $("#warn");
+    if(!n.reachable){
+      dot.className = "dot bad";
+      label.textContent = "coordinator unreachable";
+      warn.className = "show"; warn.textContent = "Cannot reach the coordinator at " + n.coordinator + ".";
+      return;
+    }
+    onlineNodes = n.online_nodes;
+    dot.className = "dot " + (n.healthy ? "ok" : "bad");
+    label.textContent = "Powered by " + n.online_nodes + " node" +
+      (n.online_nodes===1?"":"s") + " worldwide";
+    if(!n.healthy){
+      warn.className = "show";
+      warn.textContent = "Network degraded — only " + n.layers_covered +
+        "/28 model layers are online. Responses will fail until the chain is complete.";
+    } else {
+      warn.className = ""; warn.textContent = "";
+    }
+  }catch(e){
+    $("#netdot").className = "dot bad";
+    $("#netlabel").textContent = "network status unavailable";
+  }
+}
+refreshNetwork();
+setInterval(refreshNetwork, 10000);
+
+// ---- message rendering ----------------------------------------------------
+function addMsg(cls, who){
+  const empty = $("#empty"); if(empty) empty.remove();
+  const el = document.createElement("div");
+  el.className = "msg " + cls;
+  el.innerHTML = "<div class='who'>"+who+"</div><div class='body'></div>";
+  thread.appendChild(el);
+  scroll();
+  return el.querySelector(".body");
+}
+function scroll(){ $("main").scrollTop = $("main").scrollHeight; }
+
+// ---- send + stream --------------------------------------------------------
+async function send(){
+  const input = $("#input");
+  const prompt = input.value.trim();
+  if(!prompt || busy) return;
+  busy = true; $("#send").disabled = true;
+  input.value = ""; input.style.height = "auto";
+
+  const useRag = $("#rag").checked;
+  addMsg("user","you").textContent = prompt;
+  const body = addMsg("bot","neuron");
+  body.classList.add("cursor");
+  let meta = null, gotToken = false;
+
+  try{
+    const res = await fetch("/chat", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({prompt, max_tokens:128, use_rag:useRag})
+    });
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    while(true){
+      const {value, done} = await reader.read();
+      if(done) break;
+      buf += dec.decode(value, {stream:true});
+      let i;
+      while((i = buf.indexOf("\n\n")) >= 0){
+        const frame = buf.slice(0,i); buf = buf.slice(i+2);
+        let event="message", data="";
+        for(const line of frame.split("\n")){
+          if(line.startsWith("event:")) event = line.slice(6).trim();
+          else if(line.startsWith("data:")) data += line.slice(5).trim();
+        }
+        const d = data ? JSON.parse(data) : {};
+        if(event==="meta"){ meta = d; }
+        else if(event==="sources"){ renderSources(body, d); }
+        else if(event==="token"){ gotToken = true; body.textContent += d.text; scroll(); }
+        else if(event==="done"){ finishBot(body, meta, d); }
+        else if(event==="error"){ showError(body, d.detail); }
+      }
+    }
+    if(!gotToken && body.textContent==="") body.textContent = "…";
+  }catch(e){
+    showError(body, "connection lost: " + e.message);
+  }finally{
+    body.classList.remove("cursor");
+    busy = false; $("#send").disabled = false; input.focus();
+  }
+}
+
+function renderSources(body, d){
+  const el = document.createElement("div");
+  el.className = "meta";
+  if(!d.used || !(d.sources||[]).length){
+    el.textContent = "🌐 web search: no results — answering from the model only";
+  } else {
+    const links = d.sources.slice(0,4).map(s =>
+      "<a href='" + (s.href||"#") + "' target='_blank' rel='noopener' style='color:var(--brand)'>"
+      + (s.title||"source").replace(/</g,"&lt;").slice(0,48) + "</a>").join(" · ");
+    el.innerHTML = "🌐 grounded on: " + links;
+  }
+  body.parentElement.appendChild(el);
+  scroll();
+}
+
+function finishBot(body, meta, d){
+  const n = (meta && meta.nodes) || onlineNodes;
+  const m = document.createElement("div");
+  m.className = "meta";
+  m.innerHTML =
+    "<span>⛓ " + n + " nodes</span>" +
+    "<span>◈ Cost: 1.0 NRN</span>" +
+    "<span>" + d.tokens + " tokens · " + d.tok_per_s + " tok/s</span>";
+  body.parentElement.appendChild(m);
+  scroll();
+}
+
+function showError(body, detail){
+  body.parentElement.classList.add("err");
+  body.textContent = "⚠ " + (detail || "inference failed");
+  scroll();
+}
+
+// ---- input behaviour ------------------------------------------------------
+const input = $("#input");
+input.addEventListener("input", () => {
+  input.style.height = "auto";
+  input.style.height = Math.min(input.scrollHeight, 140) + "px";
+});
+input.addEventListener("keydown", e => {
+  if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); send(); }
+});
+$("#send").addEventListener("click", send);
+input.focus();
+</script>
+</body>
+</html>

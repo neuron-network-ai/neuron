@@ -1,0 +1,60 @@
+# --- Python virtualenv (multi-GB — never commit) ---
+.venv/
+venv/
+env/
+
+# --- Byte-compiled / cache ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# --- Secrets / environment ---
+.env
+.env.*
+*.env
+
+# --- Model weights & caches (keep anything >100MB out of git) ---
+*.safetensors
+*.gguf
+*.bin
+*.pt
+*.pth
+*.onnx
+models--*/
+model_cache/
+hf_cache/
+**/huggingface/
+.cache/
+
+# --- agent runtime state (never commit; config.json gets node_token after 1st run) ---
+agent/model_slice*/
+agent/*.log
+agent/config.test.json
+agent/config.bad.json
+
+# --- coordinator runtime state / secrets (never commit) ---
+# SQLite DB holds real node auth tokens — must never be pushed
+*.db
+*.db-wal
+*.db-shm
+coordinator/node_tokens.json
+coordinator/nodes.local.json
+
+# --- private / pre-public docs (keep out of the public repo) ---
+TOKENOMICS.md
+
+# --- SSH / private keys (NEVER commit — belt-and-suspenders) ---
+*.key
+*.pem
+ssh-key-*
+id_rsa*
+id_ed25519*
+*_rsa
+*.ppk
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

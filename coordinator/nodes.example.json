@@ -1,0 +1,5 @@
+[
+  {"node_id": "node_a", "tailscale_ip": "100.100.100.1", "port": 50999, "layer_start": 0, "layer_end": 9, "cores": 16, "ram_gb": 63, "driver": true, "ms_per_layer": 9.0, "head_ms": 38.0},
+  {"node_id": "node_c", "tailscale_ip": "100.100.100.2", "port": 50999, "layer_start": 10, "layer_end": 18, "cores": 4, "ram_gb": 11, "ms_per_layer": 12.4},
+  {"node_id": "node_b", "tailscale_ip": "100.100.100.3", "port": 50999, "layer_start": 19, "layer_end": 27, "cores": 6, "ram_gb": 15, "ms_per_layer": 12.2}
+]
