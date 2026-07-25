@@ -103,3 +103,65 @@ Rough mapping to `ROADMAP.md`: S12 = Phase 1 (first stranger); S16 (security/pro
 and is the *wrong* investment before there are real users. Get the **first stranger earning**
 (proves people will run it at all), watch how real nodes actually behave, and design the
 scaling architecture from that evidence. Prototype → learn → scale, in that order.
+
+---
+
+## The consumer product & the engine keystone (llama.cpp)  *(noted 2026-07-25)*
+
+Founder's product direction — the "normal person joins via an app" goal and the single
+architectural decision it all depends on. **Captured for later; not scheduled as a numbered
+session yet.**
+
+### The goal
+A non-technical person joins NEURON by clicking an **app** — not `python agent.py`, not editing
+`config.json`, not Termux — and uses NEURON (chat) just as easily. This is the real front door for
+strangers (ROADMAP S12) and the whole consumer story.
+
+### One keystone unlocks everything: llama.cpp
+Every consumer requirement converges on replacing the hand-rolled **PyTorch** engine with
+**llama.cpp** (which the v2.0 plan doc already named — "Python + llama.cpp"):
+
+| Requirement | Why llama.cpp is the answer |
+|---|---|
+| Phones charging (Android) | runs natively on ARM/Android; PyTorch does not |
+| Idle GPUs | GPU via CUDA / Vulkan / Metal, built in |
+| A tiny installable app | a few-MB binary, not 200MB+ of PyTorch |
+| Fast inference (speed, [P1]) | optimized quantized kernels |
+| Quality quantization ([P9]) | GGUF Q4_K_M / Q8_0 preserve quality |
+| Split across machines | llama.cpp **RPC backend** distributes layers |
+
+You **cannot mix engines in one pipeline** (llama.cpp-quantized activations don't cleanly hand off to
+fp32 PyTorch nodes), so adding phones/GPUs/a-light-app is **one network-wide engine decision**, not a
+per-node bolt-on. The current PyTorch system is a working *proof of concept*; the consumer product is
+gated on this rebuild.
+
+### GPU harvesting (highest-leverage; fits the current arch)
+Idle consumer GPUs are the biggest **speed + big-model** unlock — GPU inference is 10–100× CPU. Unlike
+Android, basic CUDA support is a *small* change to the current PyTorch stack (move model + tensors to
+GPU), so it can even land before a full llama.cpp move. S14's auto-balancer is what makes a mixed
+CPU+GPU network work (the GPU node auto-gets most layers). Caveats: VRAM-aware balancing; GPU-idle
+detection (a gaming GPU is busy gaming); **green nuance — a GPU draws real power (200–400 W), so it's
+"reuse existing hardware, no new datacenters" green, NOT "negligible energy" green.**
+
+### Android / phones (the best green story)
+Billions of phones charging overnight on WiFi = arguably the **purest green node** — charger already
+drawing power, 1% of an efficient ARM CPU ≈ negligible marginal energy (far greener than GPUs). Needs
+llama.cpp. Caveats: battery heat/wear (charging-only + WiFi-only + ~1% cap + thermal throttle); slice
+must fit phone RAM (GGUF makes it fit); Android background limits (foreground service / Termux:Boot);
+iOS forbids background compute → **Android-first**.
+
+### Honest "1MB agent" framing (don't overclaim)
+"1MB" is the **app**, not the total footprint:
+- App (code + llama.cpp binary): **~1–10 MB** ✅
+- Model slice (weights this node runs): **hundreds of MB → ~1 GB+**, streamed in chunks, cached on disk
+- RAM while active: ≈ slice size + small overhead · CPU: 1–2% idle
+
+Say *"a ~1MB app that streams only the slice it needs"* — never *"NEURON is 1MB total."* The layer-split
+keeps each phone's slice small (a few layers, not the whole model) — which is exactly what makes phones
+viable for huge models. PyTorch can't make an honest small-app claim at all; llama.cpp is what rescues it.
+
+### Recommendation
+Before committing to the rebuild, do a cheap **llama.cpp spike**: prove one GGUF model split across 2
+machines via the RPC backend (and/or running on a phone). Decide with data, like the quantization spike.
+This llama.cpp / consumer-app track is **cross-cutting** — schedule it deliberately; it is NOT a quick
+session, and Android (S13) stays deferred until it exists.
