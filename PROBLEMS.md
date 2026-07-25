@@ -198,7 +198,16 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
   relay fabric; coordination: regional → DHT; topology: many small pipelines; phased plan; Petals
   as the proven reference model; and the rule: don't build the scale layer before the first stranger).
 
-### [P12] 🔴 Ledger MINTS per request + payout path is unauthenticated (economics integrity)
+### [P12] 🟡 Ledger MINTS per request + payout path is unauthenticated (economics integrity)
+> **PAYOUT-AUTH HALF RESOLVED (2026-07-25, Session 19).** `/infer` now issues a per-request
+> `complete_token` and records the chain it chose; `/complete` requires that token (wrong/missing →
+> 401) and **settles from the coordinator-recorded plan, never caller-supplied `node_ids`** — so a
+> completion can no longer mint NRN to an arbitrary node or to the unchosen replica, and third parties
+> can't forge/replay completions. `tokens_generated` is clamped to `max_tokens`. Test:
+> `coordinator/test_complete_auth.py` 13/13. **STILL OPEN:** the ledger still MINTS per request (no
+> user debit, no fixed-supply enforcement) — that is the economics rewrite in TOKENOMICS.md §11
+> (genesis buckets + wallets + debit + settle), deliberately deferred until after the first stranger.
+
 - `coordinator/ledger.py` creates 1.0 NRN out of nothing per completed request (node credit
   at :35, and the 0.10 fee at :38-39 mints **unconditionally**, even for a 0-node chain) —
   directly contradicts TOKENOMICS.md's fixed 1B supply ("all issuance from the emission

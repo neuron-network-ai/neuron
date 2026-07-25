@@ -7,6 +7,7 @@ token-gated (Part 6): registration needs the shared X-Register-Secret; a node's
 own ping/delete need its X-Node-Token.
 """
 import asyncio
+import json
 import secrets
 import time
 import uuid
@@ -44,6 +45,7 @@ class CompleteBody(BaseModel):
     tokens_generated: int
     duration_ms: int
     node_ids: list[str]
+    complete_token: str | None = None   # [P12] token issued by /infer; required to settle
 
 
 class AttestBody(BaseModel):
@@ -183,6 +185,13 @@ def register(body: RegisterBody, x_register_secret: str = Header(default=None)):
     return resp
 
 
+@app.get("/node/placement")
+def node_placement():
+    """Advise a joining node which slice to serve (zero-config open join, S20). No auth — a
+    node calls this before it has a token; it is read-only and rate-limited by the middleware."""
+    return {"total_layers": config.TOTAL_LAYERS, **router.suggest_placement()}
+
+
 @app.get("/node/list")
 def node_list():
     nodes = [{k: v for k, v in n.items() if k != "node_token"} for n in models.list_nodes()]
@@ -243,8 +252,11 @@ def infer(body: InferBody):
             detail=f"incomplete chain - missing layers {router.missing_str(missing)}",
         )
     request_id = str(uuid.uuid4())
-    models.create_request(request_id, body.prompt, body.max_tokens)
-    return {"chain": router.chain_public(chain), "request_id": request_id}
+    plan_node_ids = [n["node_id"] for n in chain]          # the chain WE chose (incl. replica)
+    complete_token = secrets.token_hex(config.TOKEN_BYTES)  # only the caller who got this may complete
+    models.create_request(request_id, body.prompt, body.max_tokens, plan_node_ids, complete_token)
+    return {"chain": router.chain_public(chain), "request_id": request_id,
+            "complete_token": complete_token}
 
 
 @app.post("/infer/{request_id}/complete")
@@ -254,8 +266,16 @@ def complete(request_id: str, body: CompleteBody):
         raise HTTPException(status_code=404, detail=f"unknown request '{request_id}'")
     if req["status"] == "completed":
         raise HTTPException(status_code=409, detail="request already completed")
-    models.complete_request(request_id, body.tokens_generated, body.duration_ms, body.node_ids)
-    rewards = ledger.distribute(body.node_ids)
+    # [P12] authenticate: only whoever received the token from /infer may complete this request.
+    expected = req.get("complete_token")
+    if expected and not secrets.compare_digest(str(body.complete_token or ""), str(expected)):
+        raise HTTPException(status_code=401, detail="invalid or missing complete_token")
+    # [P12] settle from the plan WE recorded at /infer, never the caller-reported node_ids — so a
+    # completion can only ever pay the nodes the coordinator actually routed (incl. the chosen replica).
+    plan = json.loads(req["plan_node_ids"]) if req.get("plan_node_ids") else list(body.node_ids)
+    tokens = max(0, min(int(body.tokens_generated), int(req["max_tokens"] or body.tokens_generated)))
+    models.complete_request(request_id, tokens, body.duration_ms, plan)
+    rewards = ledger.distribute(plan)
     return {"status": "completed", "request_id": request_id, "rewards": rewards}
 
 

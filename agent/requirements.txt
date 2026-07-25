@@ -1,0 +1,19 @@
+# NEURON node (agent) dependencies — install with:  pip install -r agent/requirements.txt
+#
+# torch and transformers MUST be these versions: nodes exchange pickled tensors over TCP,
+# so every machine on the network has to agree on them. Don't upgrade these two casually.
+torch==2.4.1
+transformers==4.44.2
+
+# slice loading + inference support
+accelerate
+safetensors
+
+# agent runtime (resource guard, heartbeat, registration)
+psutil
+requests
+
+# Optional — the system-tray icon (green = earning, pause, NRN balance).
+# Uncomment on a desktop; leave commented on a headless server.
+# pystray
+# Pillow

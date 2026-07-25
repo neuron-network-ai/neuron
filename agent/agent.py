@@ -27,8 +27,14 @@ import time
 import psutil
 import requests
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(HERE))                 # repo root
+# When frozen into a PyInstaller .exe, config/log/slice live next to the executable (the
+# bundled Python modules are already importable); as a normal script, HERE is agent/ and we
+# add the repo root to sys.path so `common` / `slice_downloader` resolve.
+if getattr(sys, "frozen", False):
+    HERE = os.path.dirname(sys.executable)
+else:
+    HERE = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, os.path.dirname(HERE))             # repo root
 from agent import resource_guard                          # noqa: E402
 from agent.node_server import NodeServer                  # noqa: E402
 import slice_downloader                                   # noqa: E402
@@ -85,7 +91,21 @@ class Agent:
         json.dump(self.cfg, open(self.config_path, "w"), indent=2)
 
     # -- coordinator calls --------------------------------------------------- #
+    def ensure_placement(self):
+        """Zero-config open join (S20): if config has no layer range, ask the coordinator
+        where we fit (fills a gap, else replicates the last segment) and persist it."""
+        if self.cfg.get("layer_start") is not None and self.cfg.get("layer_end") is not None:
+            return
+        r = requests.get(f"{self.base}/node/placement", timeout=15)
+        r.raise_for_status()
+        p = r.json()
+        self.cfg["layer_start"], self.cfg["layer_end"] = p["layer_start"], p["layer_end"]
+        self._save()
+        log.info("auto-placed on layers %d-%d (%s: %s)", p["layer_start"], p["layer_end"],
+                 p.get("role"), p.get("reason"))
+
     def register(self):
+        self.ensure_placement()
         ip = detect_tailscale_ip()
         body = {
             "node_id": self.cfg.get("node_id") or f"agent-{socket.gethostname().lower()}",

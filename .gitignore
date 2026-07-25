@@ -53,6 +53,11 @@ id_ed25519*
 *_rsa
 *.ppk
 
+# --- PyInstaller build output (multi-GB — bundles torch; never commit) ---
+build/
+dist/
+*.manifest
+
 # --- OS / editor cruft ---
 .DS_Store
 Thumbs.db

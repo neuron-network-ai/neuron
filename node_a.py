@@ -46,8 +46,9 @@ compute_lock = threading.Lock()   # serialise node_a's own compute across reques
 # Coordinator client (Session 6): ask the coordinator for the chain, report done
 # --------------------------------------------------------------------------- #
 def coord_get_chain(base, prompt, max_tokens, expected_s1):
-    """POST /infer -> derive (host_c, port_c, host_b, port_b, s2, node_ids, request_id).
-    Assumes a 3-node chain matching node_a's loaded shard (layers 0..expected_s1-1)."""
+    """POST /infer -> (host_c, port_c, host_b, port_b, s2, node_ids, request_id, complete_token).
+    Assumes a 3-node chain matching node_a's loaded shard (layers 0..expected_s1-1). The
+    complete_token authenticates the later /complete call ([P12])."""
     r = requests.post(f"{base}/infer", json={"prompt": prompt, "max_tokens": max_tokens},
                       timeout=15)
     if r.status_code != 200:
@@ -64,28 +65,29 @@ def coord_get_chain(base, prompt, max_tokens, expected_s1):
     if a["layers"] != [0, expected_s1 - 1]:
         raise RuntimeError(f"chain assigns node_a {a['layers']} but shard is 0..{expected_s1-1}")
     return c["ip"], c["port"], b["ip"], b["port"], c["layers"][1] + 1, \
-        [a["node_id"], c["node_id"], b["node_id"]], request_id
+        [a["node_id"], c["node_id"], b["node_id"]], request_id, data.get("complete_token")
 
 
-def coord_complete(base, request_id, tokens, duration_ms, node_ids):
+def coord_complete(base, request_id, tokens, duration_ms, node_ids, complete_token=None):
     try:
         requests.post(f"{base}/infer/{request_id}/complete",
                       json={"tokens_generated": tokens, "duration_ms": duration_ms,
-                            "node_ids": node_ids}, timeout=15)
+                            "node_ids": node_ids, "complete_token": complete_token}, timeout=15)
     except requests.RequestException as e:
         print(f"[A] warn: completion report failed: {e}")
 
 
 def run_request(idx, prompt, model, tok, cfg, eos_id, results, coordinator=None):
     s1, s2, host_c, port_c, host_b, port_b, max_new = cfg
-    request_id, node_ids = None, None
+    request_id, node_ids, complete_token = None, None, None
     t_start = time.time()
     try:
         if coordinator:
-            host_c, port_c, host_b, port_b, s2, node_ids, request_id = \
+            host_c, port_c, host_b, port_b, s2, node_ids, request_id, complete_token = \
                 coord_get_chain(coordinator, prompt, max_new, s1)
         _run(idx, prompt, model, tok, s1, s2, host_c, port_c, host_b, port_b,
-             max_new, eos_id, results, coordinator, request_id, node_ids, t_start)
+             max_new, eos_id, results, coordinator, request_id, node_ids, t_start,
+             complete_token)
     except Exception as e:
         results[idx] = {"prompt": prompt, "error": str(e), "text": "", "tokens": 0,
                         "latency": time.time() - t_start, "request_id": request_id,
@@ -94,7 +96,8 @@ def run_request(idx, prompt, model, tok, cfg, eos_id, results, coordinator=None)
 
 
 def _run(idx, prompt, model, tok, s1, s2, host_c, port_c, host_b, port_b,
-         max_new, eos_id, results, coordinator, request_id, node_ids, t_start):
+         max_new, eos_id, results, coordinator, request_id, node_ids, t_start,
+         complete_token=None):
     sock = socket.create_connection((host_c, port_c), timeout=30)
     common.send_msg(sock, {"type": "config", "s1": s1, "s2": s2,
                            "host_b": host_b, "port_b": port_b})
@@ -137,7 +140,8 @@ def _run(idx, prompt, model, tok, s1, s2, host_c, port_c, host_b, port_b,
 
     latency = time.time() - t_start
     if coordinator and request_id:
-        coord_complete(coordinator, request_id, len(generated), int(latency * 1000), node_ids)
+        coord_complete(coordinator, request_id, len(generated), int(latency * 1000),
+                       node_ids, complete_token)
 
     hit_eos = generated[-1] == eos_id
     out_ids = generated[:-1] if hit_eos else generated

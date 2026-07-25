@@ -817,6 +817,71 @@ end-to-end (steps 5-7). PoC still last-stage-only, which fits (place the strange
 
 ---
 
+## Session 19 (2026-07-25) — authenticate /complete + settle from the recorded plan ([P12])
+
+**Goal:** open join made the coordinator stranger-reachable, but `/infer/{id}/complete` was
+unauthenticated and paid out to CALLER-SUPPLIED `node_ids` — anyone reaching the coordinator could
+mint NRN to any node. Close the security hole WITHOUT the economics rewrite (still-minting +
+wallets/debit = TOKENOMICS §11, post-first-stranger).
+
+**Built (coordinator + driver clients):**
+- `/infer` now records the chain IT chose (`plan_node_ids`) and issues a per-request
+  `complete_token` (returned to the caller). `requests` table gained both columns (+ migration).
+- `/complete` requires the token (`secrets.compare_digest`; wrong/missing → 401, request stays
+  pending, nothing credited) and **settles from the recorded plan, never `body.node_ids`** — so a
+  completion can only ever pay the nodes the coordinator actually routed (incl. the chosen replica).
+  `tokens_generated` clamped to `max_tokens`. 404/409 paths unchanged.
+- Driver clients threaded the token through: `node_a.coord_get_chain` returns it (8-tuple),
+  `node_a.coord_complete(..., complete_token)` sends it; `node_a.run_request`/`_run` and
+  `neuron_driver.stream` pass it. So the Chat UI + OpenAI API (both go through `neuron_driver` →
+  `node_a`) are covered with no changes to `ui/app.py` or `api/openai_compat.py`. **common.py and
+  the node_b/node_c servers UNCHANGED** (node_a is the driver/client, not inference math).
+
+**Verified:** `coordinator/test_complete_auth.py` — **13/13 PASS**: /infer issues a token + persists
+the plan; wrong/missing token → 401 with no credit and still-pending; a completion that LIES about
+`node_ids` (claims the unchosen replica + a ghost node) pays the recorded plan only (ghost never
+credited, unchosen replica earns nothing); tokens clamped; 409 double-complete; 404 unknown. All
+three coordinator suites green (open_join 17, replica 9, complete_auth 13); node_a + neuron_driver
+import cleanly (tuple arity OK).
+
+**Still open (deferred by design):** the ledger still MINTS 1.0 NRN/request with no user debit and no
+fixed-supply enforcement — the §11 economics (genesis buckets, wallets, debit, settle) come AFTER the
+first stranger. Server-side token RECOUNT (vs the clamp) is future. **Not deployed to the live
+coordinator.** Next Path-A: package the agent + install guide, then a real stranger joins (steps 5-7).
+
+---
+
+## Session 20 (2026-07-25) — zero-config auto-placement for a joining node (first-stranger Path A)
+
+**Goal:** a stranger should never pick layer numbers. Today `agent/config.json` hardcoded
+`layer_start/end = 10/18` — a middle segment that collides with node_c AND can't be verified
+(proof-of-compute is last-stage only), so a stranger literally couldn't earn.
+
+**Built (coordinator + agent):**
+- `router.suggest_placement()` — fill the first coverage GAP if the eligible chain is incomplete;
+  else the chain is complete, so **replicate the LAST segment** (verifiable via PoC, adds throughput
+  via S18 replica routing). Returns `{layer_start, layer_end, role, reason}`.
+- `GET /node/placement` — advisory, no auth (a node calls it before it has a token), rate-limited by
+  the middleware. Returns `total_layers` + the placement.
+- `agent/agent.py` — `ensure_placement()` (called at the top of `register()`): if config has no layer
+  range, fetch `/node/placement`, persist and log it. So the agent self-configures.
+- `agent/config.json` — `layer_start/end` → **null** (auto-place) and `behind_nat` → **true** (a public
+  stranger is reachable via the relay with no inbound port).
+
+**Verified:** `coordinator/test_placement.py` — empty net → fill-gap over all layers; missing last
+segment → fill-gap 19-27; complete chain → replica-last 19-27; a PROBATIONARY node covering the gap does
+NOT count as coverage (still a gap) until PoC-verified; endpoint returns total_layers + role. **6/6 PASS;
+all four coordinator suites green (open_join 17, replica 9, complete_auth 13, placement 6 = 45).
+node_*/common UNCHANGED** (agent only).
+
+**Net effect for the first stranger:** install → run the agent → auto-placed on a verifiable last-segment
+replica → founder verifies via proof-of-compute → earns under load. Combined with S17 (open join), S18
+(replica), S19 ([P12] complete-auth): the coordinator is now safe to expose and a stranger self-onboards.
+**Still uncommitted (S19 + S20). Not deployed to the live coordinator.** Next Path-A: install guide (step 6)
++ package agent (step 5), then a real friend runs it (step 7).
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load

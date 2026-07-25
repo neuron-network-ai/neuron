@@ -46,7 +46,9 @@ CREATE TABLE IF NOT EXISTS requests (
     completed_at     REAL,
     tokens_generated INTEGER,
     duration_ms      INTEGER,
-    node_ids         TEXT
+    node_ids         TEXT,
+    plan_node_ids    TEXT,
+    complete_token   TEXT
 );
 """
 
@@ -80,6 +82,12 @@ def init_db():
             # every pre-open-join node registered under the shared secret -> grandfather
             # them in as trusted so opening the door doesn't demote the live network.
             c.execute("UPDATE nodes SET trusted=1")
+        # S18b ([P12]): record the routed chain + a per-request completion token so /complete
+        # can be authenticated and settled from the coordinator's own plan, not caller input.
+        rcols = {r["name"] for r in c.execute("PRAGMA table_info(requests)").fetchall()}
+        for col in ("plan_node_ids", "complete_token"):
+            if col not in rcols:
+                c.execute(f"ALTER TABLE requests ADD COLUMN {col} TEXT")
 
 
 def _status(last_seen, now=None):
@@ -236,12 +244,14 @@ def node_ledgers():
 # --------------------------------------------------------------------------- #
 # Requests
 # --------------------------------------------------------------------------- #
-def create_request(request_id, prompt, max_tokens):
+def create_request(request_id, prompt, max_tokens, plan_node_ids=None, complete_token=None):
     with _db() as c:
         c.execute(
-            "INSERT INTO requests (request_id, prompt, max_tokens, status, created_at) "
-            "VALUES (?,?,?, 'pending', ?)",
-            (request_id, prompt, max_tokens, time.time()),
+            "INSERT INTO requests (request_id, prompt, max_tokens, status, created_at, "
+            "plan_node_ids, complete_token) VALUES (?,?,?, 'pending', ?, ?, ?)",
+            (request_id, prompt, max_tokens, time.time(),
+             json.dumps(plan_node_ids) if plan_node_ids is not None else None,
+             complete_token),
         )
 
 

@@ -55,6 +55,27 @@ def build_chain(now=None, pick=None):
     return chain, missing
 
 
+def suggest_placement(now=None):
+    """Advise a JOINING node which layer slice to serve (Session 20 — zero-config open join).
+
+    A stranger shouldn't pick layer numbers. Policy: if the eligible chain has a coverage GAP,
+    fill the first one; otherwise the chain is complete, so replicate the LAST segment — it adds
+    throughput (S18 replica routing) and is the segment proof-of-compute can verify (S16). Returns
+    {layer_start, layer_end, role, reason}. Advisory only; the node still registers normally.
+    """
+    total = config.TOTAL_LAYERS
+    chain, missing = build_chain(now)
+    if missing:
+        start, end = missing[0]
+        return {"layer_start": start, "layer_end": end, "role": "fill-gap",
+                "reason": f"chain is missing layers {start}-{end}"}
+    last = chain[-1]      # complete chain => non-empty; last node defines the final segment
+    return {"layer_start": last["layer_start"], "layer_end": last["layer_end"],
+            "role": "replica-last",
+            "reason": "chain is complete; replicate the last segment to add throughput "
+                      "(verifiable via proof-of-compute)"}
+
+
 def chain_public(chain):
     """Client-facing view of the chain (node_id + address + layer range)."""
     return [

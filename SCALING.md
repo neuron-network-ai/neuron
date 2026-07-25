@@ -165,3 +165,48 @@ Before committing to the rebuild, do a cheap **llama.cpp spike**: prove one GGUF
 machines via the RPC backend (and/or running on a phone). Decide with data, like the quantization spike.
 This llama.cpp / consumer-app track is **cross-cutting** — schedule it deliberately; it is NOT a quick
 session, and Android (S13) stays deferred until it exists.
+
+---
+
+### Engine deep-dive: adapt llama.cpp vs. build "neuron.cpp"  *(discussion 2026-07-25 — PARKED, needs dedicated time)*
+
+Founder asked whether to write our own C++ engine ("neuron.cpp") for speed, motivated by the green
+vision. **Conclusion of the discussion: do NOT write kernels from scratch — but a NEURON-specific engine
+LAYER on top of llama.cpp's kernels is the legitimate path.** Parked for a dedicated session; recorded
+so we can resume without re-deriving. Priority stays the first stranger, not the engine.
+
+**Why not a from-scratch engine:** speed on CPU comes from quantization + SIMD/GPU kernels, which are a
+commodity llama.cpp already nails (years of work, hundreds of contributors). A custom engine would be, at
+best, *as fast, years later*. The green differentiation lives in NEURON's **network** (slicing +
+coordinator + economics + proof-of-compute), NOT the kernels. Build only the differentiated layer.
+
+**If/when we adopt llama.cpp, the right shape = a NEURON engine on `ggml`, not on `libllama`:**
+- `ggml` = llama.cpp's low-level tensor+kernel library (the fast quantized CPU/GPU kernels — the commodity we want).
+- `libllama` = the high-level layer that loads a *complete* GGUF and builds the *full* graph (this is what refuses "just layers 19–27").
+- The **legitimate "neuron.cpp"** = a thin engine on ggml that (1) loads ONLY this node's slice tensors and (2) wires the Qwen2 decoder block (RMSNorm → GQA attention + RoPE → SwiGLU) for ONLY its layers — i.e. our current `first/mid/last_stage` re-expressed as a ggml graph, **cribbed from llama.cpp's own Qwen2 graph code.** Graph+loader work, NOT kernel/quant work.
+- Founder's "give id" idea = already half-built: the coordinator's `slice-info` assigns each node its `layer_start/end`; we'd just emit **GGUF slices** from `slice_downloader` instead of safetensors slices.
+
+**The two HARD, NEURON-specific problems (these are the real work; only we can do them):**
+1. **Partial-model / slice loading** — solved by the ggml engine above (partial graph from slice tensors). Keeps the "no machine holds the whole model" property; stock llama.cpp RPC breaks it (its orchestrator loads the full model).
+2. **Proof-of-compute is coupled to bit-exactness** — S16 PoC recomputes layers in torch and compares to ~1e-5. Under int4 + heterogeneous hardware, outputs legitimately spread, so the atol-based honest/cheat boundary must be re-derived or PoC redesigned. **Solving the slice does NOT solve the trust check.**
+
+**Manageable problems (friction, not blockers):** Python↔C/C++ boundary + per-platform native builds
+(Windows/Linux/ARM/Android NDK, code-signing/AV); llama.cpp **RPC backend is built for a trusted cluster,
+not trustless strangers** (its `rpc-server` is an RCE surface — must sandbox/bridge to our coordinator +
+relay + reputation); **all-or-nothing cutover** (engines can't mix in one pipeline → flag-day, or run a
+parallel network and cut over); S14 rebalancing granularity; KV-cache mapping onto ggml.
+
+**Cheaper speed path to test FIRST (zero C++):** **GPTQ / AWQ int4** inside the *existing PyTorch split*
+— quality-preserving (unlike the naive int8 that broke output, [P9]), stays 100% Python, keeps the slice
+property AND the current PoC. Downside: PyTorch CPU int4 isn't as fast as llama.cpp's hand-tuned kernels
+→ *partial* speedup, not the full win. Two speed tiers to weigh:
+
+| Path | Effort | Speed | Keeps slice + PoC? |
+|---|---|---|---|
+| GPTQ/AWQ int4 in the PyTorch split | low (Python) | partial | yes |
+| ggml NEURON engine ("neuron.cpp") | high (C/ggml) | full + GPU + phones | slice yes; **PoC needs rework** |
+
+**When we give this dedicated time, the spike must answer BOTH:** (a) how fast + how good is GPTQ/AWQ
+int4 on the *current* split right now (might already be "fast enough" and buys months); (b) prove ONE
+ggml slice-node runs only its layers with no node loading the full GGUF (the feasibility gate for the big
+engine). Decide with numbers, not faith.

@@ -73,7 +73,7 @@ class _Driver:
 
         # 1) ask the coordinator for a chain matching our shard (layers 0..S1-1)
         try:
-            host_c, port_c, host_b, port_b, s2, node_ids, request_id = \
+            host_c, port_c, host_b, port_b, s2, node_ids, request_id, complete_token = \
                 node_a.coord_get_chain(coordinator, router_prompt, max_new, S1)
         except Exception as e:
             yield {"type": "error", "detail": str(e)}
@@ -131,7 +131,7 @@ class _Driver:
             latency_ms = int((time.time() - t_start) * 1000)
             tokens_generated = completion + (1 if finish == "stop" else 0)
             node_a.coord_complete(coordinator, request_id, tokens_generated,
-                                  latency_ms, node_ids)
+                                  latency_ms, node_ids, complete_token)
             yield {"type": "done", "completion_tokens": completion,
                    "prompt_tokens": prompt_tokens, "finish_reason": finish,
                    "latency_ms": latency_ms,

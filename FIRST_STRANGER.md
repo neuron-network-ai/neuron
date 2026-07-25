@@ -53,6 +53,14 @@ Stranger's machine (anywhere, behind NAT)  ── all OUTBOUND ──▶  coordi
 **Fastest honest route:** steps 1–4 (mine) + 2 & 7 (yours). A semi-technical friend could join
 via "install Python + run" even before the packaged exe (step 5).
 
+> **Zero-config join added (Session 20):** a joining node no longer needs to pick layer numbers.
+> The agent asks `GET /node/placement`; the coordinator fills a coverage gap, else puts it on the
+> **last segment as a replica** (verifiable via proof-of-compute, adds throughput). `agent/config.json`
+> now ships `layer_start/end: null` (auto-place) and `behind_nat: true` (reachable over the public
+> internet via the relay). So a stranger's flow is just: install → run → auto-placed → verified → earns.
+> Coordinator side tested (`coordinator/test_placement.py`). Also authenticated `/complete` ([P12]) so
+> the open coordinator can't be used to mint NRN to arbitrary nodes.
+
 ---
 
 ## Path B — real consumer product (bigger, later)
