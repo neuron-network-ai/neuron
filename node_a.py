@@ -18,7 +18,7 @@ the coordinator can credit NRN. --host-c/--host-b still work as a direct fallbac
 
 Usage:
   python node_a.py --coordinator http://localhost:8000 --prompt "Why is the sky blue"
-  python node_a.py --host-c 100.79.125.112 --host-b 100.114.189.46 --s1 10 --s2 19
+  python node_a.py --host-c <node-c-ip> --host-b <node-b-ip> --s1 10 --s2 19
   add --serial for the one-at-a-time baseline.
 """
 

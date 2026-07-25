@@ -39,6 +39,10 @@ agent/config.bad.json
 *.db-wal
 *.db-shm
 coordinator/node_tokens.json
+coordinator/nodes.local.json
+
+# --- private / pre-public docs (keep out of the public repo) ---
+TOKENOMICS.md
 
 # --- SSH / private keys (NEVER commit — belt-and-suspenders) ---
 *.key

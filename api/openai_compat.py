@@ -39,7 +39,7 @@ import common
 from coordinator import model_registry
 from neuron_driver import DRIVER
 
-COORDINATOR = os.environ.get("NEURON_COORDINATOR", "http://100.114.189.46:8001").rstrip("/")
+COORDINATOR = os.environ.get("NEURON_COORDINATOR", "http://150.230.22.250:8001").rstrip("/")
 MODEL_ID = common.MODEL_ID
 MODEL_ALIASES = {MODEL_ID, "neuron", "neuron-1", "gpt-3.5-turbo"}  # accept common names
 NRN_PER_REQUEST = 1.0

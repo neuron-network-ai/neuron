@@ -20,7 +20,7 @@ Run (from C:\\Users\\optin\\neuron, node_a machine):
     then open http://localhost:8080  (API docs at http://localhost:8080/api-docs)
 
 Env overrides:
-    NEURON_COORDINATOR   coordinator base URL   (default http://100.114.189.46:8001)
+    NEURON_COORDINATOR   coordinator base URL   (default http://150.230.22.250:8001)
     NEURON_S1            layers node_a owns = 0..S1-1  (default 10)
     NEURON_MAX_TOKENS    hard cap on tokens per response (default 512)
 """
@@ -39,7 +39,7 @@ from neuron_driver import DRIVER
 from api.openai_compat import router as openai_router, docs_html
 from rag import retriever as rag
 
-COORDINATOR = os.environ.get("NEURON_COORDINATOR", "http://100.114.189.46:8001").rstrip("/")
+COORDINATOR = os.environ.get("NEURON_COORDINATOR", "http://150.230.22.250:8001").rstrip("/")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 

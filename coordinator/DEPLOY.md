@@ -75,8 +75,8 @@ sudo systemctl status neuron-coordinator
 
 ## 3. Point the network at the new coordinator
 
-Everything currently defaults to the private Tailscale IP `http://100.114.189.46:8001`.
-Override with the public URL (no code edits needed — all read env or flags):
+Everything defaults to the cloud coordinator `http://150.230.22.250:8001` (override with
+`NEURON_COORDINATOR` / `--coordinator`; no code edits needed — all read env or flags):
 
 - **Nodes / driver:** `node_a.py --coordinator http://<VM_PUBLIC_IP>:8001 ...`
 - **UI + API server:** `NEURON_COORDINATOR=http://<VM_PUBLIC_IP>:8001 uvicorn ui.app:app ...`

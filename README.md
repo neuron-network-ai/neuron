@@ -88,7 +88,7 @@ generation, and applies `lm_head`. Each node loads only its own shard on first c
 
 **Direct mode** (no coordinator — hardcode the chain):
 ```bash
-python node_a.py --host-c 100.79.125.112 --host-b 100.114.189.46 --s1 9 --s2 18 --max-new-tokens 80
+python node_a.py --host-c <node-c-ip> --host-b <node-b-ip> --s1 9 --s2 18 --max-new-tokens 80
 ```
 Flags: `--serial` (baseline), `--copies 2` (N=8 concurrent), `--prompt "..."` (single
 request), `--s1/--s2` (layer boundaries). Verify a split is bit-exact vs. one machine with
@@ -109,7 +109,7 @@ python coordinator/register_nodes.py
 ```
 Then let `node_a` discover the chain from the coordinator instead of hardcoding it:
 ```bash
-python node_a.py --coordinator http://100.114.189.46:8001 --prompt "Why is the sky blue"
+python node_a.py --coordinator http://<coordinator-host>:8001 --prompt "Why is the sky blue"
 ```
 
 ### Dashboard

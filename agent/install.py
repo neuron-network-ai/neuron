@@ -1,7 +1,7 @@
 """
 agent/install.py — one-command setup on a fresh machine.
 
-  python install.py --coordinator http://100.114.189.46:8001
+  python install.py --coordinator http://150.230.22.250:8001
 
 Creates config.json, (optionally) registers auto-start, and launches the agent in
 the background. Auto-start uses the Windows HKCU Run key or a Linux systemd --user
@@ -23,7 +23,7 @@ CONFIG_PATH = os.path.join(HERE, "config.json")
 IS_WINDOWS = platform.system() == "Windows"
 
 DEFAULT_CONFIG = {
-    "coordinator": "http://100.114.189.46:8001",
+    "coordinator": "http://150.230.22.250:8001",
     "node_id": None, "node_token": None,
     "layer_start": 10, "layer_end": 18,
     "slice_dir": "./model_slice/",
@@ -92,8 +92,8 @@ def main():
 
     coordinator = args.coordinator
     if not coordinator:
-        coordinator = input("Coordinator URL [http://100.114.189.46:8001]: ").strip() \
-            or "http://100.114.189.46:8001"
+        coordinator = input("Coordinator URL [http://150.230.22.250:8001]: ").strip() \
+            or "http://150.230.22.250:8001"
 
     print(f"Installing NEURON agent (coordinator = {coordinator})")
     write_config(coordinator, args.layer_start, args.layer_end)

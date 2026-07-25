@@ -29,21 +29,36 @@ import requests
 REGISTER_SECRET = os.environ.get("NEURON_REGISTER_SECRET", "neuron-dev-secret")
 PING_INTERVAL = 30
 
-# The three nodes, matching the real Tailscale setup. `probe` is the (ip, port) to
-# test for liveness; None means "always alive" (the local driver, no server port).
-# ms_per_layer / head_ms come from `benchmark.py` run on each node (Session 14); the
-# coordinator uses them to auto-balance the split (GET /network/plan, POST /network/rebalance).
-NODES = [
-    {"node_id": "node_a", "tailscale_ip": "100.124.19.51", "port": 50999,
-     "layer_start": 0, "layer_end": 9, "cores": 16, "ram_gb": 63, "probe": None,
-     "ms_per_layer": 8.872, "head_ms": 38.325},
-    {"node_id": "node_c", "tailscale_ip": "100.79.125.112", "port": 50999,
-     "layer_start": 10, "layer_end": 18, "cores": 4, "ram_gb": 11,
-     "probe": ("100.79.125.112", 50999), "ms_per_layer": 12.412},
-    {"node_id": "node_b", "tailscale_ip": "100.114.189.46", "port": 50999,
-     "layer_start": 19, "layer_end": 27, "cores": 6, "ram_gb": 15,
-     "probe": ("100.114.189.46", 50999), "ms_per_layer": 12.218},
+# The dev nodes are loaded from coordinator/nodes.local.json (GITIGNORED — holds your
+# real Tailscale IPs) so the public repo carries no private infra. Falls back to
+# placeholders; copy coordinator/nodes.example.json to nodes.local.json and set your IPs.
+# `probe` (liveness (ip,port), or None for the driver) is derived from the "driver" flag;
+# ms_per_layer/head_ms come from benchmark.py (Session 14) and feed the auto-balancer.
+_NODES_PATH = Path(__file__).resolve().parent / "nodes.local.json"
+_PLACEHOLDER_NODES = [
+    {"node_id": "node_a", "tailscale_ip": "100.100.100.1", "port": 50999,
+     "layer_start": 0, "layer_end": 9, "cores": 16, "ram_gb": 63, "driver": True,
+     "ms_per_layer": 9.0, "head_ms": 38.0},
+    {"node_id": "node_c", "tailscale_ip": "100.100.100.2", "port": 50999,
+     "layer_start": 10, "layer_end": 18, "cores": 4, "ram_gb": 11, "ms_per_layer": 12.4},
+    {"node_id": "node_b", "tailscale_ip": "100.100.100.3", "port": 50999,
+     "layer_start": 19, "layer_end": 27, "cores": 6, "ram_gb": 15, "ms_per_layer": 12.2},
 ]
+
+
+def _load_nodes():
+    if _NODES_PATH.exists():
+        nodes = json.loads(_NODES_PATH.read_text())
+    else:
+        print(f"[register] {_NODES_PATH.name} not found — using placeholder IPs. Copy "
+              f"nodes.example.json -> nodes.local.json and set your real node IPs.")
+        nodes = [dict(n) for n in _PLACEHOLDER_NODES]
+    for n in nodes:
+        n["probe"] = None if n.get("driver") else (n["tailscale_ip"], n["port"])
+    return nodes
+
+
+NODES = _load_nodes()
 TOKENS_PATH = Path(__file__).resolve().parent / "node_tokens.json"
 
 
@@ -97,7 +112,7 @@ def heartbeat_loop(base, tokens):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--coordinator", default="http://100.114.189.46:8001",
+    ap.add_argument("--coordinator", default="http://150.230.22.250:8001",
                     help="coordinator URL (default: OptiPlex cloud host on :8001)")
     ap.add_argument("--register-only", action="store_true")
     ap.add_argument("--node-c-host", default=None,
