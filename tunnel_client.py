@@ -82,6 +82,11 @@ def handle_new_conn(conn_id):
         data = socket.create_connection((CFG["relay_host"], CFG["data_port"]), timeout=15)
         send_json(data, {"conn_id": conn_id})
         local = socket.create_connection((CFG["local_host"], CFG["local_port"]), timeout=15)
+        # 15s was only the CONNECT budget; the splice must then BLOCK on recv, not time out.
+        # A multi-round-trip inference has gaps > 15s under concurrent load, and a leaked
+        # timeout there drops the connection mid-stream ("socket closed mid-message").
+        data.settimeout(None)
+        local.settimeout(None)
     except OSError as e:
         print(f"[tunnel] new_conn {conn_id[:8]} setup failed: {e}")
         return
