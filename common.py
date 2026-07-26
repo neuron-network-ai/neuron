@@ -31,11 +31,15 @@ model (proved bit-exact by selftest.py).
 """
 
 import io
+import os
 import struct
 
 import torch
 
-MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct"
+# The model this node stack loads. Env-overridable so the whole stack (drivers, node_a/b/c,
+# selftests) can be pointed at another model without code changes — matches how the
+# coordinator's config.MODEL_ID works. Any Llama-family HF model runs through the same code.
+MODEL_ID = os.environ.get("NEURON_MODEL_ID", "Qwen/Qwen2.5-1.5B-Instruct")
 # Session 3 goal 2: bf16 halves RAM but these CPUs have no bf16 GEMM (no AVX512-BF16/
 # AMX), so it was several-x SLOWER in testing. fp32 stays the default on CPU.
 DTYPE = torch.float32

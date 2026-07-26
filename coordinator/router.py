@@ -15,21 +15,24 @@ import random
 from coordinator import config, models
 
 
-def build_chain(now=None, pick=None):
+def build_chain(now=None, pick=None, total=None):
     """Return (chain, missing).
 
     chain   : eligible online nodes ordered by layer_start that contiguously cover layers
-              0..TOTAL_LAYERS-1 (usable only if `missing` is empty).
+              0..total-1 (usable only if `missing` is empty).
     missing : list of (start, end) layer ranges with no eligible online node.
     pick    : chooser used to break replica ties, `pick(list) -> node` (default random.choice;
               injectable for tests / deterministic routing).
+    total   : layer count of the serving model (defaults to config.TOTAL_LAYERS; the
+              coordinator passes the active serving model's layer count so routing tracks
+              whichever model the network is serving).
     """
     pick = pick or random.choice
     # Only nodes cleared for live traffic are routed: excludes flagged nodes (failed
     # proof-of-compute, Session 16) AND probationary nodes (open join, Session 12 — not
     # yet verified). `eligible` = trusted or PoC-passed, and not flagged.
     nodes = [n for n in models.online_nodes(now) if n.get("eligible")]
-    total = config.TOTAL_LAYERS
+    total = total if total is not None else config.TOTAL_LAYERS
 
     by_start = {}
     for n in nodes:
@@ -55,16 +58,17 @@ def build_chain(now=None, pick=None):
     return chain, missing
 
 
-def suggest_placement(now=None):
+def suggest_placement(now=None, total=None):
     """Advise a JOINING node which layer slice to serve (Session 20 — zero-config open join).
 
     A stranger shouldn't pick layer numbers. Policy: if the eligible chain has a coverage GAP,
     fill the first one; otherwise the chain is complete, so replicate the LAST segment — it adds
     throughput (S18 replica routing) and is the segment proof-of-compute can verify (S16). Returns
     {layer_start, layer_end, role, reason}. Advisory only; the node still registers normally.
+    `total` = serving model's layer count (defaults to config.TOTAL_LAYERS).
     """
-    total = config.TOTAL_LAYERS
-    chain, missing = build_chain(now)
+    total = total if total is not None else config.TOTAL_LAYERS
+    chain, missing = build_chain(now, total=total)
     if missing:
         start, end = missing[0]
         return {"layer_start": start, "layer_end": end, "role": "fill-gap",
