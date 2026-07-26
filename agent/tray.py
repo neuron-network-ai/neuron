@@ -80,7 +80,8 @@ class Tray:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(pause_label, self._toggle_pause),
             pystray.MenuItem("Donation level", donation),
-            pystray.MenuItem("Open Dashboard", self._open_dashboard),
+            pystray.MenuItem("My Dashboard", self._open_my_dashboard),
+            pystray.MenuItem("Network Dashboard", self._open_dashboard),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", self._quit),
         )
@@ -114,6 +115,15 @@ class Tray:
     def _open_dashboard(self, icon, item):
         webbrowser.open(f"{self.agent.base}/dashboard")
 
+    def _open_my_dashboard(self, icon, item):
+        """The node's own token-gated page (balance/earned/served). Falls back to the
+        public network dashboard if this machine hasn't registered yet."""
+        nid, tok = self.agent.cfg.get("node_id"), self.agent.cfg.get("node_token")
+        if nid and tok:
+            webbrowser.open(f"{self.agent.base}/node/{nid}/dashboard?token={tok}")
+        else:
+            webbrowser.open(f"{self.agent.base}/dashboard")
+
     def _quit(self, icon, item):
         self.agent.stop()
         icon.stop()
@@ -123,7 +133,9 @@ class Tray:
             nid = self.agent.state.get("node_id")
             if nid:
                 try:
-                    r = requests.get(f"{self.agent.base}/ledger/{nid}", timeout=8)
+                    # the ledger is private to this node -> authenticate with our own token
+                    r = requests.get(f"{self.agent.base}/ledger/{nid}", timeout=8,
+                                     headers={"X-Node-Token": self.agent.cfg.get("node_token", "")})
                     if r.status_code == 200:
                         self.ledger = r.json()
                 except requests.RequestException:

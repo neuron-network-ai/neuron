@@ -27,7 +27,8 @@ IS_WINDOWS = platform.system() == "Windows"
 
 def _total_earned(cfg):
     try:
-        r = requests.get(f"{cfg['coordinator'].rstrip('/')}/ledger/{cfg['node_id']}", timeout=8)
+        r = requests.get(f"{cfg['coordinator'].rstrip('/')}/ledger/{cfg['node_id']}", timeout=8,
+                         headers={"X-Node-Token": cfg.get("node_token", "")})
         if r.status_code == 200:
             return r.json().get("total_earned", 0.0)
     except Exception:

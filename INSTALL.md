@@ -81,7 +81,7 @@ earning NRN as requests flow through you.
 
 ```
 run agent  →  registered (probationary)  →  slice downloaded  →  operator verifies you
-           →  verified  →  you serve requests and earn NRN (visible at /ledger/<your-node-id>)
+           →  verified  →  you serve requests and earn NRN (private to you: tray → My Dashboard)
 ```
 
 - **Pause is automatic.** Touch your keyboard/mouse or load your CPU and the node stops

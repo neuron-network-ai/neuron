@@ -319,8 +319,21 @@ def network_rebalance(_=Depends(require_register_secret)):
 # --------------------------------------------------------------------------- #
 # Part 4 — Ledger
 # --------------------------------------------------------------------------- #
+def _require_own_token(node_id: str, token: str | None):
+    """A node's earnings are private: only the holder of that node's own token may read
+    them (the token is issued once at registration and never shown to anyone else)."""
+    node = models.get_node(node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail=f"unknown node '{node_id}'")
+    if not token or not secrets.compare_digest(str(token), str(node["node_token"])):
+        raise HTTPException(status_code=401,
+                            detail="this ledger is private to the node — X-Node-Token required")
+    return node
+
+
 @app.get("/ledger/{node_id}")
-def get_ledger(node_id: str):
+def get_ledger(node_id: str, x_node_token: str = Header(default=None)):
+    _require_own_token(node_id, x_node_token)
     row = models.get_ledger(node_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"no ledger for '{node_id}'")
@@ -367,7 +380,8 @@ def status():
 def dashboard():
     network, nodes = _network_summary()
     stats = models.network_stats()
-    ledgers = {l["node_id"]: l for l in models.node_ledgers()}
+    # Privacy: per-node balances are NOT shown here. The public dashboard is network
+    # health only; each node sees its own earnings at /node/{id}/dashboard (token-gated).
 
     healthy = network["network_healthy"]
     banner_color = "#137333" if healthy else "#c5221f"
@@ -380,7 +394,6 @@ def dashboard():
         badge = "#137333" if n["status"] == "online" else "#c5221f"
         st = n.get("standing", "trusted")
         sbadge = standing_colors.get(st, "#5f6368")
-        led = ledgers.get(n["node_id"], {})
         rows += (
             f"<tr>"
             f"<td>{n['node_id']}</td>"
@@ -392,8 +405,6 @@ def dashboard():
             f"<td>{n['tailscale_ip']}:{n['port']}</td>"
             f"<td>{n.get('cores','-')}</td>"
             f"<td>{n.get('ram_gb','-')}</td>"
-            f"<td>{round(led.get('balance',0),3)}</td>"
-            f"<td>{led.get('requests_served',0)}</td>"
             f"</tr>"
         )
 
@@ -427,9 +438,66 @@ def dashboard():
 </div>
 <table>
   <tr><th>node</th><th>layers</th><th>status</th><th>standing</th><th>address</th><th>cores</th>
-      <th>RAM GB</th><th>NRN balance</th><th>served</th></tr>
+      <th>RAM GB</th></tr>
   {rows}
 </table>
+<p style="color:#5f6368;font-size:13px;margin-top:1rem">
+  Earnings are private: each node operator sees their own balance in the NEURON app
+  (tray &rarr; My Dashboard) — authenticated with that node's own token.</p>
+</body></html>"""
+
+
+# --------------------------------------------------------------------------- #
+# Per-node private dashboard — a node operator's own numbers, token-gated
+# --------------------------------------------------------------------------- #
+@app.get("/node/{node_id}/dashboard", response_class=HTMLResponse)
+def node_dashboard(node_id: str, token: str = None,
+                   x_node_token: str = Header(default=None)):
+    """The node's OWN view: balance, total earned, spent, requests served, standing,
+    reputation. Auth = that node's token (query `?token=` for the browser link the tray
+    opens, or the X-Node-Token header). Nobody else's earnings are visible anywhere."""
+    node = _require_own_token(node_id, token or x_node_token)
+    led = models.get_ledger(node_id) or {"balance": 0, "total_earned": 0, "requests_served": 0}
+    network, _ = _network_summary()
+    spent = round(led["total_earned"] - led["balance"], 4)   # real once wallet debits land (§11)
+    st = node.get("standing", "trusted")
+    st_color = {"trusted": "#137333", "verified": "#1a73e8",
+                "probationary": "#f9ab00", "flagged": "#c5221f"}.get(st, "#5f6368")
+    rep = node.get("reputation")
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<meta http-equiv="refresh" content="5">
+<title>NEURON — {node_id}</title>
+<style>
+ body{{font-family:system-ui,Arial,sans-serif;margin:2rem;color:#202124}}
+ h1{{margin:0 0 .25rem}} .sub{{color:#5f6368;margin-bottom:1.5rem}}
+ .badge{{color:#fff;background:{st_color};padding:2px 10px;border-radius:10px;font-size:13px}}
+ .cards{{display:flex;gap:1rem;margin:1.25rem 0;flex-wrap:wrap}}
+ .card{{border:1px solid #dadce0;border-radius:8px;padding:.8rem 1.2rem;min-width:150px}}
+ .card .n{{font-size:1.7rem;font-weight:700}} .card .l{{color:#5f6368;font-size:13px}}
+ table{{border-collapse:collapse;max-width:560px}}
+ th,td{{border:1px solid #dadce0;padding:.45rem .7rem;text-align:left;font-size:14px}}
+ th{{background:#f1f3f4;width:190px}}
+ .note{{color:#5f6368;font-size:13px;margin-top:1.25rem}}
+</style></head><body>
+<h1>{node_id}</h1>
+<div class="sub">your node's private dashboard · auto-refresh 5s ·
+  <span class="badge">{st}</span></div>
+<div class="cards">
+  <div class="card"><div class="n">{round(led['balance'], 3)}</div><div class="l">NRN balance</div></div>
+  <div class="card"><div class="n">{round(led['total_earned'], 3)}</div><div class="l">total earned</div></div>
+  <div class="card"><div class="n">{spent}</div><div class="l">spent (usage)</div></div>
+  <div class="card"><div class="n">{led['requests_served']}</div><div class="l">requests served</div></div>
+</div>
+<table>
+  <tr><th>status</th><td>{node['status']}</td></tr>
+  <tr><th>layers served</th><td>{node['layer_start']}–{node['layer_end']}</td></tr>
+  <tr><th>reputation</th><td>{rep if rep is not None else 'no challenges yet'}
+      (passed {node.get('challenges_passed', 0)} / failed {node.get('challenges_failed', 0)})</td></tr>
+  <tr><th>network</th><td>{network['online_nodes']} nodes online ·
+      {network['total_layers_covered']}/{config.TOTAL_LAYERS} layers covered</td></tr>
+</table>
+<p class="note">Keep this URL private — it contains your node token, which is what makes
+this page yours alone. "Spent" becomes live once wallet spending ships.</p>
 </body></html>"""
 
 

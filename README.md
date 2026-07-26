@@ -152,8 +152,10 @@ challenge; once **verified**, every completed inference request it serves mints 
   holding `L` of the model's 28 layers earns `0.9 · L/28` per request.
 
 So a 10-layer node earns `0.9 · 10/28 = 0.321` NRN per request; a 9-layer node `0.289`. Over
-a full chain the nodes share 0.9 and the coordinator keeps 0.1. Check your balance any time
-at `GET /ledger/<node_id>`. (Tunable in `coordinator/config.py`.)
+a full chain the nodes share 0.9 and the coordinator keeps 0.1. **Earnings are private:** your
+balance is visible only to you — in the app's tray ("My Dashboard") or via
+`GET /ledger/<node_id>` with your node's own `X-Node-Token`. The public dashboard shows
+network health, never per-node balances. (Tunable in `coordinator/config.py`.)
 
 ## Status
 
