@@ -100,6 +100,15 @@ def run_tunnel(node_id, public_port, relay_host, control_port=8010, data_port=80
     while stop is None or not stop.is_set():
         try:
             ctrl = socket.create_connection((relay_host, control_port), timeout=15)
+            # The 15s was only the CONNECT budget. The control connection then stays open,
+            # idle, waiting for the relay to push new_conn — so clear the timeout, otherwise
+            # recv() raises timeout every 15s and the tunnel churns (reconnect loop). Enable
+            # TCP keepalive so a genuinely idle NAT mapping isn't silently dropped either.
+            ctrl.settimeout(None)
+            try:
+                ctrl.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            except OSError:
+                pass
             send_json(ctrl, {"node_id": node_id, "public_port": public_port})
             print("[tunnel] registered; waiting for connections")
             while stop is None or not stop.is_set():

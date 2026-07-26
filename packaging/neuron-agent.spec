@@ -20,7 +20,8 @@ datas, binaries, hiddenimports = [], [], []
 # Heavy / dynamically-imported packages: pull in all their submodules, data and binaries.
 for pkg in ("torch", "transformers", "accelerate", "safetensors", "tokenizers",
             "huggingface_hub", "regex", "numpy", "psutil", "requests", "certifi",
-            "filelock", "tqdm", "yaml", "packaging", "sympy", "networkx"):
+            "filelock", "tqdm", "yaml", "packaging", "sympy", "networkx",
+            "pystray", "PIL"):    # system-tray icon
     try:
         d, b, h = collect_all(pkg)
         datas += d
@@ -41,14 +42,16 @@ for dist in ("transformers", "torch", "tokenizers", "huggingface-hub", "safetens
 
 # transformers loads model classes lazily — force the Qwen2 model module (our model) in.
 hiddenimports += collect_submodules("transformers.models.qwen2")
-# our own top-level modules, bundled so the frozen agent can import them.
+# our own top-level modules, bundled so the frozen app can import them.
 hiddenimports += ["common", "slice_downloader", "tunnel_client",
-                  "agent", "agent.agent", "agent.resource_guard", "agent.node_server"]
+                  "agent", "agent.agent", "agent.resource_guard", "agent.node_server",
+                  "agent.tray", "agent.uninstall"]
 
 a = Analysis(
     # a distinct launcher (NOT agent/agent.py) so the top-level frozen script isn't named
     # 'agent' and doesn't shadow the agent package (would cause a circular import).
-    [os.path.join(ROOT, "packaging", "neuron_agent_entry.py")],
+    # Dispatches: tray app (default) / --headless agent / --deregister uninstaller.
+    [os.path.join(ROOT, "packaging", "neuron_app_entry.py")],
     pathex=[ROOT],
     binaries=binaries,
     datas=datas,

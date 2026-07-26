@@ -11,9 +11,16 @@ import platform
 import shutil
 import subprocess
 
+import sys
+
 import requests
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+# Match the agent's writable-state location (installed app: %LOCALAPPDATA%\NEURON).
+if getattr(sys, "frozen", False):
+    _base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    HERE = os.path.join(_base, "NEURON")
+else:
+    HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
 IS_WINDOWS = platform.system() == "Windows"
 
@@ -80,7 +87,8 @@ def main():
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default=CONFIG_PATH)
-    args = ap.parse_args()
+    # ignore extra flags (the installer invokes this as `<app>.exe --deregister`)
+    args, _ = ap.parse_known_args()
     config_path = args.config
 
     cfg = json.load(open(config_path)) if os.path.exists(config_path) else {}

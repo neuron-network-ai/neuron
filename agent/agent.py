@@ -27,11 +27,14 @@ import time
 import psutil
 import requests
 
-# When frozen into a PyInstaller .exe, config/log/slice live next to the executable (the
-# bundled Python modules are already importable); as a normal script, HERE is agent/ and we
-# add the repo root to sys.path so `common` / `slice_downloader` resolve.
+# Where writable state (config, log, model slice) lives. When frozen into an installed .exe
+# the program sits in read-only Program Files, so state goes to %LOCALAPPDATA%\NEURON (Windows)
+# / ~/.local/share/NEURON (elsewhere). As a normal script it's the agent/ dir, and we add the
+# repo root to sys.path so `common` / `slice_downloader` resolve.
 if getattr(sys, "frozen", False):
-    HERE = os.path.dirname(sys.executable)
+    _base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    HERE = os.path.join(_base, "NEURON")
+    os.makedirs(HERE, exist_ok=True)
 else:
     HERE = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, os.path.dirname(HERE))             # repo root
@@ -43,6 +46,27 @@ CONFIG_PATH = os.path.join(HERE, "config.json")
 LOG_PATH = os.path.join(HERE, "agent.log")
 RETRY_SECONDS = 60
 PING_SECONDS = 30
+
+# Written on first run if no config exists (so a freshly-installed app just works): open join,
+# auto-placement, green idle donation, relay on. Matches agent/config.json.
+DEFAULT_CONFIG = {
+    "coordinator": "http://150.230.22.250:8001",
+    "node_id": None, "node_token": None,
+    "layer_start": None, "layer_end": None,
+    "slice_dir": "./model_slice/",
+    "donation_mode": "idle", "idle_threshold_seconds": 60,
+    "behind_nat": True, "log_level": "INFO",
+}
+
+
+def ensure_config(path=CONFIG_PATH):
+    """Create a default config on first run so an installed app needs no manual setup."""
+    if not os.path.exists(path):
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(DEFAULT_CONFIG, f, indent=2)
+    return path
+
 
 log = logging.getLogger("neuron.agent")
 
@@ -75,10 +99,18 @@ def detect_tailscale_ip():
 class Agent:
     def __init__(self, config_path=CONFIG_PATH):
         self.config_path = config_path
+        ensure_config(config_path)
         self.cfg = json.load(open(config_path))
         self.base = self.cfg["coordinator"].rstrip("/")
+        # donation level (how much spare capacity to give); max_cpu_pct kept as a
+        # back-compat explicit ceiling override for older configs.
+        overrides = None
+        if self.cfg.get("max_cpu_pct") is not None:
+            overrides = {"cpu_ceiling": float(self.cfg["max_cpu_pct"])}
         self.guard = resource_guard.ResourceGuard(
-            self.cfg.get("max_cpu_pct", 2), self.cfg.get("idle_threshold_seconds", 60))
+            donation_mode=self.cfg.get("donation_mode", resource_guard.DEFAULT_MODE),
+            idle_threshold_s=self.cfg.get("idle_threshold_seconds", 60),
+            overrides=overrides)
         # live state the tray reads: status in {starting, downloading, active, idle, error}
         self.state = {"status": "starting", "node_id": self.cfg.get("node_id"),
                       "layers": None, "coordinator": self.base, "detail": ""}
@@ -229,6 +261,7 @@ class Agent:
 
 
 def main():
+    ensure_config(CONFIG_PATH)
     cfg = json.load(open(CONFIG_PATH))
     _setup_logging(cfg.get("log_level", "INFO"))
     log.info("NEURON agent starting | coordinator=%s", cfg["coordinator"])

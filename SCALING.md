@@ -210,3 +210,44 @@ property AND the current PoC. Downside: PyTorch CPU int4 isn't as fast as llama.
 int4 on the *current* split right now (might already be "fast enough" and buys months); (b) prove ONE
 ggml slice-node runs only its layers with no node loading the full GGUF (the feasibility gate for the big
 engine). Decide with numbers, not faith.
+
+---
+
+### The donation model — device-aware resource use  *(IMPLEMENTED 2026-07-26)*
+
+**The problem (founder's insight):** the original resource guard was a BINARY idle-gate — pause if
+CPU busy OR user active OR on battery OR low RAM. That's perfect for **phones** (charge overnight →
+idle + plugged → contribute all night) but wrong for **PCs/laptops**: used all day (paused), shut off
+all night (off) → they contribute almost nothing, so they earn almost nothing. The "only spare idle
+compute" principle accidentally makes the most common hardware useless as a node.
+
+**The fix:** the guard is now a **donation LEVEL (a ceiling) + an automatic YIELD FLOOR** — the user
+chooses how much to give, and NEURON backs off the instant the owner needs the CPU so it never makes the
+machine feel slow. It gates *availability*, not raw CPU (inference is bursty, so a hard % throttle is
+meaningless). Modes (`donation_mode` in agent config):
+
+| Mode | CPU ceiling (yield above) | Yields to active user? | AC-only? | For |
+|---|---|---|---|---|
+| `idle` (default) | 15% | yes | yes | green default — only truly-spare compute |
+| `balanced` | 50% | no | yes | fill headroom while you work, plugged in |
+| `generous` | 85% | no | no | donate aggressively, battery OK |
+| `max` | none | no | no | servers / always-on backbone |
+
+Low-RAM (<500 MB) always pauses in every mode (safety rail, not a donation choice). **More donation →
+more requests served → more NRN.** And earnings scale automatically: S14's balancer weights by each
+node's *deliverable* work, so a higher-donation node auto-gets more layers/requests — no economics
+change. **Device defaults (target):** phones `idle`+charging+WiFi; laptops `idle` (dial-able); desktops
+`generous`; servers `max`.
+
+**Honest nuance (load-bearing, ties to TOKENOMICS physics):** donating more is NOT free. At `idle` it's
+near-negligible marginal power (the green story holds). At `generous`/`max` while you work you draw
+REAL incremental electricity — still greener than a datacenter (reused hardware, no new build), but not
+"negligible", and at small-model market value heavy donation can cost more in *your* electricity than
+the NRN is worth. So the dial's honest framing is **"donate as much as you want to fund your own AI
+usage"** (compute-barter), never "earn money" — the UI must SHOW the trade-off, which also keeps it
+MiCA-clean (no income promise).
+
+**Done:** `agent/resource_guard.py` (`DONATION_MODES` + ceiling/yield), `agent/agent.py` wiring,
+`agent/config.json` (`donation_mode: "idle"`), back-compat for old `max_cpu_pct` as a ceiling override;
+test `agent/test_resource_guard.py` 16/16. **Still TODO:** a UI slider (belongs in the tray/app),
+a thermal yield rail (psutil temps aren't portable), and per-device auto-detected defaults.

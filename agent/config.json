@@ -5,7 +5,7 @@
   "layer_start": null,
   "layer_end": null,
   "slice_dir": "./model_slice/",
-  "max_cpu_pct": 2,
+  "donation_mode": "idle",
   "idle_threshold_seconds": 60,
   "behind_nat": true,
   "log_level": "INFO"

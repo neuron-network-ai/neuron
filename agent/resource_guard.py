@@ -1,13 +1,22 @@
 """
-agent/resource_guard.py — only ever use TRULY idle capacity.
+agent/resource_guard.py — donate as much (or as little) as the owner chooses.
 
-NEURON must never compete with the machine's owner. The guard pauses the node
-when the machine is in use and resumes automatically when it clears. Checked
-every few seconds. Pause if ANY of:
-  - system CPU busy        (> max_cpu_pct)
-  - user active            (last input < idle_threshold seconds ago)
-  - on battery             (laptop unplugged)
-  - low memory             (< 500 MB available)
+NEURON must never make the machine feel slow to its owner, but *how much* spare
+capacity a user donates is their call — phones want "only while charging", a
+laptop user might fill their spare headroom while they work, and a server wants to
+run flat out. So the guard is a DONATION LEVEL (a ceiling) plus an automatic YIELD
+FLOOR (back off the instant the owner needs the CPU). More donation -> more requests
+served -> more NRN. It never throttles compute directly (inference is bursty); it
+gates whether the node advertises availability, sampled every few seconds.
+
+Donation modes (config `donation_mode`):
+  - "idle"     : only truly-spare compute — low CPU, owner away, on AC (the green default)
+  - "balanced" : fill spare headroom while you work; yield above ~50% CPU; AC only
+  - "generous" : donate aggressively; battery OK; yield only near-max CPU
+  - "max"      : server / always-on; never yield on CPU/owner/battery (only low-RAM)
+
+`low memory` (< 500 MB) always pauses, in every mode — that's a safety rail, not a
+donation choice. (Thermal throttling is a future rail; psutil temps aren't portable.)
 
 ARM-compatible: pure Python + psutil + ctypes only (no x86-specific code).
 Idle detection: Windows GetLastInputInfo; Linux xprintidle if present, else a
@@ -22,6 +31,16 @@ import psutil
 
 _IS_WINDOWS = platform.system() == "Windows"
 MIN_FREE_RAM_BYTES = 500 * 1024 * 1024
+
+# mode -> policy. cpu_ceiling = pause (yield) if system CPU exceeds this; honor_user =
+# yield while the owner is actively typing; honor_battery = don't run on battery.
+DONATION_MODES = {
+    "idle":     dict(cpu_ceiling=15.0,  honor_user=True,  honor_battery=True),
+    "balanced": dict(cpu_ceiling=50.0,  honor_user=False, honor_battery=True),
+    "generous": dict(cpu_ceiling=85.0,  honor_user=False, honor_battery=False),
+    "max":      dict(cpu_ceiling=100.1, honor_user=False, honor_battery=False),
+}
+DEFAULT_MODE = "idle"
 
 
 def seconds_since_input():
@@ -51,23 +70,30 @@ def on_battery():
 
 
 class ResourceGuard:
-    def __init__(self, max_cpu_pct=2.0, idle_threshold_s=60):
-        self.max_cpu_pct = float(max_cpu_pct)
+    def __init__(self, donation_mode=DEFAULT_MODE, idle_threshold_s=60, overrides=None):
+        policy = dict(DONATION_MODES.get(donation_mode, DONATION_MODES[DEFAULT_MODE]))
+        if overrides:                     # advanced/back-compat explicit tuning
+            policy.update(overrides)
+        self.donation_mode = donation_mode if donation_mode in DONATION_MODES else DEFAULT_MODE
+        self.cpu_ceiling = float(policy["cpu_ceiling"])
+        self.honor_user = bool(policy["honor_user"])
+        self.honor_battery = bool(policy["honor_battery"])
         self.idle_threshold_s = float(idle_threshold_s)
         psutil.cpu_percent(interval=None)   # prime the CPU meter
 
     def reasons_to_pause(self):
         reasons = []
         cpu = psutil.cpu_percent(interval=0.3)
-        if cpu > self.max_cpu_pct:
-            reasons.append(f"cpu {cpu:.0f}% > {self.max_cpu_pct:.0f}%")
-        idle = seconds_since_input()
-        if idle < self.idle_threshold_s:
-            reasons.append(f"user active ({idle:.0f}s ago)")
-        if on_battery():
+        if cpu > self.cpu_ceiling:                      # yield floor: back off for the owner
+            reasons.append(f"cpu {cpu:.0f}% > donation ceiling {self.cpu_ceiling:.0f}%")
+        if self.honor_user:
+            idle = seconds_since_input()
+            if idle < self.idle_threshold_s:
+                reasons.append(f"user active ({idle:.0f}s ago)")
+        if self.honor_battery and on_battery():
             reasons.append("on battery")
         avail = psutil.virtual_memory().available
-        if avail < MIN_FREE_RAM_BYTES:
+        if avail < MIN_FREE_RAM_BYTES:                  # safety rail, every mode
             reasons.append(f"low RAM ({avail // (1024*1024)} MB)")
         return reasons
 
@@ -76,7 +102,11 @@ class ResourceGuard:
 
 
 if __name__ == "__main__":   # quick manual check
-    g = ResourceGuard()
+    import sys
+    mode = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_MODE
+    g = ResourceGuard(mode)
     r = g.reasons_to_pause()
+    print(f"mode={g.donation_mode} ceiling={g.cpu_ceiling:.0f}% honor_user={g.honor_user} "
+          f"honor_battery={g.honor_battery}")
     print("idle secs:", round(seconds_since_input(), 1), "| on battery:", on_battery())
     print("PAUSE" if r else "ACTIVE", "-", ", ".join(r) if r else "all clear")
