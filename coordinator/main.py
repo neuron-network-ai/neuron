@@ -9,6 +9,7 @@ own ping/delete need its X-Node-Token.
 import asyncio
 import json
 import secrets
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -17,7 +18,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from coordinator import balancer, config, ledger, model_registry, models, router
+from coordinator import balancer, config, ledger, model_registry, model_tiers, models, router
 
 
 # --------------------------------------------------------------------------- #
@@ -87,6 +88,14 @@ def require_node_token(node_id: str, x_node_token: str = Header(default=None)):
 # --------------------------------------------------------------------------- #
 # Background health sweep
 # --------------------------------------------------------------------------- #
+# Capacity-driven model tier (auto-model-tiering): the network serves the biggest model
+# its live online+eligible capacity can back, re-evaluated each sweep with hysteresis so
+# node churn (a laptop sleeping) doesn't flap the active model. Guarded by a lock because
+# the async sweep and the threadpool endpoints both advance it.
+_tier_controller = model_tiers.TierController()
+_tier_lock = threading.Lock()
+
+
 async def health_loop():
     while True:
         await asyncio.sleep(config.HEALTH_CHECK_INTERVAL_S)
@@ -94,6 +103,11 @@ async def health_loop():
             for node_id in models.sweep():
                 print(f"[health] node '{node_id}' went OFFLINE "
                       f"(no ping in {config.HEARTBEAT_TIMEOUT_S}s)")
+            with _tier_lock:
+                prev = _tier_controller.active()["name"]
+                cur = _tier_controller.update(models.list_nodes(), time.time())["name"]
+                if cur != prev:
+                    print(f"[tier] active model {prev} -> {cur} (capacity changed)")
         except Exception as e:  # never let the loop die
             print(f"[health] sweep error: {e}")
 
@@ -381,6 +395,15 @@ def status():
     return {"network": network, "stats": models.network_stats()}
 
 
+@app.get("/network/model")
+def network_model():
+    """The model the network is serving now, the capacity behind it, and what it takes to
+    unlock the next tier (auto-model-tiering). Selection is capacity-driven with hysteresis;
+    calling this also advances the selection using the current time."""
+    with _tier_lock:
+        return model_tiers.snapshot(models.list_nodes(), _tier_controller, now=time.time())
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard():
     network, nodes = _network_summary()
@@ -412,6 +435,31 @@ def dashboard():
             f"</tr>"
         )
 
+    # Model tier (auto-model-tiering): the biggest model this network can back, plus the
+    # ladder and the "grow to unlock the next model" prompt. Read-only here (now=None) —
+    # the health loop is what advances the hysteresis over time.
+    tier = model_tiers.snapshot(nodes, _tier_controller)
+    tstate_colors = {"active": "#137333", "ready": "#1a73e8", "locked": "#9aa0a6"}
+    ladder = ""
+    for t in tier["tiers"]:
+        tstate = ("active" if t["name"] == tier["active_tier"]
+                  else "ready" if t["feasible"] else "locked")
+        tc = tstate_colors[tstate]
+        ladder += (
+            f"<tr><td>{t['name']}</td><td style='font-size:13px'>{t['model_id']}</td>"
+            f"<td>{t['min_nodes']} nodes · {t['min_ram_gb']:.0f} GB</td>"
+            f"<td><span style='color:#fff;background:{tc};padding:2px 8px;"
+            f"border-radius:10px;font-size:12px'>{tstate}</span></td></tr>"
+        )
+    gap = tier["next_tier"]
+    gap_line = ""
+    if gap and (gap["need_nodes"] > 0 or gap["need_ram_gb"] > 0):
+        need = f"+{gap['need_nodes']} node(s)"
+        if gap["need_ram_gb"] > 0:
+            need += f" and +{gap['need_ram_gb']:.0f} GB RAM"
+        gap_line = (f"<p style='color:#5f6368;font-size:14px'>Grow the network by "
+                    f"<b>{need}</b> and it auto-upgrades to the <b>{gap['name']}</b> model.</p>")
+
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta http-equiv="refresh" content="5">
 <title>NEURON Coordinator</title>
@@ -431,6 +479,8 @@ def dashboard():
 <div class="sub">Network of Existing Utilised Resources — Open Nodes · auto-refresh 5s</div>
 <div class="banner">{banner_text}</div>
 <div class="cards">
+  <div class="card" style="border-color:#137333"><div class="n">{tier['active_tier']}</div>
+    <div class="l">active model</div></div>
   <div class="card"><div class="n">{network['online_nodes']}/{network['total_nodes']}</div>
     <div class="l">nodes online</div></div>
   <div class="card"><div class="n">{network['total_layers_covered']}/{config.TOTAL_LAYERS}</div>
@@ -440,6 +490,13 @@ def dashboard():
   <div class="card"><div class="n">{round(stats['total_nrn_distributed'],2)}</div>
     <div class="l">NRN distributed</div></div>
 </div>
+<h2 style="font-size:1.05rem;margin:1.5rem 0 .5rem">Model tier — scales with the network</h2>
+<table style="max-width:920px">
+  <tr><th>tier</th><th>model</th><th>needs</th><th>state</th></tr>
+  {ladder}
+</table>
+{gap_line}
+<h2 style="font-size:1.05rem;margin:1.5rem 0 .5rem">Nodes</h2>
 <table>
   <tr><th>node</th><th>layers</th><th>status</th><th>standing</th><th>cores</th>
       <th>RAM GB</th></tr>
