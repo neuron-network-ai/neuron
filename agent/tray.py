@@ -20,7 +20,16 @@ from PIL import Image, ImageDraw
 import pystray
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from agent.agent import Agent   # noqa: E402
+from agent.agent import Agent, _setup_logging   # noqa: E402
+from agent import resource_guard                 # noqa: E402
+
+# donation levels shown in the tray dial (value -> menu label)
+DONATION_LABELS = [
+    ("idle", "Idle — only spare compute"),
+    ("balanced", "Balanced — while I work"),
+    ("generous", "Generous — donate more"),
+    ("max", "Max — always on"),
+]
 
 COLORS = {
     "active": (46, 160, 67),        # green — earning
@@ -63,16 +72,37 @@ class Tray:
         def pause_label(_):
             return "Resume" if self.agent.user_paused.is_set() else "Pause"
 
+        donation = pystray.Menu(*[self._mode_item(m, label) for m, label in DONATION_LABELS])
         return pystray.Menu(
             pystray.MenuItem(title, None, enabled=False),
             pystray.MenuItem(status, None, enabled=False),
             pystray.MenuItem(earned, None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(pause_label, self._toggle_pause),
+            pystray.MenuItem("Donation level", donation),
             pystray.MenuItem("Open Dashboard", self._open_dashboard),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", self._quit),
         )
+
+    # -- donation dial ------------------------------------------------------- #
+    def _mode_item(self, mode, label):
+        return pystray.MenuItem(
+            label, self._set_mode(mode),
+            checked=lambda item, m=mode: self.agent.cfg.get("donation_mode", "idle") == m,
+            radio=True,
+        )
+
+    def _set_mode(self, mode):
+        def handler(icon, item):
+            self.agent.cfg["donation_mode"] = mode
+            self.agent.cfg.pop("max_cpu_pct", None)         # the dial supersedes the old override
+            # rebuild the guard live so the change takes effect immediately (no restart)
+            self.agent.guard = resource_guard.ResourceGuard(
+                mode, self.agent.cfg.get("idle_threshold_seconds", 60))
+            self.agent._save()
+            self.icon.update_menu()
+        return handler
 
     def _toggle_pause(self, icon, item):
         if self.agent.user_paused.is_set():
@@ -109,6 +139,7 @@ class Tray:
 
 
 def main():
+    _setup_logging("INFO")   # the tray hides the console, so keep a record in agent.log
     Tray().run()
 
 
