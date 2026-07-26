@@ -18,7 +18,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from coordinator import balancer, config, ledger, model_registry, model_tiers, models, router
+from coordinator import (balancer, config, ledger, migration, model_registry, model_tiers,
+                         models, router)
 
 
 # --------------------------------------------------------------------------- #
@@ -115,6 +116,12 @@ def set_serving_model(model_id, layers):
         _serving["layers"] = int(layers)
 
 
+# Rolling model migration (Build 3): moves the network from the serving model to the target
+# tier its capacity qualifies for, without dropping service. Advanced each health sweep.
+_migration = migration.MigrationController()
+_migration_lock = threading.Lock()
+
+
 async def health_loop():
     while True:
         await asyncio.sleep(config.HEALTH_CHECK_INTERVAL_S)
@@ -124,9 +131,18 @@ async def health_loop():
                       f"(no ping in {config.HEARTBEAT_TIMEOUT_S}s)")
             with _tier_lock:
                 prev = _tier_controller.active()["name"]
-                cur = _tier_controller.update(models.list_nodes(), time.time())["name"]
-                if cur != prev:
-                    print(f"[tier] active model {prev} -> {cur} (capacity changed)")
+                tier = _tier_controller.update(models.list_nodes(), time.time())
+                if tier["name"] != prev:
+                    print(f"[tier] network now qualifies for {prev} -> {tier['name']}")
+            # advance any model migration toward the qualified target tier
+            target = {"model_id": tier["model_id"], "layers": tier["layers"]}
+            with _migration_lock:
+                before = _migration.phase
+                _migration.update(models.list_nodes(), target, serving_model(),
+                                  time.time(), set_serving_model)
+                if _migration.phase != before:
+                    print(f"[migration] {before} -> {_migration.phase} "
+                          f"(serving={serving_model()['model_id']})")
         except Exception as e:  # never let the loop die
             print(f"[health] sweep error: {e}")
 
@@ -430,6 +446,32 @@ def network_model():
         snap = model_tiers.snapshot(models.list_nodes(), _tier_controller, now=time.time())
     snap["serving"] = serving_model()
     return snap
+
+
+@app.get("/network/migration")
+def network_migration():
+    """Current model-migration status (Build 3): phase, target, per-node readiness."""
+    with _migration_lock:
+        return _migration.status()
+
+
+@app.get("/node/{node_id}/migration")
+def node_migration(node_id: str):
+    """The target slice a migrating node should prepare (download), or {migrating:false}.
+    Read-only + rate-limited; a node polls this during a migration to fetch its new range."""
+    with _migration_lock:
+        asg = _migration.assignment_for(node_id)
+    return asg or {"migrating": False}
+
+
+@app.post("/node/{node_id}/migration-ready")
+def node_migration_ready(node_id: str, _node=Depends(require_node_token)):
+    """A node reports it downloaded the target slice and can serve its target range. Token-gated.
+    Cutover (flip serving to the target) happens once every planned node has reported ready."""
+    with _migration_lock:
+        ok = _migration.mark_ready(node_id)
+        st = _migration.status() if ok else None
+    return {"node_id": node_id, "acknowledged": ok, "status": st}
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
