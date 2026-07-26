@@ -78,10 +78,14 @@ def attest_via_coordinator(coordinator, node_id, register_secret, n=None,
     import requests
 
     coordinator = coordinator.rstrip("/")
-    nodes = requests.get(f"{coordinator}/node/list", timeout=10).json()["nodes"]
+    # node addresses are operator-private -> authenticate to see them (S25 privacy)
+    nodes = requests.get(f"{coordinator}/node/list", timeout=10,
+                         headers={"X-Register-Secret": register_secret}).json()["nodes"]
     node = next((x for x in nodes if x["node_id"] == node_id), None)
     if node is None:
         raise SystemExit(f"node '{node_id}' not found at {coordinator}")
+    if "tailscale_ip" not in node:
+        raise SystemExit("coordinator did not return node addresses — wrong register secret?")
     total = n or node.get("total_layers") or 28
     if node["layer_end"] != total - 1:
         raise SystemExit(

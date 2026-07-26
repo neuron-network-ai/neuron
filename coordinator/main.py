@@ -193,8 +193,13 @@ def node_placement():
 
 
 @app.get("/node/list")
-def node_list():
-    nodes = [{k: v for k, v in n.items() if k != "node_token"} for n in models.list_nodes()]
+def node_list(x_register_secret: str = Header(default=None)):
+    """Node roster. Public callers get health/standing info but NO addresses — node
+    endpoints (IP:port) are infrastructure detail, visible only with the operator secret
+    (the proof-of-compute verifier is the legitimate consumer). node_token never leaves."""
+    show_addr = x_register_secret == config.REGISTRATION_SECRET
+    hidden = {"node_token"} if show_addr else {"node_token", "tailscale_ip", "port"}
+    nodes = [{k: v for k, v in n.items() if k not in hidden} for n in models.list_nodes()]
     return {"nodes": nodes}
 
 
@@ -402,7 +407,6 @@ def dashboard():
             f"border-radius:10px;font-size:12px'>{n['status']}</span></td>"
             f"<td><span style='color:#fff;background:{sbadge};padding:2px 8px;"
             f"border-radius:10px;font-size:12px'>{st}</span></td>"
-            f"<td>{n['tailscale_ip']}:{n['port']}</td>"
             f"<td>{n.get('cores','-')}</td>"
             f"<td>{n.get('ram_gb','-')}</td>"
             f"</tr>"
@@ -437,13 +441,13 @@ def dashboard():
     <div class="l">NRN distributed</div></div>
 </div>
 <table>
-  <tr><th>node</th><th>layers</th><th>status</th><th>standing</th><th>address</th><th>cores</th>
+  <tr><th>node</th><th>layers</th><th>status</th><th>standing</th><th>cores</th>
       <th>RAM GB</th></tr>
   {rows}
 </table>
 <p style="color:#5f6368;font-size:13px;margin-top:1rem">
-  Earnings are private: each node operator sees their own balance in the NEURON app
-  (tray &rarr; My Dashboard) — authenticated with that node's own token.</p>
+  Earnings and node addresses are private: each node operator sees their own numbers in the
+  NEURON app (tray &rarr; My Dashboard) — authenticated with that node's own token.</p>
 </body></html>"""
 
 
@@ -491,6 +495,8 @@ def node_dashboard(node_id: str, token: str = None,
 <table>
   <tr><th>status</th><td>{node['status']}</td></tr>
   <tr><th>layers served</th><td>{node['layer_start']}–{node['layer_end']}</td></tr>
+  <tr><th>your endpoint</th><td>{node['tailscale_ip']}:{node['port']}
+      <span style="color:#5f6368">(how the network reaches you — private to this page)</span></td></tr>
   <tr><th>reputation</th><td>{rep if rep is not None else 'no challenges yet'}
       (passed {node.get('challenges_passed', 0)} / failed {node.get('challenges_failed', 0)})</td></tr>
   <tr><th>network</th><td>{network['online_nodes']} nodes online ·

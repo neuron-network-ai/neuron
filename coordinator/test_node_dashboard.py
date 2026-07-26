@@ -14,7 +14,7 @@ from fastapi import HTTPException  # noqa: E402
 
 from coordinator import config, models  # noqa: E402
 from coordinator.main import (RegisterBody, dashboard, get_ledger, node_dashboard,  # noqa: E402
-                              register)
+                              node_list, register)
 
 SECRET = config.REGISTRATION_SECRET
 ok = fail = 0
@@ -28,10 +28,10 @@ def check(name, cond):
 
 def main():
     models.init_db()
-    r1 = register(RegisterBody(node_id="mine", tailscale_ip="127.0.0.1", port=50001,
+    r1 = register(RegisterBody(node_id="mine", tailscale_ip="10.9.8.7", port=50001,
                                layer_start=0, layer_end=13, cores=4, ram_gb=8),
                   x_register_secret=SECRET)
-    register(RegisterBody(node_id="other", tailscale_ip="127.0.0.1", port=50002,
+    register(RegisterBody(node_id="other", tailscale_ip="10.6.5.4", port=50002,
                           layer_start=14, layer_end=27, cores=4, ram_gb=8),
              x_register_secret=SECRET)
     tok = r1["node_token"]
@@ -75,6 +75,21 @@ def main():
     check("public dashboard has no per-node earnings value", "7.777" not in pub)
     check("public dashboard still shows nodes + standing", "mine" in pub and "standing" in pub)
     check("public dashboard aggregate cards intact", "NRN distributed" in pub)
+
+    # ---- node ADDRESSES are private too ----
+    check("public dashboard hides IP addresses", "10.9.8.7" not in pub and "10.6.5.4" not in pub)
+    pub_list = node_list(x_register_secret=None)["nodes"]
+    check("public /node/list omits addresses",
+          all("tailscale_ip" not in n and "port" not in n for n in pub_list))
+    check("public /node/list keeps id/standing/layers",
+          all("node_id" in n and "standing" in n and "layer_start" in n for n in pub_list))
+    auth_list = node_list(x_register_secret=SECRET)["nodes"]
+    check("operator /node/list includes addresses (for the verifier)",
+          all("tailscale_ip" in n and "port" in n for n in auth_list))
+    check("/node/list never returns node_token",
+          all("node_token" not in n for n in pub_list + auth_list))
+    # my own endpoint IS on my own private dashboard
+    check("my dashboard shows my own endpoint", "10.9.8.7" in node_dashboard("mine", token=tok))
 
     print(f"\n{ok} passed, {fail} failed")
     raise SystemExit(1 if fail else 0)
