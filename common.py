@@ -44,12 +44,12 @@ DTYPE = torch.float32
 # --------------------------------------------------------------------------- #
 # Model loading
 # --------------------------------------------------------------------------- #
-def load_model():
+def load_model(model_id=MODEL_ID):
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    tok = AutoTokenizer.from_pretrained(MODEL_ID)
+    tok = AutoTokenizer.from_pretrained(model_id)
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
+        model_id,
         torch_dtype=DTYPE,
         attn_implementation="eager",   # predictable, explicit mask handling
         low_cpu_mem_usage=True,        # keep the load peak down (matters on the OptiPlex)
@@ -62,8 +62,13 @@ def num_layers(model):
     return len(model.model.layers)
 
 
-def load_model_shard(lo, hi, embed=False, norm=False, head=False):
+def load_model_shard(lo, hi, embed=False, norm=False, head=False, model_id=MODEL_ID):
     """Load ONLY layers[lo:hi] (+ optional embed/norm/head) — the 'light node' idea.
+
+    `model_id` selects which model's slice to load (defaults to the module MODEL_ID, so
+    existing callers are unchanged). Any Llama-family HF model — Llama/Qwen/Mistral —
+    shares the module layout the stage functions below use, so it loads through this same
+    path; other architectures need an adapter (see the arch-adapter seam).
 
     Roles in the pipeline chain:
       first  (node_a): lo=0, embed=True, head=True   (+ its layers)
@@ -83,8 +88,11 @@ def load_model_shard(lo, hi, embed=False, norm=False, head=False):
     from huggingface_hub import snapshot_download
     from safetensors import safe_open
 
-    tok = AutoTokenizer.from_pretrained(MODEL_ID)
-    config = AutoConfig.from_pretrained(MODEL_ID)
+    try:
+        tok = AutoTokenizer.from_pretrained(model_id)
+    except Exception:
+        tok = None   # middle/last nodes never decode — only the driver needs the tokenizer
+    config = AutoConfig.from_pretrained(model_id)
     config._attn_implementation = "eager"
     n = config.num_hidden_layers
     keep = set(range(lo, hi))
@@ -105,7 +113,7 @@ def load_model_shard(lo, hi, embed=False, norm=False, head=False):
             return head
         return False
 
-    local_dir = snapshot_download(MODEL_ID, allow_patterns=["*.safetensors", "*.json"])
+    local_dir = snapshot_download(model_id, allow_patterns=["*.safetensors", "*.json"])
     sd = {}
     for fp in sorted(glob.glob(os.path.join(local_dir, "*.safetensors"))):
         with safe_open(fp, framework="pt") as f:
