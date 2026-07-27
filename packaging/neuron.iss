@@ -26,6 +26,7 @@ OutputBaseFilename=NEURON-Setup-{#AppVersion}
 SetupIconFile=neuron.ico
 UninstallDisplayIcon={app}\{#AppExe}
 UninstallDisplayName={#AppName}
+InfoBeforeFile=DISCLOSURE.txt
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

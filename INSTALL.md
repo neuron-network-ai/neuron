@@ -22,7 +22,23 @@ credit.
 
 ---
 
-## Requirements
+## Two ways to join
+
+**Windows: use the installer (easiest).** Download `NEURON-Setup-<version>.exe` from
+[Releases](https://github.com/raman011sharma-code/neuron-network/releases), run it, click
+through — it installs a system-tray app that starts your node automatically. No Python needed.
+
+> **A quick note on the security warning:** the installer isn't code-signed yet (that needs a
+> paid certificate the project doesn't have), so Windows SmartScreen or your antivirus will
+> likely flag it as "unrecognized." That's normal for small open-source projects, not a sign
+> something's wrong — the installer's first screen explains this and shows you where to read
+> the source before you trust it. If SmartScreen blocks it outright: "More info" → "Run anyway."
+
+**Linux / macOS, or if you'd rather run from source:** follow the 5 steps below.
+
+---
+
+## Requirements (source install)
 
 - **Python 3.10 or newer** — check with `python --version` (on some systems it's `python3`).
 - **Git** — to download the code (or download the repo as a ZIP).
@@ -31,7 +47,7 @@ credit.
 
 ---
 
-## The 5 steps
+## The 5 steps (source install)
 
 ### 1. Get the code
 ```bash
@@ -126,5 +142,5 @@ records the attestation and promotes the node to `verified`. Proof-of-compute cu
 
 ---
 
-*A one-click installer (no Python setup) is on the way. Until then, the steps above are the way in —
-a semi-technical friend can get a node running in a few minutes.*
+*The Windows installer above is the one-click path — no Python setup. The source steps still work
+everywhere and are the only path on Linux/macOS today.*

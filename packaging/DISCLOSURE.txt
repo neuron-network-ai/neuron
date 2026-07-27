@@ -1,0 +1,25 @@
+Before you install NEURON, three honest things:
+
+1. NRN HAS NO CASH VALUE.
+   NRN is a contribution credit, not money. It records the compute you gave the
+   network and — per the project roadmap — what you'll spend to run your own AI
+   queries later. Please don't install this expecting to earn income. The
+   electricity your machine uses while donating compute is worth more than the
+   NRN you'll earn for it; think "fund my own AI usage," not "make money."
+
+2. WINDOWS MAY WARN YOU ABOUT THIS INSTALLER.
+   This app is not yet code-signed (that requires a paid certificate NEURON
+   doesn't have yet), so Windows SmartScreen or your antivirus may show an
+   "unrecognized app" warning. That is expected for any unsigned open-source
+   app, not a sign something is wrong. You can read every line of the source
+   at https://github.com/raman011sharma-code/neuron-network before trusting it.
+
+3. WHAT THIS APP ACTUALLY DOES.
+   It downloads a small slice of an AI model (~1 GB), uses ~1-2% of your CPU
+   only while your machine is idle (it pauses the moment you start using it,
+   and on battery), and relays inference requests for the network. It sends
+   the coordinator only a node ID, the layer range it serves, and CPU/RAM
+   counts — no personal data. Uninstalling removes everything, including the
+   downloaded model slice.
+
+Click Next only if you're comfortable with the above.
