@@ -298,6 +298,17 @@ finding independently spot-verified by reading the actual source before acting o
   target change; the dashboard now shows an in-progress migration inline. Test:
   `coordinator/test_migration.py` (`test_replan_when_a_planned_node_drops_offline`,
   `test_no_replan_when_nothing_changed` — a plain tick must NOT reset ready progress).
+- **Found live while deploying this fix, also shipped — the relay's public control/data
+  ports were ALREADY receiving malformed data from the open internet** (background
+  scanners, most likely — not necessarily a targeted attack) that crashed handler threads:
+  the journal on the live VM showed repeated `MemoryError` in `relay.py`'s `_recvn`, because
+  an unvalidated 4-byte length prefix let garbage bytes be read as a ~4GB length and reach
+  `sock.recv(huge_number)` — a real resource-exhaustion risk on a 1GB-RAM VM, not just log
+  noise. **Fix:** `recv_json` now caps the declared length at `MAX_MSG_BYTES` (64KB, generous
+  for a handshake message) and catches decode/parse errors, treating any of it as "not a
+  real client" (clean `None`, connection dropped) rather than an unhandled exception. Test:
+  `test_relay_auth.py` (huge length / undecodable bytes / malformed JSON all handled; a real
+  message still round-trips).
 - **Cheap fix, also shipped — mid-request node drops failed cleanly but logged nothing
   server-side** (`ui/app.py`'s SSE error branch). Now logged via `logging.getLogger
   ("neuron.ui")` so a real stranger's dropped connection shows up in the server log instead

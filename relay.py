@@ -33,6 +33,7 @@ import uuid
 import relay_auth
 
 BUF = 65536
+MAX_MSG_BYTES = 65536   # control/handshake JSON is a few hundred bytes; this is generous
 
 
 # --- tiny length-prefixed JSON framing (control/handshake only) ------------- #
@@ -52,12 +53,28 @@ def send_json(sock, obj):
 
 
 def recv_json(sock):
+    """Read one length-prefixed JSON message, or None on a clean close/malformed input.
+    Hardened (post-launch-audit): the public control/data ports see garbage/scanner traffic
+    from the open internet — an unvalidated 4-byte length prefix let a bogus/random value
+    reach sock.recv(huge_number) and raise MemoryError, killing the handler thread with an
+    unhandled-exception traceback for every stray probe. Now a too-large or malformed length
+    is treated as "not a real client" and the connection is dropped, not crashed."""
     h = _recvn(sock, 4)
     if not h:
         return None
-    (n,) = struct.unpack("!I", h)
+    try:
+        (n,) = struct.unpack("!I", h)
+    except struct.error:
+        return None
+    if n > MAX_MSG_BYTES:
+        return None
     b = _recvn(sock, n)
-    return json.loads(b.decode()) if b else None
+    if not b:
+        return None
+    try:
+        return json.loads(b.decode())
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
 
 
 def splice(a, b):
