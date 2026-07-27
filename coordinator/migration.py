@@ -103,6 +103,7 @@ class MigrationController:
         for a in self.plan:
             if a["node_id"] == node_id:
                 return {"migrating": True, "model_id": self.target["model_id"],
+                        "total_layers": self.target["layers"],
                         "layer_start": a["layer_start"], "layer_end": a["layer_end"],
                         "ready": node_id in self.ready}
         return None

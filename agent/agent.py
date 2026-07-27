@@ -18,6 +18,7 @@ and the Tailscale IP. ARM-compatible (pure Python + psutil + requests).
 import json
 import logging
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -46,12 +47,13 @@ CONFIG_PATH = os.path.join(HERE, "config.json")
 LOG_PATH = os.path.join(HERE, "agent.log")
 RETRY_SECONDS = 60
 PING_SECONDS = 30
+MIGRATION_POLL_SECONDS = 20
 
 # Written on first run if no config exists (so a freshly-installed app just works): open join,
 # auto-placement, green idle donation, relay on. Matches agent/config.json.
 DEFAULT_CONFIG = {
     "coordinator": "http://150.230.22.250:8001",
-    "node_id": None, "node_token": None,
+    "node_id": None, "node_token": None, "model_id": None,
     "layer_start": None, "layer_end": None,
     "slice_dir": "./model_slice/",
     "donation_mode": "idle", "idle_threshold_seconds": 60,
@@ -117,6 +119,7 @@ class Agent:
         self._stop = threading.Event()
         self.user_paused = threading.Event()   # set by the tray's Pause button
         self.relay = self.cfg.get("relay")     # relay params if this node is behind NAT
+        self.server = None                     # the running NodeServer (migration reload target)
 
     # -- config persistence -------------------------------------------------- #
     def _save(self):
@@ -208,10 +211,12 @@ class Agent:
                 info = self.slice_info()
                 self.state.update(node_id=self.cfg["node_id"],
                                   layers=[info["layer_start"], info["layer_end"]])
+                self.cfg["model_id"] = info["model_id"]      # what we're actually serving now
+                self._save()
                 slice_dir = self.ensure_slice(info)
-                server = NodeServer(slice_dir, info["layer_start"], info["layer_end"],
-                                    info.get("total_layers", 28))
-                threading.Thread(target=server.run,
+                self.server = NodeServer(slice_dir, info["layer_start"], info["layer_end"],
+                                         info.get("total_layers", 28))
+                threading.Thread(target=self.server.run,
                                  args=("0.0.0.0", self.cfg.get("port", 50999)),
                                  daemon=True).start()
                 log.info("node server started on port %d", self.cfg.get("port", 50999))
@@ -252,8 +257,103 @@ class Agent:
                 log.warning("heartbeat failed: %s", e)
             self._stop.wait(PING_SECONDS)
 
+    # -- model migration (Build 3, node-side): download the coordinator's chosen target
+    # tier's slice in the BACKGROUND while still serving the current model, report ready,
+    # then hot-swap only once the coordinator confirms cutover actually happened. ---------- #
+    def migration_loop(self):
+        prepared = None   # {model_id, layer_start, layer_end, total_layers, slice_dir, ready}
+        while not self._stop.is_set():
+            if self.server is not None:
+                try:
+                    asg = requests.get(
+                        f"{self.base}/node/{self.cfg['node_id']}/migration", timeout=15).json()
+                    if asg.get("migrating"):
+                        is_new_target = prepared is None or (
+                            prepared["model_id"] != asg["model_id"] or
+                            prepared["layer_start"] != asg["layer_start"] or
+                            prepared["layer_end"] != asg["layer_end"])
+                        if is_new_target:
+                            prepared = self._prepare_migration_target(asg)
+                        elif not prepared["ready"]:
+                            self._report_migration_ready(prepared)
+                    elif prepared is not None:
+                        # migration ended — either cut over to our target, or aborted first
+                        self._maybe_cutover(prepared)
+                        prepared = None
+                except requests.RequestException as e:
+                    log.warning("migration poll failed: %s", e)
+            self._stop.wait(MIGRATION_POLL_SECONDS)
+
+    def _prepare_migration_target(self, asg):
+        """Download the target tier's slice into a SEPARATE dir — this node keeps answering
+        requests on the OLD model for the entire download, so preparing never costs coverage."""
+        slice_dir = os.path.join(HERE, "model_slice_migrating")
+        shutil.rmtree(slice_dir, ignore_errors=True)      # drop any stale prior target
+        total = asg["total_layers"]
+        is_first, is_last = asg["layer_start"] == 0, asg["layer_end"] == total - 1
+        log.info("migration: preparing target %s layers %d-%d (of %d)",
+                 asg["model_id"], asg["layer_start"], asg["layer_end"], total)
+        prepared = {"model_id": asg["model_id"], "layer_start": asg["layer_start"],
+                   "layer_end": asg["layer_end"], "total_layers": total,
+                   "slice_dir": slice_dir, "ready": False}
+        try:
+            slice_downloader.download_slice(
+                asg["model_id"], asg["layer_start"], asg["layer_end"], slice_dir,
+                is_first_node=is_first, is_last_node=is_last)
+        except Exception as e:
+            log.warning("migration: target slice download failed, will retry next poll: %s", e)
+            return None
+        self._report_migration_ready(prepared)
+        return prepared
+
+    def _report_migration_ready(self, prepared):
+        try:
+            requests.post(f"{self.base}/node/{self.cfg['node_id']}/migration-ready",
+                         headers={"X-Node-Token": self.cfg["node_token"]}, timeout=15
+                         ).raise_for_status()
+            prepared["ready"] = True
+            log.info("migration: target slice ready — reported to coordinator, "
+                     "still serving the current model until cutover")
+        except requests.RequestException as e:
+            log.warning("migration: failed to report ready (will retry): %s", e)
+
+    def _maybe_cutover(self, prepared):
+        """Migration is no longer active — either it cut over to OUR target, or it aborted
+        (capacity dropped, target reverted) before we ever reported ready. Confirm what the
+        coordinator actually ended up serving before swapping — an abort must not reload us
+        onto a model the network isn't running."""
+        if not prepared["ready"]:
+            shutil.rmtree(prepared["slice_dir"], ignore_errors=True)
+            return
+        try:
+            net = requests.get(f"{self.base}/network/model", timeout=15).json()
+        except requests.RequestException as e:
+            log.warning("migration: could not confirm cutover, leaving prepared slice: %s", e)
+            return
+        if net.get("serving", {}).get("model_id") != prepared["model_id"]:
+            log.info("migration: aborted before cutover — discarding prepared slice")
+            shutil.rmtree(prepared["slice_dir"], ignore_errors=True)
+            return
+        self._swap_to(prepared)
+
+    def _swap_to(self, prepared):
+        log.info("migration: cutting over to %s layers %d-%d", prepared["model_id"],
+                 prepared["layer_start"], prepared["layer_end"])
+        self.server.reload(prepared["slice_dir"], prepared["layer_start"],
+                           prepared["layer_end"], prepared["total_layers"])
+        old_slice_dir = os.path.join(HERE, os.path.normpath(self.cfg["slice_dir"]))
+        shutil.rmtree(old_slice_dir, ignore_errors=True)
+        os.rename(prepared["slice_dir"], old_slice_dir)
+        self.cfg["model_id"] = prepared["model_id"]
+        self.cfg["layer_start"], self.cfg["layer_end"] = prepared["layer_start"], prepared["layer_end"]
+        self._save()
+        self.state.update(layers=[prepared["layer_start"], prepared["layer_end"]])
+        log.info("migration: now serving %s layers %d-%d", prepared["model_id"],
+                 prepared["layer_start"], prepared["layer_end"])
+
     def run(self):
         self.setup()
+        threading.Thread(target=self.migration_loop, daemon=True).start()
         self.heartbeat_loop()
 
     def stop(self):

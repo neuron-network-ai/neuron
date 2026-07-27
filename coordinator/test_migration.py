@@ -124,6 +124,7 @@ def test_assignment_for():
     asg = c.assignment_for("a")
     assert asg["migrating"] and asg["model_id"] == "meta/8b"
     assert asg["layer_start"] == 0 and asg["layer_end"] == 9
+    assert asg["total_layers"] == 30                # a node needs this to know is_last_node
 
 
 def _run():

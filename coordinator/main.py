@@ -122,6 +122,16 @@ _migration = migration.MigrationController()
 _migration_lock = threading.Lock()
 
 
+def apply_migration_cutover(model_id, layers):
+    """Cutover callback: flip the serving model AND persist each planned node's new layer
+    range (models.update_layers) in the same step. Without this, routing/placement would
+    keep using each node's OLD range after the model (and thus the partition) changed —
+    the node has already reloaded onto the NEW range by the time it reported ready."""
+    for a in _migration.plan:
+        models.update_layers(a["node_id"], a["layer_start"], a["layer_end"])
+    set_serving_model(model_id, layers)
+
+
 async def health_loop():
     while True:
         await asyncio.sleep(config.HEALTH_CHECK_INTERVAL_S)
@@ -139,7 +149,7 @@ async def health_loop():
             with _migration_lock:
                 before = _migration.phase
                 _migration.update(models.list_nodes(), target, serving_model(),
-                                  time.time(), set_serving_model)
+                                  time.time(), apply_migration_cutover)
                 if _migration.phase != before:
                     print(f"[migration] {before} -> {_migration.phase} "
                           f"(serving={serving_model()['model_id']})")

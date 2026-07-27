@@ -10,7 +10,7 @@ import os
 import tempfile
 
 os.environ.setdefault("NEURON_DB", tempfile.mktemp(suffix=".db"))
-from coordinator import config, main, models, router
+from coordinator import config, main, migration, models, router
 
 models.init_db()
 
@@ -71,6 +71,32 @@ def test_build_chain_respects_total():
     assert miss == [] and [n["node_id"] for n in ch] == ["a", "c"]
     ch2, miss2 = router.build_chain(total=28)               # need 0..27 -> gap
     assert (19, 27) in miss2
+
+
+def test_cutover_persists_node_layer_ranges():
+    """The node-side follow-up (Build 3): apply_migration_cutover must not only flip the
+    served model_id, it must ALSO repartition each node's registered layer_start/end to the
+    migration plan — a node reloads onto the NEW range as part of reporting ready, so the
+    coordinator's routing/placement have to agree with that range once cutover happens,
+    not keep the pre-migration split."""
+    _reset_serving(); _clear()
+    _reg("a", 0, 9); _reg("c", 10, 18); _reg("b", 19, 27)     # old 28-layer split
+
+    ctrl = migration.MigrationController()
+    main._migration.__dict__.update(ctrl.__dict__)             # drive the module singleton
+    tgt = {"model_id": "meta/8b", "layers": 30}
+    main._migration.update(models.list_nodes(), tgt, main.serving_model(), 0,
+                           main.apply_migration_cutover)
+    for nid in ("a", "c", "b"):
+        assert main._migration.mark_ready(nid)
+    st = main._migration.update(models.list_nodes(), tgt, main.serving_model(), 1,
+                                main.apply_migration_cutover)
+    assert st["phase"] == "steady"
+    assert main.serving_model() == {"model_id": "meta/8b", "layers": 30}
+    # 30/3 = 10 each, driver ("a", head_ms set) first
+    assert [models.get_node(n)["layer_start"] for n in ("a", "c", "b")] == [0, 10, 20]
+    assert [models.get_node(n)["layer_end"] for n in ("a", "c", "b")] == [9, 19, 29]
+    _reset_serving()
 
 
 def _run():

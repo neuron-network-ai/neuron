@@ -32,11 +32,23 @@ compute_lock = threading.Lock()
 
 class NodeServer:
     def __init__(self, slice_dir, layer_start, layer_end, total_layers, paused_flag=None):
-        self.lo, self.hi, self.n = layer_start, layer_end, total_layers
+        self.lo = self.hi = self.n = None
+        self.model = None
         self.paused = paused_flag if paused_flag is not None else threading.Event()  # set = paused
+        self.reload(slice_dir, layer_start, layer_end, total_layers)
+
+    def reload(self, slice_dir, layer_start, layer_end, total_layers):
+        """Hot-swap the served slice in place (model migration, Build 3 node-side). The new
+        slice is loaded OUTSIDE compute_lock (I/O + weight materialization is the slow part);
+        only the pointer swap is locked, so it can't land mid-forward-pass of an in-flight
+        request. Existing connections keep using self.model/self.n by reference, so the very
+        next request after the swap is served by the new slice with no reconnect needed."""
         print(f"[node] loading slice from {slice_dir} (layers {layer_start}-{layer_end}) ...")
         t0 = time.time()
-        self.model = load_slice_model(slice_dir)
+        model = load_slice_model(slice_dir)
+        with compute_lock:
+            self.model = model
+            self.lo, self.hi, self.n = layer_start, layer_end, total_layers
         print(f"[node] slice ready in {time.time()-t0:.1f}s | serving layers {layer_start}-{layer_end}")
 
     def serve(self, conn, addr):
