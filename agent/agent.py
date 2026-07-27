@@ -231,7 +231,8 @@ class Agent:
                         kwargs=dict(node_id=self.cfg["node_id"], public_port=relay["public_port"],
                                     relay_host=relay["host"], control_port=relay["control_port"],
                                     data_port=relay["data_port"], local_host="127.0.0.1",
-                                    local_port=self.cfg.get("port", 50999), stop=self._stop),
+                                    local_port=self.cfg.get("port", 50999), stop=self._stop,
+                                    ticket=relay.get("ticket")),
                         daemon=True).start()
                     log.info("relay tunnel started — reachable via %s:%d (NAT-friendly)",
                              relay["host"], relay["public_port"])

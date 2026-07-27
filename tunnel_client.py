@@ -94,7 +94,7 @@ def handle_new_conn(conn_id):
 
 
 def run_tunnel(node_id, public_port, relay_host, control_port=8010, data_port=8011,
-               local_host="127.0.0.1", local_port=50999, stop=None):
+               local_host="127.0.0.1", local_port=50999, stop=None, ticket=None):
     """Maintain the outbound control connection + bridge relayed connections to the
     local node server. Reconnects forever (or until `stop` [a threading.Event] is set).
     Callable directly by the agent, or via main()/CLI."""
@@ -114,7 +114,7 @@ def run_tunnel(node_id, public_port, relay_host, control_port=8010, data_port=80
                 ctrl.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             except OSError:
                 pass
-            send_json(ctrl, {"node_id": node_id, "public_port": public_port})
+            send_json(ctrl, {"node_id": node_id, "public_port": public_port, "ticket": ticket})
             print("[tunnel] registered; waiting for connections")
             while stop is None or not stop.is_set():
                 msg = recv_json(ctrl)
@@ -142,10 +142,13 @@ def main():
     ap.add_argument("--local-host", default="127.0.0.1")
     ap.add_argument("--local-port", type=int, default=50999,
                     help="the local node server port to bridge to")
+    ap.add_argument("--ticket", default=None,
+                    help="the relay ticket from /node/register's relay block "
+                         "(relay_auth.make_ticket(secret, node_id, public_port))")
     args = ap.parse_args()
     run_tunnel(args.node_id, args.public_port, args.relay_host,
                control_port=args.control_port, data_port=args.data_port,
-               local_host=args.local_host, local_port=args.local_port)
+               local_host=args.local_host, local_port=args.local_port, ticket=args.ticket)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ Env overrides:
     NEURON_MAX_TOKENS    hard cap on tokens per response (default 512)
 """
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -41,6 +42,7 @@ from rag import retriever as rag
 
 COORDINATOR = os.environ.get("NEURON_COORDINATOR", "http://150.230.22.250:8001").rstrip("/")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+log = logging.getLogger("neuron.ui")
 
 
 @asynccontextmanager
@@ -124,6 +126,10 @@ def _drive(prompt: str, max_new: int, use_rag: bool = False):
             yield sse("done", {"tokens": ev["completion_tokens"],
                                "latency_ms": ev["latency_ms"], "tok_per_s": ev["tok_per_s"]})
         elif ev["type"] == "error":
+            # a dropped/offline node mid-chain surfaces here — previously silent server-side,
+            # so the founder would only learn about a real stranger's failed request if they
+            # reported it themselves (post-audit fix: at least get it in the server log).
+            log.warning("chat stream error for prompt %r: %s", prompt[:80], ev["detail"])
             yield sse("error", {"detail": ev["detail"]})
 
 

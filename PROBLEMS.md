@@ -20,6 +20,16 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
   roadmap at Session 12** as planned; do NOT integrate quantization now. Log a dedicated
   *quality-preserving quantization* session (GPTQ/AWQ or llama.cpp GGUF+RPC) as prioritized
   future work — evaluate the llama.cpp engine pivot deliberately, with real users in view.
+- **2026-07-28 — Pre-launch audit before the first real external stranger.** No real
+  stranger has ever run a node — everything "live" so far is the founder's own machines.
+  Before handing the installer to an actual friend, ran three parallel audits (security,
+  economics, reliability) across the current coordinator/agent/relay code, independently
+  verified every finding against the real code (not just the audit's claims), and fixed
+  everything ranked "must-fix before a real stranger joins." See [P14]. Also added an
+  honest first-run disclosure (earnings have no cash value; why Windows may flag the
+  unsigned installer) to `INSTALL.md` and to the installer itself (`packaging/DISCLOSURE.txt`,
+  shown as an Inno Setup `InfoBeforeFile` page) — a friend who only runs the exe and never
+  reads `INSTALL.md` still sees it.
 
 ---
 
@@ -230,6 +240,85 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
   metering = prompt-stuffing exploit (see TOKENOMICS.md §11.4/§11.8).
 - **Action: measure prefill (one selftest run with a long prompt, time the prefill pass)
   before publishing any per-token price sheet; charge input at full weight until then.**
+
+### [P14] 🟢 Pre-launch audit (2026-07-28) — 4 real bugs found and fixed before the first real stranger
+Three parallel audits (security / economics / reliability) against the current code, each
+finding independently spot-verified by reading the actual source before acting on it.
+
+- **RESOLVED — Relay had zero authentication on tunnel registration.** Any stranger who could
+  reach the public relay control port (`150.230.22.250:8010`) could register `{node_id,
+  public_port}` with **no credential at all**, and `relay.py`'s `self.controls[pub]`
+  unconditionally overwrote whatever was already registered on that port — a stranger could
+  hijack (traffic interception) or blackhole any NAT'd node's public port, or squat an
+  unclaimed one. This is exactly the path a real behind-NAT stranger (`behind_nat: true` is
+  the agent default) depends on. **Fix:** new `relay_auth.py` — the coordinator is the only
+  party that knows the `node_id -> public_port` binding, so it mints an HMAC ticket
+  (`HMAC(shared secret, node_id + ":" + public_port)`) at registration time and hands it to
+  the node; the relay (still a DB-less, dependency-free stdlib process) independently
+  recomputes the same HMAC to verify, no callback to the coordinator needed. Binding node_id
+  + port together blocks replay onto a different port; without the secret an attacker can't
+  mint a ticket for ANY node/port, closing squatting too. `coordinator/config.py`
+  `RELAY_SECRET` (env `NEURON_RELAY_SECRET`) shared with `relay.py --secret`. Threaded through
+  `tunnel_client.run_tunnel(ticket=...)` and `agent/agent.py`. Test: `test_relay_auth.py` 9/9
+  + `coordinator/test_open_join.py` (ticket issued/verified on `behind_nat` register).
+- **RESOLVED — Duplicate-payout race in `/infer/{id}/complete`.** The endpoint read
+  `req["status"]=="completed"` as a pre-check, then called `ledger.distribute(plan)`
+  **without checking** whether its own `models.complete_request()` call actually won the
+  atomic `UPDATE ... WHERE status='pending'`. N concurrent completion calls with the SAME
+  valid `complete_token` (trivial with `asyncio.gather` — anyone holding a token from their
+  own `/infer` call, which open join lets any stranger make, could do this to themselves)
+  would all pass the pre-check before any of them committed, and every one of them minted a
+  fresh payout. **Fix:** `coordinator/main.py`'s `complete()` now gates `ledger.distribute()`
+  on `complete_request()`'s own return value — only the caller that actually flips the row to
+  `completed` gets paid; every racer after that gets a clean 409, not a second mint. Verified
+  the fix by first reproducing the multi-payout with 8 concurrent racers against the
+  pre-fix code (reliably failed), then confirming the fix closes it (reliably passes, run 3×).
+  Test: `coordinator/test_complete_auth.py` (`8 concurrent racers -> exactly 1 paid`).
+- **RESOLVED — Verified (non-trusted) nodes could be identity-hijacked on re-registration.**
+  `POST /node/register`'s hijack guard only blocked a secret-less re-registration when
+  `existing["trusted"]` was true — a node that open-joined and passed proof-of-compute
+  (`standing="verified"`, `trusted=False` in the DB) was **unprotected**: anyone could
+  re-register that exact `node_id` with no secret, the `ON CONFLICT` update would hand them
+  a **fresh `node_token`**, and they'd inherit the victim's verified standing while silently
+  locking the real owner out of their own dashboard/balance. **Fix:** the guard now checks
+  `existing["standing"] in ("trusted", "verified")`; the one way around the secret is
+  presenting that exact node's *current* `X-Node-Token` (proves you already control it —
+  legitimate self-recovery, e.g. after losing local config, stays possible). Test:
+  `coordinator/test_open_join.py` (`hijack of verified id blocked (409)`, wrong-token
+  rejected, correct-token re-register succeeds).
+- **RESOLVED — Model migration ([P-tiering], `coordinator/migration.py`) had no
+  offline-eviction; one flaky node could wedge it forever, invisibly.** A node's plan was
+  only recomputed when entering "preparing" fresh or the target model changed — never on
+  later ticks. A planned node going offline mid-preparing (very plausible for a real
+  stranger's laptop under the `idle` donation mode, which pauses on any owner activity)
+  meant cutover required `planned <= ready` forever against a node that would never report
+  ready again — silently stuck, since the dashboard didn't surface migration phase at all
+  (only the raw `/network/migration` JSON did). **Fix:** `update()` now replans (against
+  whoever is currently online+eligible) whenever a planned node drops out, not just on a
+  target change; the dashboard now shows an in-progress migration inline. Test:
+  `coordinator/test_migration.py` (`test_replan_when_a_planned_node_drops_offline`,
+  `test_no_replan_when_nothing_changed` — a plain tick must NOT reset ready progress).
+- **Cheap fix, also shipped — mid-request node drops failed cleanly but logged nothing
+  server-side** (`ui/app.py`'s SSE error branch). Now logged via `logging.getLogger
+  ("neuron.ui")` so a real stranger's dropped connection shows up in the server log instead
+  of only ever being visible if they report it themselves.
+- **Accepted, not fixed now — zero monitoring/alerting beyond stdout/systemd logs, and no
+  database backup mechanism** beyond the one manual pre-deploy snapshot noted in
+  `neuron-machines` history. `Restart=always` in the systemd unit covers process crashes;
+  SQLite corruption/data loss has no recovery path. Reasonable to leave for a single-friend
+  test; revisit before any wider rollout.
+- **Accepted, inherent to open-join — Sybil replica-stacking.** `router.build_chain` picks
+  uniformly among nodes tied for a segment; nothing stops one machine registering many
+  `node_id`s to capture a disproportionate share of the random draws. Proof-of-compute
+  verifies correctness, not identity uniqueness. A fundamental open-join tradeoff, not a bug
+  — no hardware fingerprinting exists to fix it, and it doesn't inflate total mint (see [P12]).
+- **Confirmed solid, no action needed:** `/complete` still correctly settles from the
+  coordinator-recorded plan (never caller-supplied `node_ids`) — [P12]'s fix holds up under
+  concurrency too; SQL is parameterized everywhere (no attacker-influenced column names);
+  node tokens are never logged; no CORS/debug/reload misconfiguration; `/node/list` and
+  per-node dashboards stay correctly privacy-gated ([P11] holds); `tunnel_client.py`'s
+  earlier timeout-churn bug stays fixed; reputation/proof-of-compute is manual-only today so
+  a flapping stranger node cannot get auto-flagged just for churning.
 
 ---
 

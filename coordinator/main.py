@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from coordinator import (balancer, config, ledger, migration, model_registry, model_tiers,
                          models, router)
+import relay_auth
 
 
 # --------------------------------------------------------------------------- #
@@ -209,23 +210,39 @@ def _assign_relay_port(node_id: str) -> int:
 
 
 @app.post("/node/register")
-def register(body: RegisterBody, x_register_secret: str = Header(default=None)):
+def register(body: RegisterBody, x_register_secret: str = Header(default=None),
+            x_node_token: str = Header(default=None)):
     trusted = classify_registration(x_register_secret)
-    # open join: a secret-less registration must not hijack an existing TRUSTED node id.
+    # open join: a secret-less registration must not hijack an existing node id that has
+    # already earned standing (trusted OR verified via proof-of-compute) — NOT just trusted.
+    # A verified-but-not-trusted node was previously unprotected: anyone could re-register its
+    # id with no credential, inherit its standing, and get handed a FRESH node_token — locking
+    # the real owner out of their own dashboard/balance (post-launch-audit fix). The one way
+    # around the secret is presenting that exact node's CURRENT token, proving you already
+    # control it (e.g. a legitimate re-register after losing local registration state).
     if not trusted:
         existing = models.get_node(body.node_id)
-        if existing and existing["trusted"]:
-            raise HTTPException(
-                status_code=409,
-                detail=f"node id '{body.node_id}' is reserved by a trusted node; "
-                       f"registering it requires the secret")
+        if existing and existing["standing"] in ("trusted", "verified"):
+            # isinstance guard: a direct (non-HTTP) caller that omits x_node_token gets
+            # FastAPI's Header() sentinel object here, not a plain None — compare_digest
+            # would TypeError on it, not just fail closed.
+            owns_it = (isinstance(x_node_token, str)
+                      and secrets.compare_digest(x_node_token, existing["node_token"]))
+            if not owns_it:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"node id '{body.node_id}' is already {existing['standing']}; "
+                           f"re-registering it requires either the shared secret or that "
+                           f"node's current X-Node-Token")
     token = secrets.token_hex(config.TOKEN_BYTES)
     tailscale_ip, port, relay_block = body.tailscale_ip, body.port, None
     if body.behind_nat and config.RELAY_ENABLED:
         relay_port = _assign_relay_port(body.node_id)
         tailscale_ip, port = config.RELAY_HOST, relay_port    # peers reach it via the relay
+        ticket = relay_auth.make_ticket(config.RELAY_SECRET, body.node_id, relay_port)
         relay_block = {"host": config.RELAY_HOST, "control_port": config.RELAY_CONTROL_PORT,
-                       "data_port": config.RELAY_DATA_PORT, "public_port": relay_port}
+                       "data_port": config.RELAY_DATA_PORT, "public_port": relay_port,
+                       "ticket": ticket}
     models.register_node(body.node_id, tailscale_ip, port, body.layer_start,
                          body.layer_end, body.cores, body.ram_gb, token,
                          ms_per_layer=body.ms_per_layer, head_ms=body.head_ms, trusted=trusted)
@@ -342,7 +359,14 @@ def complete(request_id: str, body: CompleteBody):
     # completion can only ever pay the nodes the coordinator actually routed (incl. the chosen replica).
     plan = json.loads(req["plan_node_ids"]) if req.get("plan_node_ids") else list(body.node_ids)
     tokens = max(0, min(int(body.tokens_generated), int(req["max_tokens"] or body.tokens_generated)))
-    models.complete_request(request_id, tokens, body.duration_ms, plan)
+    # complete_request's UPDATE is conditioned on WHERE status='pending' and reports whether IT
+    # was the call that flipped the row — the true single-writer guard. The status check above
+    # (line ~352) is only a fast pre-check; two concurrent /complete calls with the SAME valid
+    # token both pass it before either commits, so distribute() must gate on THIS return value,
+    # not the pre-check, or the race pays every racer instead of paying once (post-audit fix).
+    won = models.complete_request(request_id, tokens, body.duration_ms, plan)
+    if not won:
+        raise HTTPException(status_code=409, detail="request already completed")
     rewards = ledger.distribute(plan)
     return {"status": "completed", "request_id": request_id, "rewards": rewards}
 
@@ -544,6 +568,18 @@ def dashboard():
         gap_line = (f"<p style='color:#5f6368;font-size:14px'>Grow the network by "
                     f"<b>{need}</b> and it auto-upgrades to the <b>{gap['name']}</b> model.</p>")
 
+    # Migration status: was invisible before (only the raw /network/migration JSON showed it,
+    # so a stuck/slow migration had no operator-facing signal at all — post-audit fix).
+    with _migration_lock:
+        mstatus = _migration.status()
+    migration_line = ""
+    if mstatus["phase"] == "preparing":
+        migration_line = (
+            f"<p style='color:#1a73e8;font-size:14px'>Migrating to "
+            f"<b>{mstatus['target']['model_id']}</b> — "
+            f"{mstatus['ready_count']}/{mstatus['plan_size']} node(s) ready "
+            f"(still serving <b>{serv_name}</b> until cutover).</p>")
+
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta http-equiv="refresh" content="5">
 <title>NEURON Coordinator</title>
@@ -580,6 +616,7 @@ def dashboard():
   {ladder}
 </table>
 {gap_line}
+{migration_line}
 <h2 style="font-size:1.05rem;margin:1.5rem 0 .5rem">Nodes</h2>
 <table>
   <tr><th>node</th><th>layers</th><th>status</th><th>standing</th><th>cores</th>

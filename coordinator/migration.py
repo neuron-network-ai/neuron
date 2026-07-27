@@ -72,8 +72,18 @@ class MigrationController:
                 self._reset()
             return self.status()
 
-        # A migration is warranted. (Re)start preparing if we aren't, or the target changed.
-        if self.phase != "preparing" or (self.target or {}).get("model_id") != target["model_id"]:
+        # A migration is warranted. (Re)start/replan preparing if: we aren't preparing yet, the
+        # target changed, OR a node already in the plan is no longer online+eligible (a real
+        # stranger's laptop can drop mid-preparing under the idle donation mode — without this,
+        # cutover requires `planned <= ready` forever with a planned node that will never report
+        # ready again, wedging the migration silently for good; post-audit fix). Replanning
+        # against the currently-eligible set lets a churny node's segment fall to whoever else
+        # qualifies (or drop the migration back to idle-preparing if nobody currently does).
+        elig_ids = {n["node_id"] for n in nodes if n.get("status") == "online" and n.get("eligible")}
+        planned_ids = {a["node_id"] for a in self.plan}
+        node_dropped = self.phase == "preparing" and not planned_ids.issubset(elig_ids)
+        if self.phase != "preparing" or (self.target or {}).get("model_id") != target["model_id"] \
+                or node_dropped:
             self.target = {"model_id": target["model_id"], "layers": int(target["layers"])}
             self.plan = plan_migration(nodes, self.target["layers"])
             self.ready = set()

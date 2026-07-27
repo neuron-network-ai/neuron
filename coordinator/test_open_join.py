@@ -18,6 +18,7 @@ os.environ["NEURON_DB"] = os.path.join(_tmp, "oj.db")
 
 from fastapi import HTTPException  # noqa: E402
 
+import relay_auth  # noqa: E402
 from coordinator import config, ledger, models, router  # noqa: E402
 from coordinator.main import RegisterBody, register  # noqa: E402
 
@@ -36,9 +37,9 @@ def check(name, cond):
         print(f"  FAIL  {name}")
 
 
-def body(node_id, ls, le):
+def body(node_id, ls, le, behind_nat=False):
     return RegisterBody(node_id=node_id, tailscale_ip="127.0.0.1", port=50000 + le,
-                        layer_start=ls, layer_end=le, cores=4, ram_gb=8)
+                        layer_start=ls, layer_end=le, cores=4, ram_gb=8, behind_nat=behind_nat)
 
 
 def main():
@@ -101,6 +102,37 @@ def main():
         models.record_attestation("stranger-b", False)
     b3 = models.get_node("stranger-b")
     check("many failures -> flagged + not eligible", b3["flagged"] and not b3["eligible"])
+
+    # 8) a secret-less registration cannot hijack a VERIFIED (not just trusted) node id — the
+    # earlier guard only checked `trusted`, leaving open-joined-and-verified strangers exposed
+    # to identity theft (post-launch-audit fix). The real owner CAN still recover by presenting
+    # that exact node's current token, proving they already control it.
+    register(body("stranger-v", 0, 5), x_register_secret=None)
+    models.record_attestation("stranger-v", True)
+    v = models.get_node("stranger-v")
+    check("setup: stranger-v is verified", v["standing"] == "verified")
+    try:
+        register(body("stranger-v", 0, 5), x_register_secret=None)
+        check("hijack of verified id blocked (409)", False)
+    except HTTPException as e:
+        check("hijack of verified id blocked (409)", e.status_code == 409)
+    try:
+        register(body("stranger-v", 0, 5), x_register_secret=None, x_node_token="not-the-token")
+        check("hijack with a wrong token blocked (409)", False)
+    except HTTPException as e:
+        check("hijack with a wrong token blocked (409)", e.status_code == 409)
+    r_owner = register(body("stranger-v", 0, 5), x_register_secret=None,
+                       x_node_token=v["node_token"])
+    check("re-register with own token succeeds", r_owner["status"] == "registered")
+
+    # 9) a behind-NAT registration is handed a relay ticket the relay can verify offline
+    r_nat = register(body("stranger-nat", 0, 5, behind_nat=True), x_register_secret=None)
+    relay_block = r_nat["relay"]
+    check("relay block carries a ticket", "ticket" in relay_block)
+    check("relay ticket verifies for the right node/port", relay_auth.verify_ticket(
+        config.RELAY_SECRET, "stranger-nat", relay_block["public_port"], relay_block["ticket"]))
+    check("relay ticket rejected for a different node id", not relay_auth.verify_ticket(
+        config.RELAY_SECRET, "someone-else", relay_block["public_port"], relay_block["ticket"]))
 
     migration_test()
 

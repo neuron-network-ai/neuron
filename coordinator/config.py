@@ -62,6 +62,10 @@ RELAY_CONTROL_PORT = int(os.environ.get("NEURON_RELAY_CONTROL_PORT", "8010"))
 RELAY_DATA_PORT = int(os.environ.get("NEURON_RELAY_DATA_PORT", "8011"))
 RELAY_PORT_MIN = int(os.environ.get("NEURON_RELAY_PORT_MIN", "9000"))
 RELAY_PORT_MAX = int(os.environ.get("NEURON_RELAY_PORT_MAX", "9100"))
+# Shared with the relay process (relay.py --secret / NEURON_RELAY_SECRET on the relay host) so
+# it can verify a node's tunnel registration ticket without a DB or calling back here. Override
+# in production — see relay_auth.py and PROBLEMS.md for what this closes.
+RELAY_SECRET = os.environ.get("NEURON_RELAY_SECRET", "neuron-relay-dev-secret")
 
 # --- security (Session 16) -------------------------------------------------- #
 # Proof-of-compute reputation: a node flagged once it has enough challenge samples and

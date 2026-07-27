@@ -24,10 +24,13 @@ Open these + each node's public port in the VM firewall (iptables + cloud securi
 """
 import argparse
 import json
+import os
 import socket
 import struct
 import threading
 import uuid
+
+import relay_auth
 
 BUF = 65536
 
@@ -85,9 +88,10 @@ def splice(a, b):
 
 
 class Relay:
-    def __init__(self, control_port, data_port):
+    def __init__(self, control_port, data_port, secret):
         self.control_port = control_port
         self.data_port = data_port
+        self.secret = secret
         self.pending = {}          # conn_id -> waiting public client socket
         self.controls = {}         # public_port -> (control_sock, write_lock, node_id)
         self.listening = set()     # public ports that already have a listener
@@ -110,6 +114,14 @@ class Relay:
             conn.close()
             return
         node_id, pub = reg["node_id"], int(reg["public_port"])
+        # Only the coordinator can mint a valid ticket for this exact node_id+port (it's the
+        # only party that knows the shared secret AND assigns the binding) — without this, any
+        # stranger who can reach this port could squat an unclaimed public_port or hijack one
+        # already claimed by a real node, silently overwriting it below (post-launch-audit fix).
+        if not relay_auth.verify_ticket(self.secret, node_id, pub, reg.get("ticket")):
+            print(f"[relay] REJECTED '{node_id}' from {addr[0]} -> :{pub} (bad/missing ticket)")
+            conn.close()
+            return
         wlock = threading.Lock()
         with self.lock:
             self.controls[pub] = (conn, wlock, node_id)
@@ -180,8 +192,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--control-port", type=int, default=8010)
     ap.add_argument("--data-port", type=int, default=8011)
+    ap.add_argument("--secret", default=os.environ.get("NEURON_RELAY_SECRET",
+                                                        "neuron-relay-dev-secret"),
+                    help="shared with the coordinator (NEURON_RELAY_SECRET) — override in prod")
     args = ap.parse_args()
-    Relay(args.control_port, args.data_port).start()
+    Relay(args.control_port, args.data_port, args.secret).start()
 
 
 if __name__ == "__main__":

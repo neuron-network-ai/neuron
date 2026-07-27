@@ -10,6 +10,7 @@ Uses a throwaway DB and the real endpoint/ledger/models code — no HTTP server.
 """
 import os
 import tempfile
+import threading
 
 os.environ["NEURON_OPEN_JOIN"] = "1"
 os.environ["NEURON_DB"] = os.path.join(tempfile.mkdtemp(prefix="neuron_p12_"), "p12.db")
@@ -94,6 +95,45 @@ def main():
         check("double completion rejected (409)", False)
     except HTTPException as e:
         check("double completion rejected (409)", e.status_code == 409)
+
+    # ---- concurrent double-completion (the real race, not the sequential check above) ----
+    # /complete used to check status='pending' with a plain read, THEN unconditionally
+    # distribute() — so N concurrent calls racing the SAME token could all pass the read
+    # before any of them committed, each triggering its own distribute() and multiplying the
+    # payout. The fix gates distribute() on complete_request()'s own atomic UPDATE ... WHERE
+    # status='pending' return value (only one caller can ever win it), not the earlier read.
+    out2 = infer(InferBody(prompt="race", max_tokens=50))
+    rid2, token2 = out2["request_id"], out2["complete_token"]
+    chain2_ids = [c["node_id"] for c in out2["chain"]]
+    before2 = {n: bal(n) or 0 for n in
+              ("driver-a", "middle-c", "last-x", "last-y", config.COORDINATOR_LEDGER_ID)}
+    results, lock = [], threading.Lock()
+
+    def racer():
+        try:
+            r = complete(rid2, CompleteBody(tokens_generated=10, duration_ms=100,
+                                            node_ids=chain2_ids, complete_token=token2))
+            outcome = ("ok", r)
+        except HTTPException as e:
+            outcome = ("err", e.status_code)
+        with lock:
+            results.append(outcome)
+
+    threads = [threading.Thread(target=racer) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    wins = [r for kind, r in results if kind == "ok"]
+    losses = [r for kind, r in results if kind == "err"]
+    check("exactly one racer wins the completion", len(wins) == 1)
+    check("every other racer gets 409, not a second payout", losses == [409] * 7)
+    reward_once = wins[0]["rewards"] if wins else {}
+    for nid in reward_once:
+        got = bal(nid) - before2.get(nid, 0)
+        check(f"{nid} credited exactly the single-completion amount (no multiplication)",
+              abs(got - reward_once[nid]) < 1e-9)
 
     # ---- unknown request -> 404 ----
     try:

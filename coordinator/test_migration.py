@@ -116,6 +116,46 @@ def test_mark_ready_guards():
     assert c.mark_ready("zzz") is False              # not in plan
 
 
+def test_replan_when_a_planned_node_drops_offline():
+    """Post-audit fix: without this, a planned node going offline mid-preparing (a real
+    stranger's laptop pausing under the idle donation mode is a plausible trigger) would wedge
+    cutover forever — `planned <= ready` can never become true again for a node that will never
+    report ready. The controller must replan against whoever is CURRENTLY eligible instead."""
+    s, apply = _serving()
+    c = mig.MigrationController()
+    tgt = {"model_id": "meta/8b", "layers": 30}
+    c.update(_trio(), tgt, s, 0, apply)              # plan: a 0-9, c 10-19, b 20-29
+    c.mark_ready("a"); c.mark_ready("c")
+    assert c.status()["plan_size"] == 3 and c.status()["ready_count"] == 2
+
+    # b drops offline before ever reporting ready
+    nodes_b_offline = [N("a", 0, head=True), N("c", 10), N("b", 19, status="offline")]
+    st = c.update(nodes_b_offline, tgt, s, 1, apply)
+    assert st["phase"] == "preparing"                 # still migrating, not stuck/aborted
+    assert st["plan_size"] == 2                        # replanned over a,c only
+    assert {p["node_id"] for p in st["plan"]} == {"a", "c"}
+    assert st["ready_count"] == 0                       # a/c must re-report against new ranges
+    assert s["model_id"] == "Qwen/Qwen2.5-1.5B-Instruct"  # never flipped mid-wedge
+
+    # a,c re-report ready against their NEW assignment -> cutover completes without b
+    c.mark_ready("a"); c.mark_ready("c")
+    st2 = c.update(nodes_b_offline, tgt, s, 2, apply)
+    assert st2["phase"] == "steady"
+    assert s["model_id"] == "meta/8b" and s["layers"] == 30
+
+
+def test_no_replan_when_nothing_changed():
+    """A plain tick (nobody dropped, target unchanged) must NOT reset ready progress —
+    only an actual node loss or target change should trigger a replan."""
+    s, apply = _serving()
+    c = mig.MigrationController()
+    tgt = {"model_id": "meta/8b", "layers": 30}
+    c.update(_trio(), tgt, s, 0, apply)
+    c.mark_ready("a")
+    st = c.update(_trio(), tgt, s, 1, apply)           # same nodes, same target
+    assert st["ready_count"] == 1                       # progress preserved
+
+
 def test_assignment_for():
     s, apply = _serving()
     c = mig.MigrationController()
