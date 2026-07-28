@@ -8,19 +8,56 @@
   :root{
     --bg:#f6f7f9; --panel:#ffffff; --ink:#1f2328; --muted:#6a737d; --line:#e3e6ea;
     --user:#eef2ff; --user-ink:#1e293b; --bot:#ffffff; --brand:#4f46e5;
-    --ok:#137333; --bad:#c5221f; --warn:#a16207;
+    --ok:#137333; --bad:#c5221f; --warn:#a16207; --code-bg:#f0f1f4; --hover:#eef0f3;
   }
   @media (prefers-color-scheme: dark){
     :root{ --bg:#0e1116; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e; --line:#2a2f37;
-      --user:#1f2a44; --user-ink:#dbe4ff; --bot:#161b22; --brand:#8b8cf7; }
+      --user:#1f2a44; --user-ink:#dbe4ff; --bot:#161b22; --brand:#8b8cf7;
+      --code-bg:#0d1117; --hover:#1c2128; }
+  }
+  :root[data-theme="light"]{
+    --bg:#f6f7f9; --panel:#ffffff; --ink:#1f2328; --muted:#6a737d; --line:#e3e6ea;
+    --user:#eef2ff; --user-ink:#1e293b; --bot:#ffffff; --brand:#4f46e5;
+    --ok:#137333; --bad:#c5221f; --warn:#a16207; --code-bg:#f0f1f4; --hover:#eef0f3;
+  }
+  :root[data-theme="dark"]{
+    --bg:#0e1116; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e; --line:#2a2f37;
+    --user:#1f2a44; --user-ink:#dbe4ff; --bot:#161b22; --brand:#8b8cf7;
+    --code-bg:#0d1117; --hover:#1c2128;
   }
   *{box-sizing:border-box}
   html,body{height:100%}
   body{margin:0;background:var(--bg);color:var(--ink);
-    font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
-    display:flex;flex-direction:column;height:100vh}
+    font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+  .app{display:flex;height:100vh}
+
+  /* -------- sidebar -------- */
+  .sidebar{width:260px;flex:none;background:var(--panel);border-right:1px solid var(--line);
+    display:flex;flex-direction:column;overflow:hidden}
+  .sidebar.hide{display:none}
+  .newchat{margin:.7rem;padding:.55rem .7rem;border:1px solid var(--line);border-radius:10px;
+    background:transparent;color:var(--ink);font-weight:600;cursor:pointer;text-align:left;
+    display:flex;align-items:center;gap:.4rem}
+  .newchat:hover{background:var(--hover)}
+  .convlist{flex:1;overflow-y:auto;padding:0 .5rem}
+  .convitem{display:flex;align-items:center;gap:.4rem;padding:.5rem .6rem;border-radius:8px;
+    cursor:pointer;font-size:13.5px;color:var(--ink)}
+  .convitem:hover{background:var(--hover)}
+  .convitem.active{background:var(--user);color:var(--user-ink)}
+  .convtitle{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .convdel{opacity:0;color:var(--muted);border:0;background:transparent;cursor:pointer;
+    font-size:13px;padding:.1rem .3rem;border-radius:5px}
+  .convitem:hover .convdel{opacity:1}
+  .convdel:hover{background:var(--line)}
+  .sidebar-empty{color:var(--muted);font-size:12.5px;padding:.6rem}
+  .sidebar-login{color:var(--muted);font-size:12.5px;padding:.6rem;line-height:1.5}
+
+  /* -------- main column -------- */
+  .col{flex:1;display:flex;flex-direction:column;min-width:0}
   header{background:var(--panel);border-bottom:1px solid var(--line);
     padding:.7rem 1rem;display:flex;align-items:center;gap:.75rem;flex-wrap:wrap}
+  .sidebtn{border:1px solid var(--line);background:transparent;color:var(--ink);
+    border-radius:8px;width:30px;height:30px;cursor:pointer;flex:none}
   .logo{font-weight:800;letter-spacing:.5px}
   .logo span{color:var(--brand)}
   .tag{color:var(--muted);font-size:12.5px}
@@ -31,16 +68,32 @@
   #warn{display:none;background:#fff7e6;color:var(--warn);border-bottom:1px solid var(--line);
     padding:.5rem 1rem;font-size:13px}
   #warn.show{display:block}
+  .themebtn{border:1px solid var(--line);background:transparent;color:var(--ink);
+    border-radius:8px;width:30px;height:30px;cursor:pointer;font-size:14px}
   main{flex:1;overflow-y:auto;padding:1.1rem;display:flex;justify-content:center}
   .thread{width:100%;max-width:760px;display:flex;flex-direction:column;gap:.85rem}
-  .msg{padding:.7rem .9rem;border-radius:12px;border:1px solid var(--line);white-space:pre-wrap;
-    word-wrap:break-word}
-  .msg.user{background:var(--user);color:var(--user-ink);align-self:flex-end;max-width:85%}
-  .msg.bot{background:var(--bot);align-self:flex-start;max-width:92%}
+  .msg{padding:.7rem .9rem;border-radius:12px;border:1px solid var(--line);word-wrap:break-word}
+  .msg.user{background:var(--user);color:var(--user-ink);align-self:flex-end;max-width:85%;
+    white-space:pre-wrap}
+  .msg.bot{background:var(--bot);align-self:flex-start;max-width:92%;width:100%}
   .msg.err{border-color:var(--bad);color:var(--bad)}
   .who{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);
     margin-bottom:.25rem}
-  .meta{font-size:12px;color:var(--muted);margin-top:.45rem;display:flex;gap:.75rem;flex-wrap:wrap}
+  .body p{margin:.4em 0}
+  .body p:first-child{margin-top:0}
+  .body p:last-child{margin-bottom:0}
+  .body ul,.body ol{margin:.4em 0;padding-left:1.3em}
+  .body code{background:var(--code-bg);border-radius:4px;padding:.1em .35em;
+    font:13px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace}
+  .body pre{background:var(--code-bg);border-radius:8px;padding:.7em .8em;overflow-x:auto;
+    margin:.5em 0}
+  .body pre code{background:transparent;padding:0}
+  .body a{color:var(--brand)}
+  .meta{font-size:12px;color:var(--muted);margin-top:.45rem;display:flex;gap:.6rem;
+    flex-wrap:wrap;align-items:center}
+  .msgbtn{border:1px solid var(--line);background:transparent;color:var(--muted);
+    border-radius:6px;padding:.1rem .45rem;font-size:11.5px;cursor:pointer}
+  .msgbtn:hover{background:var(--hover);color:var(--ink)}
   .cursor::after{content:"▋";color:var(--brand);animation:blink 1s steps(2) infinite}
   @keyframes blink{50%{opacity:0}}
   .empty{color:var(--muted);text-align:center;margin-top:3rem;font-size:14px}
@@ -52,6 +105,7 @@
   button{border:0;border-radius:10px;padding:0 1.1rem;background:var(--brand);color:#fff;
     font-weight:600;cursor:pointer}
   button:disabled{opacity:.5;cursor:not-allowed}
+  #send.stop{background:var(--bad)}
   .foothint{max-width:760px;width:100%;margin:.35rem auto 0;color:var(--muted);font-size:11.5px;
     text-align:center}
   .auth{display:flex;align-items:center;gap:.6rem;font-size:13px}
@@ -62,39 +116,69 @@
 </style>
 </head>
 <body>
-<header>
-  <div class="logo">NE<span>U</span>RON</div>
-  <div class="tag">distributed inference · no local model</div>
-  <div class="net">
-    <span class="dot" id="netdot"></span>
-    <span id="netlabel">checking network…</span>
-  </div>
-  <div class="auth" id="auth"></div>
-</header>
-<div id="warn"></div>
+<div class="app">
+  <aside class="sidebar" id="sidebar">
+    <button class="newchat" id="newchat">＋ New chat</button>
+    <div class="convlist" id="convlist"></div>
+  </aside>
+  <div class="col">
+    <header>
+      <button class="sidebtn" id="sidebtn" title="Toggle sidebar">☰</button>
+      <div class="logo">NE<span>U</span>RON</div>
+      <div class="tag">distributed inference · no local model</div>
+      <div class="net">
+        <span class="dot" id="netdot"></span>
+        <span id="netlabel">checking network…</span>
+      </div>
+      <button class="themebtn" id="themebtn" title="Toggle theme">🌓</button>
+      <div class="auth" id="auth"></div>
+    </header>
+    <div id="warn"></div>
 
-<main>
-  <div class="thread" id="thread">
-    <div class="empty" id="empty">Ask anything. Your prompt is answered by a chain of
-      volunteer machines, each running a slice of the model.</div>
-  </div>
-</main>
+    <main>
+      <div class="thread" id="thread">
+        <div class="empty" id="empty">Ask anything. Your prompt is answered by a chain of
+          volunteer machines, each running a slice of the model.</div>
+      </div>
+    </main>
 
-<footer>
-  <div>
-    <div class="bar">
-      <textarea id="input" rows="1" placeholder="Type a message and press Enter…"></textarea>
-      <button id="send">Send</button>
-    </div>
-    <div class="foothint" id="hint"><label style="cursor:pointer"><input type="checkbox" id="rag"> 🌐 Web search — answer with current info</label> &nbsp;·&nbsp; Cost is metered by response length, shown after each reply. NRN has no cash value.</div>
+    <footer>
+      <div>
+        <div class="bar">
+          <textarea id="input" rows="1" placeholder="Type a message and press Enter…"></textarea>
+          <button id="send">Send</button>
+        </div>
+        <div class="foothint" id="hint"><label style="cursor:pointer"><input type="checkbox" id="rag"> 🌐 Web search — answer with current info</label> &nbsp;·&nbsp; Cost is metered by response length, shown after each reply. NRN has no cash value.</div>
+      </div>
+    </footer>
   </div>
-</footer>
+</div>
 
 <script>
 const $ = s => document.querySelector(s);
 const thread = $("#thread");
 let busy = false;
 let onlineNodes = 0;
+let loggedIn = false;
+let currentConversationId = null;
+let currentController = null;   // AbortController for the in-flight stream
+let lastUserPrompt = null;      // for regenerate
+
+// ---- theme ------------------------------------------------------------
+function applyTheme(t){
+  if(t) document.documentElement.setAttribute("data-theme", t);
+  else document.documentElement.removeAttribute("data-theme");
+}
+applyTheme(localStorage.getItem("neuron-theme"));
+$("#themebtn").addEventListener("click", () => {
+  const cur = document.documentElement.getAttribute("data-theme");
+  const next = cur === "dark" ? "light" : cur === "light" ? null : "dark";
+  if(next) localStorage.setItem("neuron-theme", next); else localStorage.removeItem("neuron-theme");
+  applyTheme(next);
+});
+
+// ---- sidebar toggle -----------------------------------------------------
+$("#sidebtn").addEventListener("click", () => $("#sidebar").classList.toggle("hide"));
 
 // ---- live network status --------------------------------------------------
 async function refreshNetwork(){
@@ -127,7 +211,6 @@ refreshNetwork();
 setInterval(refreshNetwork, 10000);
 
 // ---- login state / wallet balance -----------------------------------------
-let loggedIn = false;
 async function refreshAuth(){
   const auth = $("#auth");
   try{
@@ -142,6 +225,7 @@ async function refreshAuth(){
       } else {
         auth.innerHTML = "<span class='balance'>login not configured on this server</span>";
       }
+      renderSidebarLoggedOut();
       return;
     }
     loggedIn = true;
@@ -152,13 +236,130 @@ async function refreshAuth(){
     $("#logoutlink").addEventListener("click", async (e) => {
       e.preventDefault();
       await fetch("/auth/logout", {method:"POST"});
+      currentConversationId = null;
       refreshAuth();
     });
+    loadSidebar();
   }catch(e){
     auth.innerHTML = "";
   }
 }
 refreshAuth();
+
+// ---- sidebar: conversation history -----------------------------------------
+function renderSidebarLoggedOut(){
+  $("#convlist").innerHTML = "<div class='sidebar-login'>Log in to save and revisit your chat history.</div>";
+}
+
+function fmtWhen(ts){
+  const diff = (Date.now()/1000) - ts;
+  if(diff < 60) return "just now";
+  if(diff < 3600) return Math.floor(diff/60) + "m ago";
+  if(diff < 86400) return Math.floor(diff/3600) + "h ago";
+  return Math.floor(diff/86400) + "d ago";
+}
+
+async function loadSidebar(){
+  if(!loggedIn) return renderSidebarLoggedOut();
+  try{
+    const r = await (await fetch("/conversations")).json();
+    const list = $("#convlist");
+    const convs = r.conversations || [];
+    if(!convs.length){
+      list.innerHTML = "<div class='sidebar-empty'>No conversations yet.</div>";
+      return;
+    }
+    list.innerHTML = "";
+    for(const c of convs){
+      const item = document.createElement("div");
+      item.className = "convitem" + (c.id === currentConversationId ? " active" : "");
+      item.innerHTML = "<span class='convtitle'></span><button class='convdel' title='Delete'>✕</button>";
+      item.querySelector(".convtitle").textContent = c.title || "Untitled";
+      item.title = c.title + " · " + fmtWhen(c.updated_at);
+      item.addEventListener("click", (e) => {
+        if(e.target.classList.contains("convdel")) return;
+        openConversation(c.id);
+      });
+      item.querySelector(".convdel").addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if(!confirm("Delete this conversation?")) return;
+        await fetch("/conversations/" + c.id, {method:"DELETE"});
+        if(c.id === currentConversationId) newChat();
+        loadSidebar();
+      });
+      list.appendChild(item);
+    }
+  }catch(e){ /* sidebar is best-effort, never block chat */ }
+}
+
+async function openConversation(id){
+  try{
+    const r = await fetch("/conversations/" + id);
+    if(!r.ok) return;
+    const conv = await r.json();
+    currentConversationId = id;
+    thread.innerHTML = "";
+    for(const m of conv.messages){
+      if(m.role === "user"){
+        addMsg("user", "you").textContent = m.content;
+      } else {
+        const body = addMsg("bot", "neuron");
+        body.innerHTML = renderMarkdown(m.content);
+        wireMsgActions(body.parentElement, m.content);
+      }
+    }
+    if(!conv.messages.length){
+      thread.innerHTML = "<div class='empty'>This conversation is empty.</div>";
+    }
+    loadSidebar();
+    scroll();
+  }catch(e){ /* leave the current thread as-is on failure */ }
+}
+
+function newChat(){
+  currentConversationId = null;
+  thread.innerHTML = "<div class='empty' id='empty'>Ask anything. Your prompt is answered by a "
+    + "chain of volunteer machines, each running a slice of the model.</div>";
+  loadSidebar();
+}
+$("#newchat").addEventListener("click", newChat);
+
+// ---- tiny markdown renderer (fenced/inline code, bold, italic, lists, links) ----
+function escapeHtml(s){
+  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+function renderMarkdown(raw){
+  const text = escapeHtml(raw);
+  // pull out fenced code blocks first so nothing inside them gets further-processed
+  const blocks = [];
+  let stage1 = text.replace(/```(\w*)\n([\s\S]*?)```/g, (m, lang, code) => {
+    blocks.push("<pre><code>" + code.replace(/\n$/, "") + "</code></pre>");
+    return " " + (blocks.length - 1) + " ";
+  });
+  // inline code
+  stage1 = stage1.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+  // bold, then italic (order matters so ** isn't half-consumed by * first)
+  stage1 = stage1.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  stage1 = stage1.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+  // links
+  stage1 = stage1.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+    "<a href='$2' target='_blank' rel='noopener'>$1</a>");
+  // paragraphs + lists, line by line within each blank-line-separated block
+  const paras = stage1.split(/\n\n+/).map(block => {
+    const lines = block.split("\n");
+    if(lines.every(l => /^\s*[-*]\s+/.test(l) && l.trim())){
+      return "<ul>" + lines.map(l => "<li>" + l.replace(/^\s*[-*]\s+/, "") + "</li>").join("") + "</ul>";
+    }
+    if(lines.every(l => /^\s*\d+\.\s+/.test(l) && l.trim())){
+      return "<ol>" + lines.map(l => "<li>" + l.replace(/^\s*\d+\.\s+/, "") + "</li>").join("") + "</ol>";
+    }
+    if(block.includes(" ")) return block;   // a code-block placeholder, leave bare
+    return "<p>" + lines.join("<br>") + "</p>";
+  });
+  let html = paras.join("");
+  html = html.replace(/ (\d+) /g, (m, i) => blocks[i]);
+  return html;
+}
 
 // ---- message rendering ----------------------------------------------------
 function addMsg(cls, who){
@@ -172,24 +373,62 @@ function addMsg(cls, who){
 }
 function scroll(){ $("main").scrollTop = $("main").scrollHeight; }
 
+function wireMsgActions(msgEl, rawText){
+  const bar = document.createElement("div");
+  bar.className = "meta";
+  const copyBtn = document.createElement("button");
+  copyBtn.className = "msgbtn"; copyBtn.textContent = "⧉ copy";
+  copyBtn.addEventListener("click", () => {
+    navigator.clipboard.writeText(rawText).catch(()=>{});
+    copyBtn.textContent = "✓ copied"; setTimeout(()=>copyBtn.textContent="⧉ copy", 1200);
+  });
+  bar.appendChild(copyBtn);
+  if(msgEl === thread.lastElementChild && lastUserPrompt){
+    const regenBtn = document.createElement("button");
+    regenBtn.className = "msgbtn"; regenBtn.textContent = "↻ regenerate";
+    regenBtn.addEventListener("click", () => {
+      if(busy) return;
+      msgEl.remove();
+      sendPrompt(lastUserPrompt, true);
+    });
+    bar.appendChild(regenBtn);
+  }
+  msgEl.appendChild(bar);
+}
+
 // ---- send + stream --------------------------------------------------------
+function setBusy(v){
+  busy = v;
+  const btn = $("#send");
+  btn.textContent = v ? "Stop" : "Send";
+  btn.classList.toggle("stop", v);
+  btn.disabled = false;
+}
+
 async function send(){
   const input = $("#input");
   const prompt = input.value.trim();
   if(!prompt || busy) return;
-  busy = true; $("#send").disabled = true;
   input.value = ""; input.style.height = "auto";
+  await sendPrompt(prompt, false);
+}
 
+async function sendPrompt(prompt, isRegenerate){
+  setBusy(true);
+  lastUserPrompt = prompt;
   const useRag = $("#rag").checked;
-  addMsg("user","you").textContent = prompt;
+  if(!isRegenerate) addMsg("user","you").textContent = prompt;
   const body = addMsg("bot","neuron");
   body.classList.add("cursor");
-  let meta = null, gotToken = false;
+  let meta = null, gotToken = false, rawText = "";
 
+  currentController = new AbortController();
   try{
     const res = await fetch("/chat", {
       method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({prompt, max_tokens:128, use_rag:useRag})
+      signal: currentController.signal,
+      body: JSON.stringify({prompt, max_tokens:128, use_rag:useRag,
+                            conversation_id: currentConversationId})
     });
     const reader = res.body.getReader();
     const dec = new TextDecoder();
@@ -207,21 +446,37 @@ async function send(){
           else if(line.startsWith("data:")) data += line.slice(5).trim();
         }
         const d = data ? JSON.parse(data) : {};
-        if(event==="meta"){ meta = d; }
+        if(event==="meta"){
+          meta = d;
+          if(d.conversation_id && d.conversation_id !== currentConversationId){
+            currentConversationId = d.conversation_id;
+            loadSidebar();
+          }
+        }
         else if(event==="sources"){ renderSources(body, d); }
-        else if(event==="token"){ gotToken = true; body.textContent += d.text; scroll(); }
-        else if(event==="done"){ finishBot(body, meta, d); refreshAuth(); }
+        else if(event==="token"){ gotToken = true; rawText += d.text; body.textContent = rawText; scroll(); }
+        else if(event==="done"){ finishBot(body, meta, d, rawText); refreshAuth(); loadSidebar(); }
         else if(event==="error"){ showError(body, d.detail, d.code); }
       }
     }
     if(!gotToken && body.textContent==="") body.textContent = "…";
   }catch(e){
-    showError(body, "connection lost: " + e.message);
+    if(e.name === "AbortError"){
+      body.classList.remove("cursor");
+      wireMsgActions(body.parentElement, rawText);
+    } else {
+      showError(body, "connection lost: " + e.message);
+    }
   }finally{
     body.classList.remove("cursor");
-    busy = false; $("#send").disabled = false; input.focus();
+    setBusy(false); currentController = null; $("#input").focus();
   }
 }
+
+$("#send").addEventListener("click", () => {
+  if(busy){ if(currentController) currentController.abort(); return; }
+  send();
+});
 
 function renderSources(body, d){
   const el = document.createElement("div");
@@ -238,7 +493,8 @@ function renderSources(body, d){
   scroll();
 }
 
-function finishBot(body, meta, d){
+function finishBot(body, meta, d, rawText){
+  body.innerHTML = renderMarkdown(rawText);
   const n = (meta && meta.nodes) || onlineNodes;
   const cost = (d.cost_nrn!==undefined && d.cost_nrn!==null) ? d.cost_nrn.toFixed(4) : "?";
   const m = document.createElement("div");
@@ -248,6 +504,7 @@ function finishBot(body, meta, d){
     "<span>◈ Cost: " + cost + " NRN</span>" +
     "<span>" + d.tokens + " tokens · " + d.tok_per_s + " tok/s</span>";
   body.parentElement.appendChild(m);
+  wireMsgActions(body.parentElement, rawText);
   scroll();
 }
 
@@ -274,7 +531,6 @@ input.addEventListener("input", () => {
 input.addEventListener("keydown", e => {
   if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); send(); }
 });
-$("#send").addEventListener("click", send);
 input.focus();
 </script>
 </body>

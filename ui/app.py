@@ -33,7 +33,7 @@ from pathlib import Path
 
 import requests
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
@@ -42,12 +42,17 @@ from neuron_driver import DRIVER
 from api.openai_compat import router as openai_router, docs_html
 from rag import retriever as rag
 from safety import moderation
+from ui import conversations
 from ui import oauth as oauth_module
 
 COORDINATOR = os.environ.get("NEURON_COORDINATOR", "http://150.230.22.250:8001").rstrip("/")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 log = logging.getLogger("neuron.ui")
 SESSION_SECRET = os.environ.get("NEURON_SESSION_SECRET", "neuron-session-dev-secret")
+# Real multi-turn chat resends prior turns every request -- cap how many so a long-running
+# conversation can't silently grow past the model's context length. Cheap safeguard, not full
+# truncation logic (a future upgrade could summarize instead of just dropping the oldest).
+MAX_HISTORY_MESSAGES = 20
 
 
 @asynccontextmanager
@@ -68,6 +73,7 @@ class ChatBody(BaseModel):
     prompt: str
     max_tokens: int = 128
     use_rag: bool = False       # Session 15: retrieve current web context first
+    conversation_id: str | None = None   # None -> a new conversation is created server-side
 
 
 def sse(event: str, data: dict) -> str:
@@ -134,7 +140,8 @@ def network():
 # --------------------------------------------------------------------------- #
 # Chat — stream tokens produced by the node chain (SSE for the browser)
 # --------------------------------------------------------------------------- #
-def _drive(prompt: str, max_new: int, wallet_id: str, use_rag: bool = False):
+def _drive(prompt: str, max_new: int, wallet_id: str, use_rag: bool = False,
+          conversation_id: str | None = None):
     # Input moderation gate (Workstream A) — checked on the RAW user prompt, before RAG
     # augmentation and before anything is dispatched to the node chain. This is the driver
     # (the only place plaintext exists in NEURON), so this is the correct — and only —
@@ -147,18 +154,46 @@ def _drive(prompt: str, max_new: int, wallet_id: str, use_rag: bool = False):
         yield sse("error", {"detail": "This request was blocked by NEURON's acceptable-use "
                                       "policy (see SAFETY.md).", "code": "content_policy_violation"})
         return
+
+    # Real multi-turn memory (Workstream: Chat UI redesign) -- load prior turns from the
+    # driver-side conversation store (ui/conversations.py) BEFORE augmenting/dispatching the
+    # new one, so the model actually sees conversation history instead of treating every
+    # message as independent. A missing/foreign conversation_id (bad id, wrong wallet) is
+    # treated the same as "no conversation" -- starts a fresh one rather than erroring, since
+    # the browser can't always know if its cached id is still valid.
+    prior_messages = []
+    if conversation_id:
+        existing = conversations.get_conversation(conversation_id, wallet_id)
+        if existing is not None:
+            prior_messages = [{"role": m["role"], "content": m["content"]}
+                              for m in existing["messages"][-MAX_HISTORY_MESSAGES:]]
+        else:
+            conversation_id = None
+    if conversation_id is None:
+        conversation_id = conversations.create_conversation(wallet_id, title=prompt[:40])
+
     content = prompt
     if use_rag:
         content, sources = rag.retrieve_and_augment(prompt)
         yield sse("sources", {"sources": sources, "used": bool(sources)})
-    input_ids = DRIVER.encode_chat([{"role": "user", "content": content}])
+    messages = prior_messages + [{"role": "user", "content": content}]
+    input_ids = DRIVER.encode_chat(messages)
+    full_text = ""
     for ev in DRIVER.stream(input_ids, max_new, COORDINATOR, prompt, wallet_id):
         if ev["type"] == "meta":
             yield sse("meta", {"request_id": ev["request_id"], "nodes": ev["nodes"],
-                               "node_ids": ev["node_ids"], "cost_nrn": ev["cost_nrn"]})
+                               "node_ids": ev["node_ids"], "cost_nrn": ev["cost_nrn"],
+                               "conversation_id": conversation_id})
         elif ev["type"] == "token":
             yield sse("token", {"text": ev["text"]})
         elif ev["type"] == "done":
+            full_text = ev.get("text", "")
+            # Persist the real exchange only on a genuine completion -- never a blocked or
+            # errored turn, mirroring "never bill a blocked generation." The user's ORIGINAL
+            # prompt is stored (not the RAG-augmented version) so history reflects what they
+            # actually typed.
+            conversations.add_message(conversation_id, wallet_id, "user", prompt)
+            conversations.add_message(conversation_id, wallet_id, "assistant", full_text)
             yield sse("done", {"tokens": ev["completion_tokens"],
                                "latency_ms": ev["latency_ms"], "tok_per_s": ev["tok_per_s"],
                                "cost_nrn": ev.get("cost_nrn")})
@@ -189,8 +224,41 @@ def chat(body: ChatBody, request: Request):
                                 "code": "login_required"})
         return StreamingResponse(_login_required(), media_type="text/event-stream")
     return StreamingResponse(
-        _drive(prompt, body.max_tokens, wallet_id, body.use_rag),
+        _drive(prompt, body.max_tokens, wallet_id, body.use_rag, body.conversation_id),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                  "Connection": "keep-alive"},
     )
+
+
+# --------------------------------------------------------------------------- #
+# Conversation history (driver-side, per-wallet) — the ChatGPT-style sidebar
+# --------------------------------------------------------------------------- #
+@app.get("/conversations")
+def list_conversations_endpoint(request: Request):
+    wallet_id = request.session.get("wallet_id")
+    if not wallet_id:
+        return {"conversations": []}
+    return {"conversations": conversations.list_conversations(wallet_id)}
+
+
+@app.get("/conversations/{conversation_id}")
+def get_conversation_endpoint(conversation_id: str, request: Request):
+    wallet_id = request.session.get("wallet_id")
+    if not wallet_id:
+        return JSONResponse({"detail": "not logged in"}, status_code=401)
+    conv = conversations.get_conversation(conversation_id, wallet_id)
+    if conv is None:
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    return conv
+
+
+@app.delete("/conversations/{conversation_id}")
+def delete_conversation_endpoint(conversation_id: str, request: Request):
+    wallet_id = request.session.get("wallet_id")
+    if not wallet_id:
+        return JSONResponse({"detail": "not logged in"}, status_code=401)
+    ok = conversations.delete_conversation(conversation_id, wallet_id)
+    if not ok:
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    return {"deleted": True}
