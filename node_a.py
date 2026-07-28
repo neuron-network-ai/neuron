@@ -123,11 +123,12 @@ def run_request(idx, prompt, model, tok, cfg, eos_id, results, coordinator=None,
 def _run(idx, prompt, model, tok, s1, s2, host_c, port_c, host_b, port_b,
          max_new, eos_id, results, coordinator, request_id, node_ids, t_start,
          complete_token=None):
-    sock = socket.create_connection((host_c, port_c), timeout=30)
+    sock = socket.create_connection((host_c, port_c), timeout=common.COLD_CONNECT_TIMEOUT_S)
     common.send_msg(sock, {"type": "config", "s1": s1, "s2": s2,
                            "host_b": host_b, "port_b": port_b})
     ack = common.recv_msg(sock)
     assert ack.get("ok"), f"node_c refused: {ack}"
+    sock.settimeout(common.HOT_TIMEOUT_S)
 
     input_ids = tok.apply_chat_template(
         [{"role": "user", "content": prompt}],
@@ -181,7 +182,7 @@ def _run(idx, prompt, model, tok, s1, s2, host_c, port_c, host_b, port_b,
 
 
 def warmup(host_c, port_c, s1, s2, host_b, port_b):
-    s = socket.create_connection((host_c, port_c), timeout=120)
+    s = socket.create_connection((host_c, port_c), timeout=common.COLD_CONNECT_TIMEOUT_S)
     common.send_msg(s, {"type": "config", "s1": s1, "s2": s2,
                         "host_b": host_b, "port_b": port_b})
     common.recv_msg(s)

@@ -50,10 +50,12 @@ def serve(conn, addr):
                 ensure_loaded(s1, s2)
                 cache, past = common.new_cache(), 0
                 # open + configure our own connection to node_b (the last stage)
-                bconn = socket.create_connection((msg["host_b"], msg["port_b"]), timeout=30)
+                bconn = socket.create_connection((msg["host_b"], msg["port_b"]),
+                                                 timeout=common.COLD_CONNECT_TIMEOUT_S)
                 common.send_msg(bconn, {"type": "config", "s2": s2, "n": state["n"]})
                 back = common.recv_msg(bconn)
                 assert back.get("ok"), f"node_b refused: {back}"
+                bconn.settimeout(common.HOT_TIMEOUT_S)
                 common.send_msg(conn, {"ok": True, "layers": state["n"], "s1": s1, "s2": s2})
 
             elif mtype == "act":
@@ -86,7 +88,14 @@ def serve(conn, addr):
 def handle(conn, addr):
     try:
         serve(conn, addr)
-    except (ConnectionError, EOFError) as e:
+    # TimeoutError is a sibling of ConnectionError under OSError, not a subclass -- it
+    # wasn't caught here before, so a slow-to-load node_b (cold shard load can legitimately
+    # take >30s) would raise it uncaught inside serve(), print a bare traceback, and leave
+    # this thread silently dead. The `finally` below still ran, actively closing our
+    # connection back to node_a mid-handshake -- which is what made node_a see a plain
+    # "socket closed mid-message" with no hint it was actually a cold-start timeout one hop
+    # further down the chain.
+    except (ConnectionError, TimeoutError, EOFError) as e:
         print(f"[C] conn {addr} ended: {e}")
     finally:
         conn.close()

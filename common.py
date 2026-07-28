@@ -44,6 +44,18 @@ MODEL_ID = os.environ.get("NEURON_MODEL_ID", "Qwen/Qwen2.5-1.5B-Instruct")
 # AMX), so it was several-x SLOWER in testing. fp32 stays the default on CPU.
 DTYPE = torch.float32
 
+# Socket timeouts for the pipeline's raw TCP hops. COLD_CONNECT_TIMEOUT_S covers connect
+# + the config handshake, which blocks behind the peer's one-time model-shard load
+# (measured ~35s cold on this hardware); every client socket used to default that phase's
+# timeout to only 30s, so a legitimately-slow-but-working cold start would trip a timeout,
+# and the peer's own uncaught TimeoutError (see node_c/node_b handle()) would slam the
+# socket shut mid-handshake -- the far end then saw a plain "socket closed mid-message"
+# with no clue it was actually a cold-start race. HOT_TIMEOUT_S is applied to the socket
+# right after the config ack, once the peer is warm, so a genuinely dead/hung peer during
+# real token generation still fails fast instead of hanging for two minutes.
+COLD_CONNECT_TIMEOUT_S = 120
+HOT_TIMEOUT_S = 30
+
 
 # --------------------------------------------------------------------------- #
 # Model loading

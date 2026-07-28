@@ -95,13 +95,14 @@ class _Driver:
         # 2) open + configure the chain (node_a -> node_c -> node_b)
         sock = None
         try:
-            sock = socket.create_connection((host_c, port_c), timeout=30)
+            sock = socket.create_connection((host_c, port_c), timeout=common.COLD_CONNECT_TIMEOUT_S)
             common.send_msg(sock, {"type": "config", "s1": S1, "s2": s2,
                                    "host_b": host_b, "port_b": port_b})
             ack = common.recv_msg(sock)
             if not ack.get("ok"):
                 yield {"type": "error", "detail": f"node_c refused config: {ack}"}
                 return
+            sock.settimeout(common.HOT_TIMEOUT_S)
 
             cache, past = common.new_cache(), 0
 

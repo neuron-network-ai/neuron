@@ -62,10 +62,12 @@ class NodeServer:
                     cache, past = common.new_cache(), 0
                     if "host_b" in msg:                      # MIDDLE relay role
                         role, s1, s2 = "middle", msg["s1"], msg["s2"]
-                        bconn = socket.create_connection((msg["host_b"], msg["port_b"]), timeout=30)
+                        bconn = socket.create_connection((msg["host_b"], msg["port_b"]),
+                                                         timeout=common.COLD_CONNECT_TIMEOUT_S)
                         common.send_msg(bconn, {"type": "config", "s2": s2, "n": msg.get("n", self.n)})
                         back = common.recv_msg(bconn)
                         assert back.get("ok"), f"next hop refused: {back}"
+                        bconn.settimeout(common.HOT_TIMEOUT_S)
                         common.send_msg(conn, {"ok": True, "layers": self.n, "s1": s1, "s2": s2})
                     else:                                     # LAST stage role
                         role, s2 = "last", msg["s2"]
@@ -116,7 +118,11 @@ class NodeServer:
     def _handle(self, conn, addr):
         try:
             self.serve(conn, addr)
-        except (ConnectionError, EOFError) as e:
+        # TimeoutError is a sibling of ConnectionError under OSError, not caught by it --
+        # see node_c.py's handle() for why this matters (a slow next-hop cold-start would
+        # otherwise die as an uncaught thread exception and silently slam this connection
+        # shut, surfacing upstream as an unexplained "socket closed mid-message").
+        except (ConnectionError, TimeoutError, EOFError) as e:
             print(f"[node] conn {addr} ended: {e}")
         finally:
             conn.close()

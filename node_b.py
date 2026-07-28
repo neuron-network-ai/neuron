@@ -59,7 +59,9 @@ def serve(conn, addr):
 def handle(conn, addr):
     try:
         serve(conn, addr)
-    except (ConnectionError, EOFError) as e:
+    # TimeoutError is a sibling of ConnectionError under OSError, not caught by it -- kept
+    # in sync with node_c.py's handle() for the same reason (see its comment).
+    except (ConnectionError, TimeoutError, EOFError) as e:
         print(f"[B] conn {addr} ended: {e}")
     finally:
         conn.close()
