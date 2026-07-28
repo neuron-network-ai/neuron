@@ -54,6 +54,28 @@ It is a first line of defense appropriate for a small, pre-launch network — no
 trust & safety system. The `check_text()` function is written so a future classifier-based
 backend can slot in without changing any call site.
 
+---
+
+## Repeat violations escalate against your wallet identity
+
+A single block is a one-off — it stops that one request and forgets who sent it the moment
+the response is sent. Since a wallet requires a real Google/GitHub login, blocks now also
+count against that identity: the driver reports **only a category label** (e.g.
+`weapons_cbrn`) to the coordinator's `POST /wallet/{id}/violation` — never the flagged text or
+a snippet, so this still doesn't cost NEURON the "coordinator never sees the moderation
+content" property. At `MODERATION_BAN_THRESHOLD` violations (3 by default,
+`coordinator/config.py`) the wallet is banned: `/infer` refuses it with a 403, before any
+funds are even held.
+
+**Honest limits:** (1) a determined bad actor can create a new OAuth identity (different
+Google/GitHub account, or the same person under a different email) and get a fresh wallet with
+a clean record — this raises the cost of repeat abuse, it does not make it impossible; a real
+identity-verification layer is a much bigger, separate project. (2) the ban threshold is
+low enough on purpose that a wallet isn't locked out from one blocklist false-positive, but
+that also means genuine repeat bad-faith use gets exactly 2 free attempts before consequences.
+(3) this only escalates INSIDE NEURON (wallet banned from `/infer`) — it is not, and does not
+claim to be, a report to any external authority.
+
 A blocked request never reaches the node network (no volunteer compute is spent on it), and a
 blocked generation is never billed or reported as completed.
 
@@ -85,8 +107,9 @@ maintainer directly.
 ## Roadmap
 
 - Upgrade from keyword matching to a real classifier once there's budget/infrastructure for it.
-- A durable per-user identity (tied to the wallet system) to handle repeat violations —
-  today there's no way to attach a ban to an anonymous chat session.
+- ~~A durable per-user identity (tied to the wallet system) to handle repeat violations~~ —
+  **done**: see "Repeat violations escalate against your wallet identity" above. Still open:
+  real identity verification to make a ban actually costly to evade with a fresh login.
 - Formal log retention policy once real user volume exists.
 
 ---

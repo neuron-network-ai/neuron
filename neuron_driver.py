@@ -138,6 +138,7 @@ class _Driver:
                     verdict = moderation.check_text(full)
                     if verdict.blocked:
                         moderation.log_event("out", verdict.category, request_id, snippet=full)
+                        moderation.report_violation(coordinator, wallet_id, "out", verdict.category)
                         common.send_msg(sock, {"type": "bye"})
                         # deliberately NOT calling coord_complete() -- an aborted, policy-
                         # blocked generation must not be reported/billed as a completion.

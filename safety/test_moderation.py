@@ -66,6 +66,39 @@ def main():
             check("log_event truncates snippet to 40 chars", len(entry["snippet"]) <= 40)
         finally:
             moderation.LOG_PATH = real_log_path
+
+        # report_violation: mocked HTTP -- proves the shared-secret header, the target URL,
+        # and (crucially) that ONLY a category label ever leaves the process, never text.
+        calls = []
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            calls.append((url, json, headers))
+
+        real_post = moderation.requests.post
+        moderation.requests.post = fake_post
+        try:
+            moderation.report_violation("http://coord.example", "w_abc123", "in", "weapons_cbrn")
+            check("report_violation posts to this wallet's /violation endpoint",
+                  calls[0][0] == "http://coord.example/wallet/w_abc123/violation")
+            check("report_violation sends the shared secret header",
+                  calls[0][2].get("X-Wallet-Link-Secret") == moderation.WALLET_LINK_SECRET)
+            check("report_violation payload is ONLY direction+category, never a snippet/text",
+                  calls[0][1] == {"direction": "in", "category": "weapons_cbrn"})
+
+            calls.clear()
+            moderation.report_violation("http://coord.example", None, "in", "weapons_cbrn")
+            check("report_violation with no wallet_id makes no call at all", calls == [])
+
+            def raising_post(*a, **kw):
+                raise moderation.requests.RequestException("network down")
+            moderation.requests.post = raising_post
+            try:
+                moderation.report_violation("http://coord.example", "w_abc123", "out", "x")
+                check("report_violation swallows a network failure instead of raising", True)
+            except Exception:
+                check("report_violation swallows a network failure instead of raising", False)
+        finally:
+            moderation.requests.post = real_post
     finally:
         moderation._cache = real_cache
 

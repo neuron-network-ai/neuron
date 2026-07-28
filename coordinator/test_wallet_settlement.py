@@ -13,7 +13,8 @@ os.environ["NEURON_DB"] = os.path.join(tempfile.mkdtemp(prefix="neuron_wallet_")
 from fastapi import HTTPException  # noqa: E402
 
 from coordinator import config, genesis, ledger, models  # noqa: E402
-from coordinator.main import WalletOAuthBody, wallet_oauth  # noqa: E402
+from coordinator.main import (InferBody, ViolationBody, WalletOAuthBody,  # noqa: E402
+                              infer, wallet_oauth, wallet_violation)
 
 ok = fail = 0
 
@@ -167,6 +168,7 @@ def settle_tests():
 
     wallet_oauth_endpoint_tests()
     network_stats_scoping_test()
+    moderation_violation_tests()
 
 
 def network_stats_scoping_test():
@@ -218,6 +220,78 @@ def wallet_oauth_endpoint_tests():
                          x_wallet_link_secret=config.WALLET_LINK_SECRET)
     check("repeat call for the same identity returns the same wallet, not new",
           resp2["wallet_id"] == resp["wallet_id"] and resp2["is_new"] is False)
+
+
+def moderation_violation_tests():
+    # ---- models.record_violation / wallet_moderation_status ---- #
+    check("unknown wallet has no violations, not banned",
+          models.wallet_moderation_status("never-seen-wallet") == {"violation_count": 0, "banned": False})
+
+    r1 = models.record_violation("w-offender", "in", "weapons_cbrn")
+    check("1st violation recorded, not yet banned", r1 == {"violation_count": 1, "banned": False})
+    r2 = models.record_violation("w-offender", "out", "self_harm")
+    check("2nd violation recorded, still below threshold",
+          r2 == {"violation_count": 2, "banned": False})
+    check("threshold is 3 by default", config.MODERATION_BAN_THRESHOLD == 3)
+    r3 = models.record_violation("w-offender", "in", "weapons_cbrn")
+    check("3rd violation crosses the threshold -> banned", r3 == {"violation_count": 3, "banned": True})
+    status = models.wallet_moderation_status("w-offender")
+    check("wallet_moderation_status reflects the ban", status == {"violation_count": 3, "banned": True})
+
+    r4 = models.record_violation("w-offender", "in", "weapons_cbrn")
+    check("a banned wallet's count keeps climbing, ban stays True",
+          r4 == {"violation_count": 4, "banned": True})
+
+    check("a single-violation wallet is NOT banned (no false-positive lockout)",
+          not models.record_violation("w-oneoff", "in", "self_harm")["banned"])
+
+    # ---- POST /wallet/{id}/violation: same shared-secret gate as /wallet/oauth ---- #
+    try:
+        wallet_violation("w-offender", ViolationBody(direction="in", category="x"),
+                         x_wallet_link_secret=None)
+        check("violation endpoint: missing secret rejected (401)", False)
+    except HTTPException as e:
+        check("violation endpoint: missing secret rejected (401)", e.status_code == 401)
+
+    try:
+        wallet_violation("w-offender", ViolationBody(direction="in", category="x"),
+                         x_wallet_link_secret="wrong")
+        check("violation endpoint: wrong secret rejected (401)", False)
+    except HTTPException as e:
+        check("violation endpoint: wrong secret rejected (401)", e.status_code == 401)
+
+    before = models.get_ledger("w-fresh-endpoint")
+    check("wallet doesn't exist yet", before is None)
+    resp = wallet_violation("w-fresh-endpoint", ViolationBody(direction="out", category="cat"),
+                            x_wallet_link_secret=config.WALLET_LINK_SECRET)
+    check("violation endpoint creates the wallet row on first violation (ensure_account)",
+          resp == {"wallet_id": "w-fresh-endpoint", "violation_count": 1, "banned": False})
+
+    # ---- /infer refuses a banned wallet BEFORE any hold/chain-building happens ---- #
+    models.ensure_account("w-banned-infer", "wallet")
+    models.transfer(config.GENESIS_BUCKETS_ECOSYSTEM_ID, "w-banned-infer", 100.0)
+    for _ in range(config.MODERATION_BAN_THRESHOLD):
+        models.record_violation("w-banned-infer", "in", "x")
+    check("setup: wallet is now banned", models.wallet_moderation_status("w-banned-infer")["banned"])
+    balance_before = models.get_ledger("w-banned-infer")["balance"]
+    try:
+        infer(InferBody(prompt="hello", max_tokens=10, wallet_id="w-banned-infer"))
+        check("/infer rejects a banned wallet (403)", False)
+    except HTTPException as e:
+        check("/infer rejects a banned wallet (403)", e.status_code == 403)
+    check("a rejected banned-wallet request never touches its balance (no hold attempted)",
+          models.get_ledger("w-banned-infer")["balance"] == balance_before)
+
+    # a well-funded, NOT-banned wallet clears the ban gate (whatever it fails on next --
+    # an empty test network -- is unrelated to moderation, proving the gate isn't over-firing)
+    models.ensure_account("w-clean", "wallet")
+    models.transfer(config.GENESIS_BUCKETS_ECOSYSTEM_ID, "w-clean", 100.0)
+    try:
+        infer(InferBody(prompt="hello", max_tokens=10, wallet_id="w-clean"))
+        check("clean wallet passes the moderation gate", True)
+    except HTTPException as e:
+        check("clean wallet passes the moderation gate (fails later, not with 403)",
+              e.status_code != 403)
 
 
 if __name__ == "__main__":

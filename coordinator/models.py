@@ -70,6 +70,13 @@ CREATE TABLE IF NOT EXISTS oauth_identities (
     created_at   REAL NOT NULL,
     PRIMARY KEY (provider, external_id)
 );
+CREATE TABLE IF NOT EXISTS moderation_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    wallet_id   TEXT NOT NULL,
+    direction   TEXT NOT NULL,
+    category    TEXT,
+    created_at  REAL NOT NULL
+);
 """
 
 
@@ -120,6 +127,13 @@ def init_db():
             c.execute("ALTER TABLE ledger ADD COLUMN faucet_claimed INTEGER NOT NULL DEFAULT 0")
         if "locked_until" not in lcols:
             c.execute("ALTER TABLE ledger ADD COLUMN locked_until REAL")
+        # Wallet-linked moderation escalation: a content-policy block is currently a one-off
+        # (forgotten the moment the response is sent) -- these track repeated attempts by the
+        # same wallet IDENTITY across separate requests, so they can actually be banned.
+        if "violation_count" not in lcols:
+            c.execute("ALTER TABLE ledger ADD COLUMN violation_count INTEGER NOT NULL DEFAULT 0")
+        if "moderation_banned" not in lcols:
+            c.execute("ALTER TABLE ledger ADD COLUMN moderation_banned INTEGER NOT NULL DEFAULT 0")
 
 
 def _status(last_seen, now=None):
@@ -435,6 +449,40 @@ def wallet_for_oauth(provider, external_id, email=None):
                  (wallet_id,))
     claim_faucet(wallet_id, config.FAUCET_AMOUNT_NRN)
     return wallet_id, True
+
+
+# --------------------------------------------------------------------------- #
+# Wallet-linked moderation escalation (content-safety + Workstream B combined)
+# --------------------------------------------------------------------------- #
+def record_violation(wallet_id, direction, category=None):
+    """Record a moderation block against a wallet's IDENTITY (not just the one request it
+    happened on), and escalate to a ban once config.MODERATION_BAN_THRESHOLD is reached.
+    Only ever receives a category label from the caller (safety/moderation.py), never the
+    actual text -- the coordinator staying blind to plaintext is preserved even here."""
+    ensure_account(wallet_id, "wallet")
+    with _db() as c:
+        c.execute(
+            "INSERT INTO moderation_events (wallet_id, direction, category, created_at) "
+            "VALUES (?, ?, ?, ?)", (wallet_id, direction, category, time.time()))
+        c.execute("UPDATE ledger SET violation_count=violation_count+1 WHERE node_id=?",
+                  (wallet_id,))
+        row = c.execute("SELECT violation_count, moderation_banned FROM ledger WHERE node_id=?",
+                        (wallet_id,)).fetchone()
+        banned = bool(row["moderation_banned"])
+        if not banned and row["violation_count"] >= config.MODERATION_BAN_THRESHOLD:
+            c.execute("UPDATE ledger SET moderation_banned=1 WHERE node_id=?", (wallet_id,))
+            banned = True
+    return {"violation_count": row["violation_count"], "banned": banned}
+
+
+def wallet_moderation_status(wallet_id):
+    """Cheap pre-flight check for /infer -- a banned wallet's requests are refused before
+    any hold is even attempted."""
+    row = get_ledger(wallet_id)
+    if row is None:
+        return {"violation_count": 0, "banned": False}
+    return {"violation_count": row.get("violation_count", 0) or 0,
+           "banned": bool(row.get("moderation_banned", 0))}
 
 
 # --------------------------------------------------------------------------- #

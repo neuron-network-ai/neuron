@@ -111,3 +111,9 @@ GENESIS_TOTAL_SUPPLY = 1_000_000_000
 # this — without a shared secret, anyone on the internet could call this endpoint directly
 # and squat a wallet under an external_id they don't own. Override in production.
 WALLET_LINK_SECRET = os.environ.get("NEURON_WALLET_LINK_SECRET", "neuron-wallet-link-dev-secret")
+
+# Wallet-linked moderation escalation: a wallet is banned from /infer once its recorded
+# violation_count (coordinator/models.py::record_violation) reaches this many blocked
+# requests. Deliberately > 1 -- a single false-positive keyword match (the blocklist is
+# a cheap v1, see safety/moderation.py) shouldn't lock someone out immediately.
+MODERATION_BAN_THRESHOLD = int(os.environ.get("NEURON_MODERATION_BAN_THRESHOLD", "3"))

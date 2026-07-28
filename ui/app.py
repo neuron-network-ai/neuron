@@ -143,6 +143,7 @@ def _drive(prompt: str, max_new: int, wallet_id: str, use_rag: bool = False):
     if verdict.blocked:
         pre_id = f"blocked-{uuid.uuid4().hex[:12]}"
         moderation.log_event("in", verdict.category, pre_id, snippet=prompt)
+        moderation.report_violation(COORDINATOR, wallet_id, "in", verdict.category)
         yield sse("error", {"detail": "This request was blocked by NEURON's acceptable-use "
                                       "policy (see SAFETY.md).", "code": "content_policy_violation"})
         return

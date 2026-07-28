@@ -96,7 +96,7 @@ def _auth(authorization: str | None):
     return wallet
 
 
-def _moderate_or_error(text: str):
+def _moderate_or_error(text: str, wallet_id: str = None):
     """Input moderation gate (Workstream A) — checked here, before DRIVER.ensure_loaded()
     and before anything is dispatched to the node chain. This API server IS the driver (the
     only place plaintext exists in NEURON), so this is the correct place for the check; see
@@ -104,6 +104,7 @@ def _moderate_or_error(text: str):
     verdict = moderation.check_text(text)
     if verdict.blocked:
         moderation.log_event("in", verdict.category, "api-" + uuid.uuid4().hex[:12], snippet=text)
+        moderation.report_violation(COORDINATOR, wallet_id, "in", verdict.category)
         return _error_response(
             400, "This request was blocked by NEURON's acceptable-use policy (see SAFETY.md).",
             "invalid_request_error", "content_policy_violation")
@@ -173,7 +174,7 @@ def chat_completions(body: ChatBody, authorization: str = Header(default=None)):
     if isinstance(wallet, JSONResponse):
         return wallet
     messages = [{"role": m.role, "content": m.content} for m in body.messages]
-    blocked = _moderate_or_error("\n".join(m["content"] for m in messages))
+    blocked = _moderate_or_error("\n".join(m["content"] for m in messages), wallet)
     if blocked is not None:
         return blocked
     DRIVER.ensure_loaded()
@@ -245,7 +246,7 @@ def completions(body: CompletionBody, authorization: str = Header(default=None))
     prompt = body.prompt[0] if isinstance(body.prompt, list) and body.prompt else body.prompt
     if not isinstance(prompt, str):
         prompt = ""
-    blocked = _moderate_or_error(prompt)
+    blocked = _moderate_or_error(prompt, wallet)
     if blocked is not None:
         return blocked
     DRIVER.ensure_loaded()

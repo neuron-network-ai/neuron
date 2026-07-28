@@ -21,9 +21,12 @@ import os
 import re
 import time
 
+import requests
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 BLOCKLIST_PATH = os.environ.get("NEURON_BLOCKLIST_PATH", os.path.join(HERE, "blocklist.json"))
 LOG_PATH = os.environ.get("NEURON_MODERATION_LOG", os.path.join(HERE, "moderation.log"))
+WALLET_LINK_SECRET = os.environ.get("NEURON_WALLET_LINK_SECRET", "neuron-wallet-link-dev-secret")
 
 _cache = None
 
@@ -79,4 +82,24 @@ def log_event(direction, category, request_id, identity_hash=None, snippet=None)
         with open(LOG_PATH, "a") as f:
             f.write(json.dumps(entry) + "\n")
     except OSError:
+        pass
+
+
+def report_violation(coordinator_base, wallet_id, direction, category):
+    """Tell the coordinator a wallet's IDENTITY was behind a blocked request, so repeated
+    attempts escalate (see coordinator/models.py's record_violation + MODERATION_BAN_
+    THRESHOLD) even across separate requests -- a per-request block alone forgets who did it
+    the moment the response is sent. Sends ONLY the category label (e.g. "weapons_cbrn"),
+    NEVER the snippet/text -- the coordinator staying blind to plaintext is NEURON's one
+    honest privacy property (see module docstring / log_event's own comment); a violation
+    COUNT tied to a wallet is enough to enforce consequences without breaking that. Best-
+    effort and fire-and-forget: an anonymous request (no wallet_id) or a network hiccup here
+    must never block or crash the moderation response the user already got."""
+    if not wallet_id:
+        return
+    try:
+        requests.post(f"{coordinator_base.rstrip('/')}/wallet/{wallet_id}/violation",
+                      json={"direction": direction, "category": category},
+                      headers={"X-Wallet-Link-Secret": WALLET_LINK_SECRET}, timeout=5)
+    except requests.RequestException:
         pass

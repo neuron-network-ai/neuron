@@ -69,6 +69,11 @@ class AttestBody(BaseModel):
     max_err: float | None = None
 
 
+class ViolationBody(BaseModel):
+    direction: str               # "in" | "out"
+    category: str | None = None  # a blocklist category label -- never the flagged text itself
+
+
 # --------------------------------------------------------------------------- #
 # Auth
 # --------------------------------------------------------------------------- #
@@ -349,6 +354,10 @@ def slice_info(node_id: str):
 # --------------------------------------------------------------------------- #
 @app.post("/infer")
 def infer(body: InferBody):
+    if models.wallet_moderation_status(body.wallet_id)["banned"]:
+        raise HTTPException(status_code=403,
+                            detail="this wallet is blocked for repeated content-policy "
+                                   "violations (see SAFETY.md)")
     chain, missing = router.build_chain(total=serving_model()["layers"])
     if missing:
         raise HTTPException(
@@ -441,6 +450,22 @@ def wallet_oauth(body: WalletOAuthBody, x_wallet_link_secret: str = Header(defau
     return {"wallet_id": wallet_id, "is_new": is_new}
 
 
+@app.post("/wallet/{wallet_id}/violation")
+def wallet_violation(wallet_id: str, body: ViolationBody,
+                     x_wallet_link_secret: str = Header(default=None)):
+    """Record that a driver's moderation gate (safety/moderation.py) blocked a request from
+    this wallet's identity, escalating to a ban across MODERATION_BAN_THRESHOLD violations --
+    a per-request block alone forgets who did it the moment the response is sent. Gated the
+    same way as /wallet/oauth: only a driver that already judged this content (the only place
+    plaintext ever exists in NEURON) may assert it happened. Deliberately accepts a category
+    label only, never text -- the coordinator stays blind to plaintext even here."""
+    if not (isinstance(x_wallet_link_secret, str)
+           and secrets.compare_digest(x_wallet_link_secret, config.WALLET_LINK_SECRET)):
+        raise HTTPException(status_code=401, detail="invalid or missing X-Wallet-Link-Secret")
+    result = models.record_violation(wallet_id, body.direction, body.category)
+    return {"wallet_id": wallet_id, **result}
+
+
 @app.post("/wallet/faucet")
 def wallet_faucet(body: WalletFaucetBody):
     """One-time grant per wallet_id. Ships in the same release as the debit -- a wallet that
@@ -458,7 +483,9 @@ def wallet_balance(wallet_id: str):
     row = models.get_ledger(wallet_id)
     if row is None or row.get("account_type") != "wallet":
         raise HTTPException(status_code=404, detail="unknown wallet")
-    return {"wallet_id": wallet_id, "balance": row["balance"], "total_earned": row["total_earned"]}
+    return {"wallet_id": wallet_id, "balance": row["balance"], "total_earned": row["total_earned"],
+           "violation_count": row.get("violation_count", 0) or 0,
+           "moderation_banned": bool(row.get("moderation_banned", 0))}
 
 
 # --------------------------------------------------------------------------- #
