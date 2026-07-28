@@ -27,6 +27,7 @@ Env overrides:
 import json
 import logging
 import os
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -39,6 +40,7 @@ from pydantic import BaseModel
 from neuron_driver import DRIVER
 from api.openai_compat import router as openai_router, docs_html
 from rag import retriever as rag
+from safety import moderation
 
 COORDINATOR = os.environ.get("NEURON_COORDINATOR", "http://150.230.22.250:8001").rstrip("/")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -111,6 +113,17 @@ def network():
 # Chat — stream tokens produced by the node chain (SSE for the browser)
 # --------------------------------------------------------------------------- #
 def _drive(prompt: str, max_new: int, use_rag: bool = False):
+    # Input moderation gate (Workstream A) — checked on the RAW user prompt, before RAG
+    # augmentation and before anything is dispatched to the node chain. This is the driver
+    # (the only place plaintext exists in NEURON), so this is the correct — and only —
+    # place a check belongs; compute nodes never see text at all. See safety/moderation.py.
+    verdict = moderation.check_text(prompt)
+    if verdict.blocked:
+        pre_id = f"blocked-{uuid.uuid4().hex[:12]}"
+        moderation.log_event("in", verdict.category, pre_id, snippet=prompt)
+        yield sse("error", {"detail": "This request was blocked by NEURON's acceptable-use "
+                                      "policy (see SAFETY.md).", "code": "content_policy_violation"})
+        return
     content = prompt
     if use_rag:
         content, sources = rag.retrieve_and_augment(prompt)

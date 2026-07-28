@@ -28,6 +28,7 @@ import torch
 
 import common
 import node_a  # coord_get_chain / coord_complete (its main() is __main__-guarded)
+from safety import moderation
 
 # node_a owns layers 0..S1-1; MAX cap guards against runaway generations.
 S1 = int(os.environ.get("NEURON_S1", "10"))
@@ -118,6 +119,23 @@ class _Driver:
                 delta = full[len(prev_text):]
                 prev_text = full
                 if delta:
+                    # Output moderation gate (Workstream A) — checked against the FULL
+                    # accumulated text every token, not just the new delta, so a phrase
+                    # split across a token-decode boundary is still caught. This is a
+                    # cheap regex scan (not a classifier call), so per-token cost is
+                    # negligible; checking every token also aborts as early as possible,
+                    # minimizing how much of a blocked response ever reaches the user.
+                    verdict = moderation.check_text(full)
+                    if verdict.blocked:
+                        moderation.log_event("out", verdict.category, request_id, snippet=full)
+                        common.send_msg(sock, {"type": "bye"})
+                        # deliberately NOT calling coord_complete() -- an aborted, policy-
+                        # blocked generation must not be reported/billed as a completion.
+                        yield {"type": "error",
+                              "detail": "This response was blocked by NEURON's acceptable-use "
+                                        "policy (see SAFETY.md).",
+                              "code": "content_policy_violation"}
+                        return
                     yield {"type": "token", "text": delta}
                 if completion >= max_new:
                     finish = "length"

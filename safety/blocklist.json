@@ -1,0 +1,37 @@
+{
+  "csam": [
+    "child sexual abuse material",
+    "csam",
+    "sexual content involving minors",
+    "child pornography"
+  ],
+  "weapons_cbrn": [
+    "how to make a nerve agent",
+    "how to synthesize sarin",
+    "how to build a nuclear weapon",
+    "how to make a bioweapon",
+    "how to weaponize anthrax",
+    "how to enrich uranium at home"
+  ],
+  "malware_attack": [
+    "write ransomware",
+    "build a botnet",
+    "write a ddos attack script",
+    "write a self-spreading computer virus"
+  ],
+  "self_harm": [
+    "how to commit suicide",
+    "best way to kill myself",
+    "how to self harm"
+  ],
+  "nonconsensual_sexual": [
+    "deepfake nudes of",
+    "revenge porn",
+    "nonconsensual sexual images"
+  ],
+  "serious_violence_threats": [
+    "how to build a bomb",
+    "how to plan a mass shooting",
+    "how to commit an act of terrorism"
+  ]
+}

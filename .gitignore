@@ -33,6 +33,10 @@ agent/*.log
 agent/config.test.json
 agent/config.bad.json
 
+# --- moderation log (driver-local, holds prompt snippets -- never commit) ---
+safety/*.log
+ui/*.log
+
 # --- coordinator runtime state / secrets (never commit) ---
 # SQLite DB holds real node auth tokens — must never be pushed
 *.db

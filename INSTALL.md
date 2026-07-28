@@ -19,6 +19,12 @@ credit.
   it's open source.
 - **No inbound ports / no Tailscale needed.** Your node makes only *outbound* connections and is
   reached back through the network's relay, so it works behind a normal home router.
+- **Your machine can't see what it computes, but the network still has content rules.** NEURON
+  splits a model across machines — your node only ever processes opaque numeric tensors, never
+  readable prompts or answers (see `SECURITY.md`/`SAFETY.md` for how). But your electricity and
+  hardware are still yours even when the content running on them is unseen, so the network
+  enforces an acceptable-use policy at the point where text exists (the chat/API layer) — see
+  `SAFETY.md` for what's prohibited.
 
 ---
 

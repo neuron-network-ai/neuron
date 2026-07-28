@@ -3,6 +3,9 @@
 Built in Session 16 (+ ongoing). This is the trust model that lets strangers install the
 agent and users trust the answers.
 
+> This document covers node trust — is a node computing honestly? For what's prohibited to
+> generate *through* NEURON (a different, content-focused question), see `SAFETY.md`.
+
 ## Proof of Compute — a node must prove it did the work
 A lazy/malicious node could return garbage to farm NRN without computing. To catch that:
 - A verifier sends the node a **challenge** (a known input for its layer range); the node

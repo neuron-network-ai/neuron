@@ -38,6 +38,7 @@ from pydantic import BaseModel, ConfigDict
 import common
 from coordinator import model_registry
 from neuron_driver import DRIVER
+from safety import moderation
 
 COORDINATOR = os.environ.get("NEURON_COORDINATOR", "http://150.230.22.250:8001").rstrip("/")
 MODEL_ID = common.MODEL_ID
@@ -96,6 +97,20 @@ def _auth(authorization: str | None):
     return wallet
 
 
+def _moderate_or_error(text: str):
+    """Input moderation gate (Workstream A) — checked here, before DRIVER.ensure_loaded()
+    and before anything is dispatched to the node chain. This API server IS the driver (the
+    only place plaintext exists in NEURON), so this is the correct place for the check; see
+    safety/moderation.py. Returns a JSONResponse to return directly if blocked, else None."""
+    verdict = moderation.check_text(text)
+    if verdict.blocked:
+        moderation.log_event("in", verdict.category, "api-" + uuid.uuid4().hex[:12], snippet=text)
+        return _error_response(
+            400, "This request was blocked by NEURON's acceptable-use policy (see SAFETY.md).",
+            "invalid_request_error", "content_policy_violation")
+    return None
+
+
 def _stream_headers(wallet: str):
     return {"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
             "Connection": "keep-alive", "X-NRN-Cost": str(NRN_PER_REQUEST),
@@ -142,9 +157,12 @@ def chat_completions(body: ChatBody, authorization: str = Header(default=None)):
     wallet = _auth(authorization)
     if isinstance(wallet, JSONResponse):
         return wallet
+    messages = [{"role": m.role, "content": m.content} for m in body.messages]
+    blocked = _moderate_or_error("\n".join(m["content"] for m in messages))
+    if blocked is not None:
+        return blocked
     DRIVER.ensure_loaded()
 
-    messages = [{"role": m.role, "content": m.content} for m in body.messages]
     input_ids = DRIVER.encode_chat(messages)
     max_new = body.max_tokens or 256
     router_prompt = next((m["content"] for m in reversed(messages)
@@ -209,11 +227,14 @@ def completions(body: CompletionBody, authorization: str = Header(default=None))
     wallet = _auth(authorization)
     if isinstance(wallet, JSONResponse):
         return wallet
-    DRIVER.ensure_loaded()
-
     prompt = body.prompt[0] if isinstance(body.prompt, list) and body.prompt else body.prompt
     if not isinstance(prompt, str):
         prompt = ""
+    blocked = _moderate_or_error(prompt)
+    if blocked is not None:
+        return blocked
+    DRIVER.ensure_loaded()
+
     input_ids = DRIVER.encode_text(prompt)
     max_new = body.max_tokens or 128
     cid = "cmpl-" + uuid.uuid4().hex
