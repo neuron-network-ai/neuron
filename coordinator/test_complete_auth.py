@@ -17,11 +17,12 @@ os.environ["NEURON_DB"] = os.path.join(tempfile.mkdtemp(prefix="neuron_p12_"), "
 
 from fastapi import HTTPException  # noqa: E402
 
-from coordinator import config, models  # noqa: E402
+from coordinator import config, genesis, models  # noqa: E402
 from coordinator.main import CompleteBody, InferBody, RegisterBody, complete, infer, register  # noqa: E402
 
 SECRET = config.REGISTRATION_SECRET
 S1, S2, N = 10, 19, config.TOTAL_LAYERS
+WALLET = "test-wallet"
 ok = fail = 0
 
 
@@ -44,13 +45,15 @@ def bal(nid):
 
 def main():
     models.init_db()
+    genesis.seed_genesis()
+    models.transfer(config.GENESIS_BUCKETS_ECOSYSTEM_ID, WALLET, 100.0)   # fund the test wallet
     reg("driver-a", 0, S1 - 1)
     reg("middle-c", S1, S2 - 1)
     reg("last-x", S2, N - 1)
     reg("last-y", S2, N - 1)     # replica of the last segment
 
     # ---- /infer issues a token and records the chosen chain ----
-    out = infer(InferBody(prompt="hi", max_tokens=50))
+    out = infer(InferBody(prompt="hi", max_tokens=50, wallet_id=WALLET))
     rid, token = out["request_id"], out["complete_token"]
     chain_ids = [c["node_id"] for c in out["chain"]]
     check("/infer returns a complete_token", bool(token))
@@ -102,7 +105,7 @@ def main():
     # before any of them committed, each triggering its own distribute() and multiplying the
     # payout. The fix gates distribute() on complete_request()'s own atomic UPDATE ... WHERE
     # status='pending' return value (only one caller can ever win it), not the earlier read.
-    out2 = infer(InferBody(prompt="race", max_tokens=50))
+    out2 = infer(InferBody(prompt="race", max_tokens=50, wallet_id=WALLET))
     rid2, token2 = out2["request_id"], out2["complete_token"]
     chain2_ids = [c["node_id"] for c in out2["chain"]]
     before2 = {n: bal(n) or 0 for n in
@@ -130,10 +133,12 @@ def main():
     check("exactly one racer wins the completion", len(wins) == 1)
     check("every other racer gets 409, not a second payout", losses == [409] * 7)
     reward_once = wins[0]["rewards"] if wins else {}
-    for nid in reward_once:
+    for nid, amount in reward_once.items():
+        if nid == "__refund__":
+            continue   # not a ledger account (goes back to the paying wallet) -- skip
         got = bal(nid) - before2.get(nid, 0)
         check(f"{nid} credited exactly the single-completion amount (no multiplication)",
-              abs(got - reward_once[nid]) < 1e-9)
+              abs(got - amount) < 1e-9)
 
     # ---- unknown request -> 404 ----
     try:

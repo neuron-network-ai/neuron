@@ -36,14 +36,13 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 import common
-from coordinator import model_registry
+from coordinator import config as coord_config, ledger as coord_ledger, model_registry
 from neuron_driver import DRIVER
 from safety import moderation
 
 COORDINATOR = os.environ.get("NEURON_COORDINATOR", "http://150.230.22.250:8001").rstrip("/")
 MODEL_ID = common.MODEL_ID
 MODEL_ALIASES = {MODEL_ID, "neuron", "neuron-1", "gpt-3.5-turbo"}  # accept common names
-NRN_PER_REQUEST = 1.0
 
 router = APIRouter()
 
@@ -111,9 +110,12 @@ def _moderate_or_error(text: str):
     return None
 
 
-def _stream_headers(wallet: str):
+def _stream_headers(wallet: str, hold_estimate: float):
+    # X-NRN-Cost here is necessarily an ESTIMATE (the held quote) -- HTTP headers can't be
+    # amended once streaming starts, so the real settled cost only exists in the trailing
+    # usage.nrn_cost chunk (when stream_options.include_usage is requested).
     return {"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
-            "Connection": "keep-alive", "X-NRN-Cost": str(NRN_PER_REQUEST),
+            "Connection": "keep-alive", "X-NRN-Cost": str(hold_estimate),
             "X-NRN-Wallet": wallet}
 
 
@@ -121,14 +123,27 @@ def _sse(obj) -> str:
     return f"data: {json.dumps(obj)}\n\n"
 
 
-def _usage(prompt_tokens: int, completion_tokens: int):
+def _usage(prompt_tokens: int, completion_tokens: int, nrn_cost=None):
     return {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens,
-            "nrn_cost": NRN_PER_REQUEST}
+            "total_tokens": prompt_tokens + completion_tokens, "nrn_cost": nrn_cost}
 
 
 def _want_usage(body) -> bool:
     return bool(body.stream_options and body.stream_options.get("include_usage"))
+
+
+def _stream_error_chunk(ev):
+    if ev.get("code") == "insufficient_funds":
+        return {"error": {"message": ev["detail"], "type": "insufficient_quota",
+                          "code": "insufficient_funds"}}
+    return {"error": {"message": ev["detail"], "type": "server_error",
+                      "code": "chain_unavailable"}}
+
+
+def _error_response_for_event(ev):
+    if ev.get("code") == "insufficient_funds":
+        return _error_response(402, ev["detail"], "insufficient_quota", "insufficient_funds")
+    return _error_response(503, ev["detail"], "server_error", "chain_unavailable")
 
 
 # --------------------------------------------------------------------------- #
@@ -170,6 +185,7 @@ def chat_completions(body: ChatBody, authorization: str = Header(default=None)):
     cid = "chatcmpl-" + uuid.uuid4().hex
     created = int(time.time())
     model_name = body.model or MODEL_ID
+    hold_estimate = coord_ledger.quote(max_new, int(input_ids.shape[1]))
 
     def chunk(delta, finish):
         return {"id": cid, "object": "chat.completion.chunk", "created": created,
@@ -178,10 +194,9 @@ def chat_completions(body: ChatBody, authorization: str = Header(default=None)):
 
     if body.stream:
         def gen():
-            for ev in DRIVER.stream(input_ids, max_new, COORDINATOR, router_prompt):
+            for ev in DRIVER.stream(input_ids, max_new, COORDINATOR, router_prompt, wallet):
                 if ev["type"] == "error":
-                    yield _sse({"error": {"message": ev["detail"], "type": "server_error",
-                                          "code": "chain_unavailable"}})
+                    yield _sse(_stream_error_chunk(ev))
                     yield "data: [DONE]\n\n"
                     return
                 if ev["type"] == "meta":
@@ -193,30 +208,30 @@ def chat_completions(body: ChatBody, authorization: str = Header(default=None)):
                     if _want_usage(body):
                         final = chunk({}, ev["finish_reason"])
                         final["choices"] = []
-                        final["usage"] = _usage(ev["prompt_tokens"], ev["completion_tokens"])
+                        final["usage"] = _usage(ev["prompt_tokens"], ev["completion_tokens"],
+                                                ev.get("cost_nrn"))
                         yield _sse(final)
                     yield "data: [DONE]\n\n"
         return StreamingResponse(gen(), media_type="text/event-stream",
-                                 headers=_stream_headers(wallet))
+                                 headers=_stream_headers(wallet, hold_estimate))
 
     # non-streaming: consume the generator, build one response
-    text, finish, pt, ct, err = "", "stop", 0, 0, None
-    for ev in DRIVER.stream(input_ids, max_new, COORDINATOR, router_prompt):
+    text, finish, pt, ct, cost, err, err_ev = "", "stop", 0, 0, None, None, None
+    for ev in DRIVER.stream(input_ids, max_new, COORDINATOR, router_prompt, wallet):
         if ev["type"] == "error":
-            err = ev["detail"]
+            err, err_ev = ev["detail"], ev
             break
         if ev["type"] == "done":
             text, finish = ev["text"], ev["finish_reason"]
-            pt, ct = ev["prompt_tokens"], ev["completion_tokens"]
+            pt, ct, cost = ev["prompt_tokens"], ev["completion_tokens"], ev.get("cost_nrn")
     if err is not None:
-        return _error_response(503, err, "server_error", "chain_unavailable")
+        return _error_response_for_event(err_ev)
     resp = {"id": cid, "object": "chat.completion", "created": created,
             "model": model_name,
             "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
                          "finish_reason": finish}],
-            "usage": _usage(pt, ct)}
-    return JSONResponse(resp, headers={"X-NRN-Cost": str(NRN_PER_REQUEST),
-                                       "X-NRN-Wallet": wallet})
+            "usage": _usage(pt, ct, cost)}
+    return JSONResponse(resp, headers={"X-NRN-Cost": str(cost), "X-NRN-Wallet": wallet})
 
 
 # --------------------------------------------------------------------------- #
@@ -240,6 +255,7 @@ def completions(body: CompletionBody, authorization: str = Header(default=None))
     cid = "cmpl-" + uuid.uuid4().hex
     created = int(time.time())
     model_name = body.model or MODEL_ID
+    hold_estimate = coord_ledger.quote(max_new, int(input_ids.shape[1]))
 
     def chunk(text, finish):
         return {"id": cid, "object": "text_completion", "created": created,
@@ -249,10 +265,9 @@ def completions(body: CompletionBody, authorization: str = Header(default=None))
 
     if body.stream:
         def gen():
-            for ev in DRIVER.stream(input_ids, max_new, COORDINATOR, prompt):
+            for ev in DRIVER.stream(input_ids, max_new, COORDINATOR, prompt, wallet):
                 if ev["type"] == "error":
-                    yield _sse({"error": {"message": ev["detail"], "type": "server_error",
-                                          "code": "chain_unavailable"}})
+                    yield _sse(_stream_error_chunk(ev))
                     yield "data: [DONE]\n\n"
                     return
                 if ev["type"] == "token":
@@ -262,29 +277,29 @@ def completions(body: CompletionBody, authorization: str = Header(default=None))
                     if _want_usage(body):
                         final = chunk("", ev["finish_reason"])
                         final["choices"] = []
-                        final["usage"] = _usage(ev["prompt_tokens"], ev["completion_tokens"])
+                        final["usage"] = _usage(ev["prompt_tokens"], ev["completion_tokens"],
+                                                ev.get("cost_nrn"))
                         yield _sse(final)
                     yield "data: [DONE]\n\n"
         return StreamingResponse(gen(), media_type="text/event-stream",
-                                 headers=_stream_headers(wallet))
+                                 headers=_stream_headers(wallet, hold_estimate))
 
-    text, finish, pt, ct, err = "", "stop", 0, 0, None
-    for ev in DRIVER.stream(input_ids, max_new, COORDINATOR, prompt):
+    text, finish, pt, ct, cost, err, err_ev = "", "stop", 0, 0, None, None, None
+    for ev in DRIVER.stream(input_ids, max_new, COORDINATOR, prompt, wallet):
         if ev["type"] == "error":
-            err = ev["detail"]
+            err, err_ev = ev["detail"], ev
             break
         if ev["type"] == "done":
             text, finish = ev["text"], ev["finish_reason"]
-            pt, ct = ev["prompt_tokens"], ev["completion_tokens"]
+            pt, ct, cost = ev["prompt_tokens"], ev["completion_tokens"], ev.get("cost_nrn")
     if err is not None:
-        return _error_response(503, err, "server_error", "chain_unavailable")
+        return _error_response_for_event(err_ev)
     resp = {"id": cid, "object": "text_completion", "created": created,
             "model": model_name,
             "choices": [{"index": 0, "text": text, "logprobs": None,
                          "finish_reason": finish}],
-            "usage": _usage(pt, ct)}
-    return JSONResponse(resp, headers={"X-NRN-Cost": str(NRN_PER_REQUEST),
-                                       "X-NRN-Wallet": wallet})
+            "usage": _usage(pt, ct, cost)}
+    return JSONResponse(resp, headers={"X-NRN-Cost": str(cost), "X-NRN-Wallet": wallet})
 
 
 # --------------------------------------------------------------------------- #
@@ -321,9 +336,11 @@ def docs_html() -> str:
 Change one URL, keep your code.</div>
 
 <div class="note"><b>Base URL:</b> <code>http://&lt;this-host&gt;/v1</code> &nbsp;·&nbsp;
-<b>API key:</b> your NRN wallet address &nbsp;·&nbsp;
+<b>API key:</b> your NRN wallet_id (get one by logging in via the Chat UI, or GET /wallet/
+faucet on the coordinator for a throwaway test wallet) &nbsp;·&nbsp;
 <b>Model:</b> <code>{MODEL_ID}</code> (alias <code>neuron</code>) &nbsp;·&nbsp;
-<b>Cost:</b> {NRN_PER_REQUEST} NRN / request</div>
+<b>Cost:</b> {coord_config.PRICE_PER_1K_WEIGHTED} NRN / 1,000 weighted tokens (see the
+coordinator's <code>/pricing</code>) — metered, not flat</div>
 
 <h2>Python — OpenAI SDK (drop-in)</h2>
 <pre><code>from openai import OpenAI
@@ -363,10 +380,13 @@ for chunk in client.chat.completions.create(
 
 <div class="note"><b>Notes.</b> Generation is greedy/deterministic for now, so
 <code>temperature</code>, <code>top_p</code>, <code>n</code> and similar sampling
-params are accepted and ignored. Each response also returns <code>X-NRN-Cost</code>
-and <code>X-NRN-Wallet</code> headers and a <code>usage.nrn_cost</code> field.
-Persisting a per-wallet balance debit is coordinator-side economics (a later
-session); today the wallet is recorded and the cost reported.</div>
+params are accepted and ignored. Your wallet is charged for real: the worst-case cost is
+held before generation starts (402 if your balance can't cover it) and the actual metered
+cost is debited on completion, with any unused hold refunded. <code>X-NRN-Cost</code> on a
+streaming response is an ESTIMATE (sent before generation starts); the authoritative
+settled cost is <code>usage.nrn_cost</code> in the final chunk (request
+<code>stream_options: {{"include_usage": true}}</code>) or the header on a non-streaming
+response.</div>
 </div></body></html>"""
 
 

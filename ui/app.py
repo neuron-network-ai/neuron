@@ -32,19 +32,22 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import requests
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.middleware.sessions import SessionMiddleware
 
 from neuron_driver import DRIVER
 from api.openai_compat import router as openai_router, docs_html
 from rag import retriever as rag
 from safety import moderation
+from ui import oauth as oauth_module
 
 COORDINATOR = os.environ.get("NEURON_COORDINATOR", "http://150.230.22.250:8001").rstrip("/")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 log = logging.getLogger("neuron.ui")
+SESSION_SECRET = os.environ.get("NEURON_SESSION_SECRET", "neuron-session-dev-secret")
 
 
 @asynccontextmanager
@@ -55,8 +58,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="NEURON Chat", version="0.2", lifespan=lifespan)
+app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 app.include_router(openai_router)          # Session 11: /v1/* on the same server
+app.include_router(oauth_module.router)    # Workstream B: /auth/login|callback|me|logout
 
 
 class ChatBody(BaseModel):
@@ -80,6 +85,23 @@ def index():
 @app.get("/api-docs", response_class=HTMLResponse)
 def api_docs():
     return docs_html()
+
+
+@app.get("/wallet/balance")
+def wallet_balance_proxy(request: Request):
+    """Proxies the coordinator's GET /wallet/{id} for the logged-in session's wallet, so the
+    browser never needs to reach the coordinator directly (same pattern as /network)."""
+    wallet_id = request.session.get("wallet_id")
+    if not wallet_id:
+        return {"logged_in": False}
+    try:
+        r = requests.get(f"{COORDINATOR}/wallet/{wallet_id}", timeout=8)
+        r.raise_for_status()
+        data = r.json()
+        return {"logged_in": True, "wallet_id": wallet_id, "email": request.session.get("email"),
+               "balance": data["balance"], "total_earned": data["total_earned"]}
+    except requests.RequestException as e:
+        return {"logged_in": True, "wallet_id": wallet_id, "error": str(e)}
 
 
 @app.get("/network")
@@ -112,7 +134,7 @@ def network():
 # --------------------------------------------------------------------------- #
 # Chat — stream tokens produced by the node chain (SSE for the browser)
 # --------------------------------------------------------------------------- #
-def _drive(prompt: str, max_new: int, use_rag: bool = False):
+def _drive(prompt: str, max_new: int, wallet_id: str, use_rag: bool = False):
     # Input moderation gate (Workstream A) — checked on the RAW user prompt, before RAG
     # augmentation and before anything is dispatched to the node chain. This is the driver
     # (the only place plaintext exists in NEURON), so this is the correct — and only —
@@ -129,7 +151,7 @@ def _drive(prompt: str, max_new: int, use_rag: bool = False):
         content, sources = rag.retrieve_and_augment(prompt)
         yield sse("sources", {"sources": sources, "used": bool(sources)})
     input_ids = DRIVER.encode_chat([{"role": "user", "content": content}])
-    for ev in DRIVER.stream(input_ids, max_new, COORDINATOR, prompt):
+    for ev in DRIVER.stream(input_ids, max_new, COORDINATOR, prompt, wallet_id):
         if ev["type"] == "meta":
             yield sse("meta", {"request_id": ev["request_id"], "nodes": ev["nodes"],
                                "node_ids": ev["node_ids"], "cost_nrn": ev["cost_nrn"]})
@@ -137,24 +159,36 @@ def _drive(prompt: str, max_new: int, use_rag: bool = False):
             yield sse("token", {"text": ev["text"]})
         elif ev["type"] == "done":
             yield sse("done", {"tokens": ev["completion_tokens"],
-                               "latency_ms": ev["latency_ms"], "tok_per_s": ev["tok_per_s"]})
+                               "latency_ms": ev["latency_ms"], "tok_per_s": ev["tok_per_s"],
+                               "cost_nrn": ev.get("cost_nrn")})
         elif ev["type"] == "error":
             # a dropped/offline node mid-chain surfaces here — previously silent server-side,
             # so the founder would only learn about a real stranger's failed request if they
             # reported it themselves (post-audit fix: at least get it in the server log).
             log.warning("chat stream error for prompt %r: %s", prompt[:80], ev["detail"])
-            yield sse("error", {"detail": ev["detail"]})
+            yield sse("error", {"detail": ev["detail"], "code": ev.get("code")})
 
 
 @app.post("/chat")
-def chat(body: ChatBody):
+def chat(body: ChatBody, request: Request):
     prompt = (body.prompt or "").strip()
     if not prompt:
         def _empty():
             yield sse("error", {"detail": "empty prompt"})
         return StreamingResponse(_empty(), media_type="text/event-stream")
+    wallet_id = request.session.get("wallet_id")
+    if not wallet_id:
+        # NRN is now a real fixed-supply ledger (Workstream B) -- /infer requires a wallet_id,
+        # so chatting requires being logged in. Fail here with a clear, actionable message
+        # rather than letting an anonymous request die deep in the driver with a 422/402.
+        def _login_required():
+            yield sse("error", {"detail": "Please log in (Google or GitHub) to chat -- NEURON "
+                                          "spends NRN from your wallet to pay the nodes that "
+                                          "serve you. New accounts get a free starter grant.",
+                                "code": "login_required"})
+        return StreamingResponse(_login_required(), media_type="text/event-stream")
     return StreamingResponse(
-        _drive(prompt, body.max_tokens, body.use_rag),
+        _drive(prompt, body.max_tokens, wallet_id, body.use_rag),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                  "Connection": "keep-alive"},

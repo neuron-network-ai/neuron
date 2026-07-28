@@ -54,6 +54,11 @@
   button:disabled{opacity:.5;cursor:not-allowed}
   .foothint{max-width:760px;width:100%;margin:.35rem auto 0;color:var(--muted);font-size:11.5px;
     text-align:center}
+  .auth{display:flex;align-items:center;gap:.6rem;font-size:13px}
+  .auth a{color:var(--brand);text-decoration:none;font-weight:600}
+  .auth a:hover{text-decoration:underline}
+  .auth .balance{color:var(--muted)}
+  .auth .balance b{color:var(--ink)}
 </style>
 </head>
 <body>
@@ -64,6 +69,7 @@
     <span class="dot" id="netdot"></span>
     <span id="netlabel">checking network…</span>
   </div>
+  <div class="auth" id="auth"></div>
 </header>
 <div id="warn"></div>
 
@@ -80,7 +86,7 @@
       <textarea id="input" rows="1" placeholder="Type a message and press Enter…"></textarea>
       <button id="send">Send</button>
     </div>
-    <div class="foothint" id="hint"><label style="cursor:pointer"><input type="checkbox" id="rag"> 🌐 Web search — answer with current info</label> &nbsp;·&nbsp; Each response costs 1.0 NRN.</div>
+    <div class="foothint" id="hint"><label style="cursor:pointer"><input type="checkbox" id="rag"> 🌐 Web search — answer with current info</label> &nbsp;·&nbsp; Cost is metered by response length, shown after each reply. NRN has no cash value.</div>
   </div>
 </footer>
 
@@ -119,6 +125,40 @@ async function refreshNetwork(){
 }
 refreshNetwork();
 setInterval(refreshNetwork, 10000);
+
+// ---- login state / wallet balance -----------------------------------------
+let loggedIn = false;
+async function refreshAuth(){
+  const auth = $("#auth");
+  try{
+    const me = await (await fetch("/auth/me")).json();
+    if(!me.wallet_id){
+      loggedIn = false;
+      const providers = me.providers_configured || [];
+      if(providers.length){
+        auth.innerHTML = providers.map(p =>
+          "<a href='/auth/login/" + p + "'>Log in with " +
+          p.charAt(0).toUpperCase()+p.slice(1) + "</a>").join(" · ");
+      } else {
+        auth.innerHTML = "<span class='balance'>login not configured on this server</span>";
+      }
+      return;
+    }
+    loggedIn = true;
+    const bal = await (await fetch("/wallet/balance")).json();
+    const shown = (bal.balance!==undefined) ? bal.balance.toFixed(2) : "?";
+    auth.innerHTML = "<span class='balance'>" + (me.email || "logged in") +
+      " · <b>" + shown + " NRN</b></span> · <a href='#' id='logoutlink'>Log out</a>";
+    $("#logoutlink").addEventListener("click", async (e) => {
+      e.preventDefault();
+      await fetch("/auth/logout", {method:"POST"});
+      refreshAuth();
+    });
+  }catch(e){
+    auth.innerHTML = "";
+  }
+}
+refreshAuth();
 
 // ---- message rendering ----------------------------------------------------
 function addMsg(cls, who){
@@ -170,8 +210,8 @@ async function send(){
         if(event==="meta"){ meta = d; }
         else if(event==="sources"){ renderSources(body, d); }
         else if(event==="token"){ gotToken = true; body.textContent += d.text; scroll(); }
-        else if(event==="done"){ finishBot(body, meta, d); }
-        else if(event==="error"){ showError(body, d.detail); }
+        else if(event==="done"){ finishBot(body, meta, d); refreshAuth(); }
+        else if(event==="error"){ showError(body, d.detail, d.code); }
       }
     }
     if(!gotToken && body.textContent==="") body.textContent = "…";
@@ -200,19 +240,28 @@ function renderSources(body, d){
 
 function finishBot(body, meta, d){
   const n = (meta && meta.nodes) || onlineNodes;
+  const cost = (d.cost_nrn!==undefined && d.cost_nrn!==null) ? d.cost_nrn.toFixed(4) : "?";
   const m = document.createElement("div");
   m.className = "meta";
   m.innerHTML =
     "<span>⛓ " + n + " nodes</span>" +
-    "<span>◈ Cost: 1.0 NRN</span>" +
+    "<span>◈ Cost: " + cost + " NRN</span>" +
     "<span>" + d.tokens + " tokens · " + d.tok_per_s + " tok/s</span>";
   body.parentElement.appendChild(m);
   scroll();
 }
 
-function showError(body, detail){
+function showError(body, detail, code){
   body.parentElement.classList.add("err");
-  body.textContent = "⚠ " + (detail || "inference failed");
+  if(code === "login_required"){
+    body.innerHTML = "⚠ " + (detail || "please log in") +
+      "<br>" + ($("#auth").innerHTML || "");
+  } else if(code === "insufficient_funds"){
+    body.textContent = "⚠ Not enough NRN balance for this request. " +
+      (detail || "");
+  } else {
+    body.textContent = "⚠ " + (detail || "inference failed");
+  }
   scroll();
 }
 

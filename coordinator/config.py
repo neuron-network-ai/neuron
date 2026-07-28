@@ -75,3 +75,39 @@ REPUTATION_THRESHOLD = float(os.environ.get("NEURON_REP_THRESHOLD", "0.6"))
 # Basic per-IP rate limit (rough DDoS guard): N requests per window seconds.
 RATE_LIMIT_MAX = int(os.environ.get("NEURON_RATE_LIMIT", "120"))
 RATE_LIMIT_WINDOW_S = int(os.environ.get("NEURON_RATE_WINDOW", "60"))
+
+# --- fixed-supply ledger, Phase 0 (TOKENOMICS.md §11 — implemented same-session as safety) -- #
+# 1 NRN = 1,000 "weighted tokens" (output + input*INPUT_WEIGHT) on the REFERENCE model
+# (TOTAL_LAYERS above). INPUT_WEIGHT stays 1.0 until prefill cost is actually measured
+# ([P13] in PROBLEMS.md) — undercharging input tokens before that is a farming surface.
+PRICE_PER_1K_WEIGHTED = float(os.environ.get("NEURON_PRICE_PER_1K", "1.0"))
+INPUT_WEIGHT = float(os.environ.get("NEURON_INPUT_WEIGHT", "1.0"))
+# COORDINATOR_FEE (defined above, unchanged rate) now comes FROM the settled payment via
+# settle(), never minted.
+# The lm_head holder does meaningfully more work than a plain layer (~38ms vs ~9ms/layer,
+# S14 benchmark data) — this many extra "layer-equivalents" get added to its share so the
+# reward split reflects real compute cost, not just layer count.
+HEAD_BONUS_LE = float(os.environ.get("NEURON_HEAD_BONUS_LE", "5.0"))
+# A held request's escrow is returned to the wallet if never completed/released within this
+# window (a crashed/abandoned request) — swept by the existing health_loop.
+HOLD_TTL_S = int(os.environ.get("NEURON_HOLD_TTL_S", "600"))
+# One-time grant per new wallet, from __ecosystem__ — MUST ship in the same release as the
+# debit, or a new user can never spend anything (TOKENOMICS.md §11.6: "or the demo dies").
+FAUCET_AMOUNT_NRN = float(os.environ.get("NEURON_FAUCET_AMOUNT", "25.0"))
+
+# Genesis buckets — ledger rows, NOT config values that can silently drift the supply.
+# sum() of the 4 allocation buckets is exactly 1,000,000,000; __escrow__ is bookkeeping-only
+# (seeded at 0, holds in-flight payments, never counted as anyone's allocation).
+GENESIS_BUCKETS_EMISSION_ID = "__emission_pool__"      # 600,000,000 — paid per device-hour donated
+GENESIS_BUCKETS_FOUNDER_ID = "__founder__"             # 200,000,000 — vested, see TOKENOMICS.md §5
+GENESIS_BUCKETS_ECOSYSTEM_ID = "__ecosystem__"         # 150,000,000 — grants + the faucet
+GENESIS_BUCKETS_LIQUIDITY_ID = "__liquidity__"         #  50,000,000 — reserved for Phase 1
+ESCROW_LEDGER_ID = "__escrow__"                        # 0 — in-flight held payments only
+GENESIS_TOTAL_SUPPLY = 1_000_000_000
+
+# Shared secret between the coordinator and a driver process (ui/app.py) so POST
+# /wallet/oauth can be trusted: the driver holds the real OAuth client secret and has
+# already verified the (provider, external_id) pair with Google/GitHub before calling
+# this — without a shared secret, anyone on the internet could call this endpoint directly
+# and squat a wallet under an external_id they don't own. Override in production.
+WALLET_LINK_SECRET = os.environ.get("NEURON_WALLET_LINK_SECRET", "neuron-wallet-link-dev-secret")

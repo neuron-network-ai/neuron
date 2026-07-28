@@ -42,6 +42,22 @@ def body(node_id, ls, le, behind_nat=False):
                         layer_start=ls, layer_end=le, cores=4, ram_gb=8, behind_nat=behind_nat)
 
 
+_req_n = [0]
+
+
+def earn(node_ids):
+    """ledger.distribute() no longer exists (fixed-supply settle() replaced unconditional
+    minting) -- this test only cares about eligibility gating (probationary/verified earn or
+    don't), not real economics, so fund __escrow__ directly as a test-only shortcut rather
+    than going through a real hold. See coordinator/test_wallet_settlement.py for the
+    invariant-preserving hold->settle lifecycle tests."""
+    _req_n[0] += 1
+    models.credit(config.ESCROW_LEDGER_ID, 1.0)
+    plan_nodes = [models.get_node(nid) for nid in node_ids]
+    return ledger.settle(f"oj-req-{_req_n[0]}", "oj-test-wallet", 1.0,
+                         prompt_tokens=0, completion_tokens=1000, plan_nodes=plan_nodes)
+
+
 def main():
     models.init_db()
     N = config.TOTAL_LAYERS  # 28
@@ -65,7 +81,7 @@ def main():
           "stranger-b" not in [n["node_id"] for n in chain])
 
     # 3) earning excludes the probationary node
-    ledger.distribute(["trust-a", "stranger-b"])
+    earn(["trust-a", "stranger-b"])
     check("trusted node earned", models.get_ledger("trust-a")["balance"] > 0)
     check("probationary node earned nothing", models.get_ledger("stranger-b")["balance"] == 0)
 
@@ -76,7 +92,7 @@ def main():
     chain2, missing2 = router.build_chain()
     check("chain complete after verification", len(missing2) == 0)
     check("verified node now in chain", "stranger-b" in [n["node_id"] for n in chain2])
-    ledger.distribute(["trust-a", "stranger-b"])
+    earn(["trust-a", "stranger-b"])
     check("verified node now earns", models.get_ledger("stranger-b")["balance"] > 0)
 
     # 5) a secret-less registration cannot hijack a trusted node id

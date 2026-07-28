@@ -42,15 +42,31 @@ PROMPTS = [
 compute_lock = threading.Lock()   # serialise node_a's own compute across request threads
 
 
+class InsufficientFunds(Exception):
+    """Raised when the coordinator's /infer returns 402 -- the wallet's balance doesn't
+    cover this request's worst-case quoted cost. Distinct from a generic RuntimeError so
+    callers (neuron_driver.py) can show a specific "add funds" message rather than a
+    generic chain-unavailable error."""
+
+
 # --------------------------------------------------------------------------- #
-# Coordinator client (Session 6): ask the coordinator for the chain, report done
+# Coordinator client (Session 6; wallet/hold wiring added Workstream B)
 # --------------------------------------------------------------------------- #
-def coord_get_chain(base, prompt, max_tokens, expected_s1):
-    """POST /infer -> (host_c, port_c, host_b, port_b, s2, node_ids, request_id, complete_token).
-    Assumes a 3-node chain matching node_a's loaded shard (layers 0..expected_s1-1). The
-    complete_token authenticates the later /complete call ([P12])."""
-    r = requests.post(f"{base}/infer", json={"prompt": prompt, "max_tokens": max_tokens},
-                      timeout=15)
+def coord_get_chain(base, prompt, max_tokens, expected_s1, wallet_id, prompt_tokens_estimate=None):
+    """POST /infer -> (host_c, port_c, host_b, port_b, s2, node_ids, request_id, complete_token,
+    hold_amount). Assumes a 3-node chain matching node_a's loaded shard (layers 0..expected_s1-1).
+    The complete_token authenticates the later /complete call ([P12]); wallet_id is who pays
+    (Workstream B — /infer now holds the worst-case cost from this wallet before dispatch)."""
+    body = {"prompt": prompt, "max_tokens": max_tokens, "wallet_id": wallet_id}
+    if prompt_tokens_estimate is not None:
+        body["prompt_tokens_estimate"] = prompt_tokens_estimate
+    r = requests.post(f"{base}/infer", json=body, timeout=15)
+    if r.status_code == 402:
+        try:
+            detail = r.json().get("detail", r.text)
+        except ValueError:
+            detail = r.text
+        raise InsufficientFunds(detail)
     if r.status_code != 200:
         try:
             detail = r.json().get("detail", r.text)
@@ -65,26 +81,35 @@ def coord_get_chain(base, prompt, max_tokens, expected_s1):
     if a["layers"] != [0, expected_s1 - 1]:
         raise RuntimeError(f"chain assigns node_a {a['layers']} but shard is 0..{expected_s1-1}")
     return c["ip"], c["port"], b["ip"], b["port"], c["layers"][1] + 1, \
-        [a["node_id"], c["node_id"], b["node_id"]], request_id, data.get("complete_token")
+        [a["node_id"], c["node_id"], b["node_id"]], request_id, data.get("complete_token"), \
+        data.get("hold_amount")
 
 
-def coord_complete(base, request_id, tokens, duration_ms, node_ids, complete_token=None):
+def coord_complete(base, request_id, tokens, duration_ms, node_ids, complete_token=None,
+                   prompt_tokens=0):
+    """Report completion so the coordinator settles the hold (Workstream B: real metered
+    cost, node payouts, refund). Returns the parsed response body (rewards breakdown, etc.)
+    -- previously discarded; callers can now learn the real settled cost."""
     try:
-        requests.post(f"{base}/infer/{request_id}/complete",
-                      json={"tokens_generated": tokens, "duration_ms": duration_ms,
-                            "node_ids": node_ids, "complete_token": complete_token}, timeout=15)
+        r = requests.post(f"{base}/infer/{request_id}/complete",
+                          json={"tokens_generated": tokens, "duration_ms": duration_ms,
+                                "node_ids": node_ids, "complete_token": complete_token,
+                                "prompt_tokens": prompt_tokens}, timeout=15)
+        r.raise_for_status()
+        return r.json()
     except requests.RequestException as e:
         print(f"[A] warn: completion report failed: {e}")
+        return None
 
 
-def run_request(idx, prompt, model, tok, cfg, eos_id, results, coordinator=None):
+def run_request(idx, prompt, model, tok, cfg, eos_id, results, coordinator=None, wallet_id=None):
     s1, s2, host_c, port_c, host_b, port_b, max_new = cfg
     request_id, node_ids, complete_token = None, None, None
     t_start = time.time()
     try:
         if coordinator:
-            host_c, port_c, host_b, port_b, s2, node_ids, request_id, complete_token = \
-                coord_get_chain(coordinator, prompt, max_new, s1)
+            host_c, port_c, host_b, port_b, s2, node_ids, request_id, complete_token, _hold = \
+                coord_get_chain(coordinator, prompt, max_new, s1, wallet_id)
         _run(idx, prompt, model, tok, s1, s2, host_c, port_c, host_b, port_b,
              max_new, eos_id, results, coordinator, request_id, node_ids, t_start,
              complete_token)
@@ -141,7 +166,7 @@ def _run(idx, prompt, model, tok, s1, s2, host_c, port_c, host_b, port_b,
     latency = time.time() - t_start
     if coordinator and request_id:
         coord_complete(coordinator, request_id, len(generated), int(latency * 1000),
-                       node_ids, complete_token)
+                       node_ids, complete_token, prompt_tokens=int(input_ids.shape[1]))
 
     hit_eos = generated[-1] == eos_id
     out_ids = generated[:-1] if hit_eos else generated
@@ -178,6 +203,10 @@ def main():
     ap.add_argument("--serial", action="store_true")
     ap.add_argument("--prompt", default=None)
     ap.add_argument("--copies", type=int, default=1, help="repeat the prompt set N times")
+    ap.add_argument("--wallet-id", default=None,
+                    help="wallet to charge (coordinator mode only). If omitted, a fresh "
+                         "throwaway test wallet is auto-created and faucet-funded — "
+                         "convenient for benchmarking/testing, not for a real user.")
     args = ap.parse_args()
 
     if not args.coordinator and not (args.host_c and args.host_b):
@@ -188,6 +217,20 @@ def main():
     coordinator = args.coordinator.rstrip("/") if args.coordinator else None
     route = f"coordinator {coordinator}" if coordinator else \
             f"direct c={args.host_c} b={args.host_b}"
+
+    wallet_id = args.wallet_id
+    if coordinator and not wallet_id:
+        import uuid as _uuid
+        wallet_id = f"node_a-cli-{_uuid.uuid4().hex[:12]}"
+        try:
+            fr = requests.post(f"{coordinator}/wallet/faucet", json={"wallet_id": wallet_id},
+                               timeout=15)
+            fr.raise_for_status()
+            print(f"[A] auto-created test wallet '{wallet_id}' "
+                  f"(faucet-funded: {fr.json().get('granted')} NRN)")
+        except requests.RequestException as e:
+            print(f"[A] warn: could not faucet-fund the auto wallet ({e}); "
+                  f"/infer will likely 402 unless '{wallet_id}' already has a balance")
 
     print(f"[A] loading my shard (embed + layers 0..{args.s1-1} + lm_head) ...")
     t0 = time.time()
@@ -209,10 +252,11 @@ def main():
     batch_t0 = time.time()
     if args.serial:
         for i, p in enumerate(prompts):
-            run_request(i, p, model, tok, cfg, eos_id, results, coordinator)
+            run_request(i, p, model, tok, cfg, eos_id, results, coordinator, wallet_id)
     else:
         threads = [threading.Thread(target=run_request,
-                                    args=(i, p, model, tok, cfg, eos_id, results, coordinator))
+                                    args=(i, p, model, tok, cfg, eos_id, results, coordinator,
+                                          wallet_id))
                    for i, p in enumerate(prompts)]
         for t in threads:
             t.start()

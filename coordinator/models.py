@@ -35,7 +35,10 @@ CREATE TABLE IF NOT EXISTS ledger (
     node_id         TEXT PRIMARY KEY,
     balance         REAL NOT NULL DEFAULT 0,
     total_earned    REAL NOT NULL DEFAULT 0,
-    requests_served INTEGER NOT NULL DEFAULT 0
+    requests_served INTEGER NOT NULL DEFAULT 0,
+    account_type    TEXT NOT NULL DEFAULT 'node',
+    faucet_claimed  INTEGER NOT NULL DEFAULT 0,
+    locked_until    REAL
 );
 CREATE TABLE IF NOT EXISTS requests (
     request_id       TEXT PRIMARY KEY,
@@ -48,7 +51,24 @@ CREATE TABLE IF NOT EXISTS requests (
     duration_ms      INTEGER,
     node_ids         TEXT,
     plan_node_ids    TEXT,
-    complete_token   TEXT
+    complete_token   TEXT,
+    wallet_id        TEXT,
+    hold_amount      REAL
+);
+CREATE TABLE IF NOT EXISTS holds (
+    request_id  TEXT PRIMARY KEY,
+    wallet_id   TEXT NOT NULL,
+    amount      REAL NOT NULL,
+    created_at  REAL NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'held'
+);
+CREATE TABLE IF NOT EXISTS oauth_identities (
+    provider     TEXT NOT NULL,
+    external_id  TEXT NOT NULL,
+    wallet_id    TEXT NOT NULL,
+    email        TEXT,
+    created_at   REAL NOT NULL,
+    PRIMARY KEY (provider, external_id)
 );
 """
 
@@ -85,9 +105,21 @@ def init_db():
         # S18b ([P12]): record the routed chain + a per-request completion token so /complete
         # can be authenticated and settled from the coordinator's own plan, not caller input.
         rcols = {r["name"] for r in c.execute("PRAGMA table_info(requests)").fetchall()}
-        for col in ("plan_node_ids", "complete_token"):
+        for col in ("plan_node_ids", "complete_token", "wallet_id"):
             if col not in rcols:
                 c.execute(f"ALTER TABLE requests ADD COLUMN {col} TEXT")
+        if "hold_amount" not in rcols:
+            c.execute("ALTER TABLE requests ADD COLUMN hold_amount REAL")
+        # Fixed-supply ledger (Workstream B): every pre-existing ledger row (all real nodes
+        # today) becomes account_type='node' via the column default -- zero data loss, zero
+        # behavior change for existing rows. Buckets/wallets are new rows, not migrated ones.
+        lcols = {r["name"] for r in c.execute("PRAGMA table_info(ledger)").fetchall()}
+        if "account_type" not in lcols:
+            c.execute("ALTER TABLE ledger ADD COLUMN account_type TEXT NOT NULL DEFAULT 'node'")
+        if "faucet_claimed" not in lcols:
+            c.execute("ALTER TABLE ledger ADD COLUMN faucet_claimed INTEGER NOT NULL DEFAULT 0")
+        if "locked_until" not in lcols:
+            c.execute("ALTER TABLE ledger ADD COLUMN locked_until REAL")
 
 
 def _status(last_seen, now=None):
@@ -242,16 +274,182 @@ def node_ledgers():
 
 
 # --------------------------------------------------------------------------- #
+# Fixed-supply wallet primitives (Workstream B / TOKENOMICS.md §11 Phase 0)
+# --------------------------------------------------------------------------- #
+def ensure_account(account_id, account_type="wallet"):
+    """INSERT OR IGNORE a zero-balance row -- safe to call before any transfer touching an
+    account that might not exist yet (a wallet's first-ever hold, e.g.)."""
+    with _db() as c:
+        c.execute("INSERT OR IGNORE INTO ledger (node_id, account_type) VALUES (?, ?)",
+                  (account_id, account_type))
+
+
+def debit(account_id, amount):
+    """Conditional debit -- only succeeds if the balance actually covers `amount`. The
+    WHERE clause is the whole safety property: a losing debit changes nothing (rowcount=0),
+    so this is safe to call speculatively without a separate balance check first."""
+    with _db() as c:
+        cur = c.execute(
+            "UPDATE ledger SET balance=balance-? WHERE node_id=? AND balance>=?",
+            (amount, account_id, amount))
+        return cur.rowcount > 0
+
+
+def transfer(from_id, to_id, amount, count_request=False):
+    """Move `amount` from one account to another atomically (one connection, one commit).
+    A losing debit (insufficient balance) leaves BOTH sides untouched -- the credit only
+    runs if the debit's WHERE clause actually matched a row, so this never partially applies.
+    `count_request` mirrors credit()'s own flag -- set it when `to_id` is a node being paid
+    for serving a request (bumps its requests_served display stat), not for fees/refunds."""
+    if amount <= 0:
+        return True   # a zero/negative transfer is a no-op, not an error
+    with _db() as c:
+        cur = c.execute(
+            "UPDATE ledger SET balance=balance-? WHERE node_id=? AND balance>=?",
+            (amount, from_id, amount))
+        if cur.rowcount == 0:
+            return False
+        c.execute("INSERT OR IGNORE INTO ledger (node_id) VALUES (?)", (to_id,))
+        c.execute("UPDATE ledger SET balance=balance+?, total_earned=total_earned+?, "
+                  "requests_served=requests_served+? WHERE node_id=?",
+                  (amount, amount, 1 if count_request else 0, to_id))
+        return True
+
+
+def hold(request_id, wallet_id, amount):
+    """Reserve `amount` from a wallet for an in-flight request -- a transfer INTO the
+    bookkeeping-only __escrow__ account, so SUM(ledger.balance) never moves, only WHERE the
+    money sits. Returns False (nothing held) on insufficient balance."""
+    with _db() as c:
+        cur = c.execute(
+            "UPDATE ledger SET balance=balance-? WHERE node_id=? AND balance>=?",
+            (amount, wallet_id, amount))
+        if cur.rowcount == 0:
+            return False
+        c.execute("INSERT OR IGNORE INTO ledger (node_id) VALUES (?)",
+                  (config.ESCROW_LEDGER_ID,))
+        c.execute("UPDATE ledger SET balance=balance+? WHERE node_id=?",
+                  (amount, config.ESCROW_LEDGER_ID))
+        c.execute("INSERT INTO holds (request_id, wallet_id, amount, created_at, status) "
+                  "VALUES (?,?,?,?, 'held')", (request_id, wallet_id, amount, time.time()))
+        return True
+
+
+def release_hold(request_id):
+    """Return a still-`held` hold's full amount to its wallet (moderation-abort or a
+    request that never got quoted a settlement). No-op if already settled/released/unknown."""
+    with _db() as c:
+        row = c.execute("SELECT * FROM holds WHERE request_id=? AND status='held'",
+                        (request_id,)).fetchone()
+        if not row:
+            return False
+        cur = c.execute(
+            "UPDATE ledger SET balance=balance-? WHERE node_id=? AND balance>=?",
+            (row["amount"], config.ESCROW_LEDGER_ID, row["amount"]))
+        if cur.rowcount == 0:
+            return False   # escrow underfunded -- should never happen; fail closed, not silently
+        c.execute("INSERT OR IGNORE INTO ledger (node_id) VALUES (?)", (row["wallet_id"],))
+        c.execute("UPDATE ledger SET balance=balance+? WHERE node_id=?",
+                  (row["amount"], row["wallet_id"]))
+        c.execute("UPDATE holds SET status='released' WHERE request_id=?", (request_id,))
+        return True
+
+
+def release_stale_holds(ttl_s, now=None):
+    """TTL sweep for abandoned/crashed requests (held but never completed or released).
+    Meant to be piggybacked on the coordinator's existing health_loop. Returns the list of
+    request_ids released, for logging."""
+    now = now if now is not None else time.time()
+    cutoff = now - ttl_s
+    with _db() as c:
+        stale = [r["request_id"] for r in c.execute(
+            "SELECT request_id FROM holds WHERE status='held' AND created_at < ?",
+            (cutoff,)).fetchall()]
+    for rid in stale:
+        release_hold(rid)
+    return stale
+
+
+def get_hold(request_id):
+    with _db() as c:
+        row = c.execute("SELECT * FROM holds WHERE request_id=?", (request_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def mark_hold_settled(request_id):
+    with _db() as c:
+        c.execute("UPDATE holds SET status='settled' WHERE request_id=?", (request_id,))
+
+
+def claim_faucet(wallet_id, amount):
+    """One-time faucet grant per wallet_id. The UPDATE's WHERE clause (faucet_claimed=0) is
+    the idempotency guard -- a second call for the same wallet always fails closed."""
+    with _db() as c:
+        c.execute("INSERT OR IGNORE INTO ledger (node_id, account_type) VALUES (?, 'wallet')",
+                  (wallet_id,))
+        cur = c.execute(
+            "UPDATE ledger SET faucet_claimed=1 WHERE node_id=? AND faucet_claimed=0",
+            (wallet_id,))
+        if cur.rowcount == 0:
+            return False
+        c.execute(
+            "UPDATE ledger SET balance=balance-? WHERE node_id=? AND balance>=?",
+            (amount, config.GENESIS_BUCKETS_ECOSYSTEM_ID, amount))
+        c.execute("UPDATE ledger SET balance=balance+?, total_earned=total_earned+? "
+                  "WHERE node_id=?", (amount, amount, wallet_id))
+        return True
+
+
+def supply_snapshot():
+    """Per-bucket balances + total + the invariant check -- the public /supply payload.
+    Only genesis buckets + escrow are named individually; no wallet/node balances leak."""
+    bucket_ids = (config.GENESIS_BUCKETS_EMISSION_ID, config.GENESIS_BUCKETS_FOUNDER_ID,
+                 config.GENESIS_BUCKETS_ECOSYSTEM_ID, config.GENESIS_BUCKETS_LIQUIDITY_ID,
+                 config.ESCROW_LEDGER_ID)
+    with _db() as c:
+        buckets = {}
+        for bid in bucket_ids:
+            row = c.execute("SELECT balance FROM ledger WHERE node_id=?", (bid,)).fetchone()
+            buckets[bid] = row["balance"] if row else 0.0
+        total = c.execute("SELECT COALESCE(SUM(balance),0) AS t FROM ledger").fetchone()["t"]
+    return {"buckets": buckets, "total_supply": round(total, 6),
+           "invariant_ok": abs(total - 1_000_000_000) < 1e-6}
+
+
+def wallet_for_oauth(provider, external_id, email=None):
+    """Look up (or create) the wallet_id for an OAuth identity. A brand-new wallet gets
+    the faucet claimed automatically in the SAME call -- ships faucet+debit together, or the
+    demo dies (per TOKENOMICS.md §11.6)."""
+    now = time.time()
+    with _db() as c:
+        row = c.execute(
+            "SELECT wallet_id FROM oauth_identities WHERE provider=? AND external_id=?",
+            (provider, external_id)).fetchone()
+        if row:
+            return row["wallet_id"], False
+        import secrets as _secrets
+        wallet_id = "w_" + _secrets.token_hex(16)
+        c.execute("INSERT INTO oauth_identities (provider, external_id, wallet_id, email, "
+                 "created_at) VALUES (?,?,?,?,?)", (provider, external_id, wallet_id, email, now))
+        c.execute("INSERT OR IGNORE INTO ledger (node_id, account_type) VALUES (?, 'wallet')",
+                 (wallet_id,))
+    claim_faucet(wallet_id, config.FAUCET_AMOUNT_NRN)
+    return wallet_id, True
+
+
+# --------------------------------------------------------------------------- #
 # Requests
 # --------------------------------------------------------------------------- #
-def create_request(request_id, prompt, max_tokens, plan_node_ids=None, complete_token=None):
+def create_request(request_id, prompt, max_tokens, plan_node_ids=None, complete_token=None,
+                   wallet_id=None, hold_amount=None):
     with _db() as c:
         c.execute(
             "INSERT INTO requests (request_id, prompt, max_tokens, status, created_at, "
-            "plan_node_ids, complete_token) VALUES (?,?,?, 'pending', ?, ?, ?)",
+            "plan_node_ids, complete_token, wallet_id, hold_amount) "
+            "VALUES (?,?,?, 'pending', ?, ?, ?, ?, ?)",
             (request_id, prompt, max_tokens, time.time(),
              json.dumps(plan_node_ids) if plan_node_ids is not None else None,
-             complete_token),
+             complete_token, wallet_id, hold_amount),
         )
 
 

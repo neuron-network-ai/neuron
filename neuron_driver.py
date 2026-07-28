@@ -9,11 +9,12 @@ It loads the driver shard (embed + layers 0..S1-1 + lm_head) ONCE per process an
 for each prompt, asks the coordinator for a live chain, runs the autoregressive
 loop across node_a -> node_c -> node_b, and yields structured events:
 
-    {"type": "meta",  "request_id", "node_ids", "nodes", "cost_nrn"}
+    {"type": "meta",  "request_id", "node_ids", "nodes", "cost_nrn"}   # cost_nrn = held quote
     {"type": "token", "text": <decoded delta>}          # zero or more
     {"type": "done",  "completion_tokens", "prompt_tokens", "finish_reason",
-                      "latency_ms", "tok_per_s", "text": <full decoded output>}
-    {"type": "error", "detail": <str>}                  # instead of token/done
+                      "latency_ms", "tok_per_s", "text": <full decoded output>,
+                      "cost_nrn"}                        # cost_nrn = real settled cost
+    {"type": "error", "detail": <str>, "code": <str, optional>}   # instead of token/done
 
 Callers turn these into whatever wire format they need (SSE for the browser,
 OpenAI chunks for the API). Reuses node_a.coord_get_chain / coord_complete and
@@ -64,9 +65,13 @@ class _Driver:
         return self.tok(prompt, return_tensors="pt").input_ids
 
     # -- the generation loop -------------------------------------------------- #
-    def stream(self, input_ids, max_new: int, coordinator: str, router_prompt: str):
+    def stream(self, input_ids, max_new: int, coordinator: str, router_prompt: str,
+              wallet_id: str = None):
         """Yield event dicts (see module docstring). `router_prompt` is only what
-        the coordinator logs for the request; generation is driven by input_ids."""
+        the coordinator logs for the request; generation is driven by input_ids.
+        `wallet_id` (Workstream B) is who pays -- /infer holds the worst-case cost from it
+        before dispatch; a missing/underfunded wallet surfaces as an "insufficient_funds"
+        error event rather than a raw coordinator 402."""
         model, tok, eos_id = self.model, self.tok, self.eos_id
         max_new = max(1, min(int(max_new), MAX_TOKENS_CAP))
         prompt_tokens = int(input_ids.shape[1])
@@ -74,14 +79,18 @@ class _Driver:
 
         # 1) ask the coordinator for a chain matching our shard (layers 0..S1-1)
         try:
-            host_c, port_c, host_b, port_b, s2, node_ids, request_id, complete_token = \
-                node_a.coord_get_chain(coordinator, router_prompt, max_new, S1)
+            (host_c, port_c, host_b, port_b, s2, node_ids, request_id, complete_token,
+             hold_amount) = node_a.coord_get_chain(coordinator, router_prompt, max_new, S1,
+                                                   wallet_id, prompt_tokens_estimate=prompt_tokens)
+        except node_a.InsufficientFunds as e:
+            yield {"type": "error", "detail": str(e), "code": "insufficient_funds"}
+            return
         except Exception as e:
             yield {"type": "error", "detail": str(e)}
             return
 
         yield {"type": "meta", "request_id": request_id, "node_ids": node_ids,
-               "nodes": len(node_ids), "cost_nrn": 1.0}
+               "nodes": len(node_ids), "cost_nrn": hold_amount}
 
         # 2) open + configure the chain (node_a -> node_c -> node_b)
         sock = None
@@ -144,17 +153,22 @@ class _Driver:
 
             common.send_msg(sock, {"type": "bye"})
 
-            # 4) report completion so the coordinator credits NRN (node_a.py counts
-            #    len(generated), which includes the stopping token)
+            # 4) report completion so the coordinator settles the hold (Workstream B: real
+            #    metered cost, node payouts, refund of anything unused). node_a.py counts
+            #    len(generated), which includes the stopping token.
             latency_ms = int((time.time() - t_start) * 1000)
             tokens_generated = completion + (1 if finish == "stop" else 0)
-            node_a.coord_complete(coordinator, request_id, tokens_generated,
-                                  latency_ms, node_ids, complete_token)
+            result = node_a.coord_complete(coordinator, request_id, tokens_generated,
+                                           latency_ms, node_ids, complete_token,
+                                           prompt_tokens=prompt_tokens)
+            rewards = (result or {}).get("rewards") or {}
+            actual_cost = (round(hold_amount - rewards.get("__refund__", 0.0), 6)
+                          if hold_amount is not None else None)
             yield {"type": "done", "completion_tokens": completion,
                    "prompt_tokens": prompt_tokens, "finish_reason": finish,
                    "latency_ms": latency_ms,
                    "tok_per_s": round(completion / max(time.time() - t_start, 1e-6), 2),
-                   "text": prev_text}
+                   "text": prev_text, "cost_nrn": actual_cost}
         except Exception as e:
             yield {"type": "error", "detail": f"{e.__class__.__name__}: {e}"}
         finally:

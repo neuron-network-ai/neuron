@@ -61,10 +61,15 @@ def main():
     check("picker forces the high replica", last_of(hi) == "last-b")
 
     # 3) earnings follow the chosen replica; the other earns nothing that request
+    # ledger.distribute() no longer exists (fixed-supply settle() replaced unconditional
+    # minting) -- fund __escrow__ directly as a test-only shortcut; see
+    # coordinator/test_wallet_settlement.py for the invariant-preserving hold->settle tests.
     b0 = models.get_ledger("last-b")["balance"]
     f0 = models.get_ledger("last-4th")["balance"]
     chosen = router.build_chain(pick=lambda xs: sorted(xs, key=lambda n: n["node_id"])[0])[0]
-    ledger.distribute([n["node_id"] for n in chosen])   # routes to last-4th
+    models.credit(config.ESCROW_LEDGER_ID, 1.0)
+    ledger.settle("rep-req-1", "rep-test-wallet", 1.0, prompt_tokens=0, completion_tokens=1000,
+                 plan_nodes=chosen)   # routes to last-4th
     check("chosen replica earned", models.get_ledger("last-4th")["balance"] > f0)
     check("unchosen replica did not earn", models.get_ledger("last-b")["balance"] == b0)
 

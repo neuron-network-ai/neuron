@@ -18,8 +18,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from coordinator import (balancer, config, ledger, migration, model_registry, model_tiers,
-                         models, router)
+from coordinator import (balancer, config, genesis, ledger, migration, model_registry,
+                         model_tiers, models, router)
 import relay_auth
 
 
@@ -42,6 +42,8 @@ class RegisterBody(BaseModel):
 class InferBody(BaseModel):
     prompt: str
     max_tokens: int = 200
+    wallet_id: str                              # who pays -- required (Workstream B)
+    prompt_tokens_estimate: int | None = None   # driver's rough estimate for the hold quote
 
 
 class CompleteBody(BaseModel):
@@ -49,6 +51,17 @@ class CompleteBody(BaseModel):
     duration_ms: int
     node_ids: list[str]
     complete_token: str | None = None   # [P12] token issued by /infer; required to settle
+    prompt_tokens: int = 0              # driver's real tokenizer count (Workstream B)
+
+
+class WalletFaucetBody(BaseModel):
+    wallet_id: str
+
+
+class WalletOAuthBody(BaseModel):
+    provider: str
+    external_id: str
+    email: str | None = None
 
 
 class AttestBody(BaseModel):
@@ -140,6 +153,9 @@ async def health_loop():
             for node_id in models.sweep():
                 print(f"[health] node '{node_id}' went OFFLINE "
                       f"(no ping in {config.HEARTBEAT_TIMEOUT_S}s)")
+            for rid in models.release_stale_holds(config.HOLD_TTL_S):
+                print(f"[ledger] released stale hold for request '{rid}' "
+                      f"(crashed/abandoned, {config.HOLD_TTL_S}s TTL)")
             with _tier_lock:
                 prev = _tier_controller.active()["name"]
                 tier = _tier_controller.update(models.list_nodes(), time.time())
@@ -161,6 +177,9 @@ async def health_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     models.init_db()
+    if genesis.seed_genesis():
+        print("[coordinator] genesis buckets seeded (fixed-supply ledger, Phase 0)")
+    genesis.verify_invariant()   # fail startup loudly rather than serve on a broken supply
     print(f"[coordinator] up | db={config.DB_PATH} | layers={config.TOTAL_LAYERS} | "
           f"timeout={config.HEARTBEAT_TIMEOUT_S}s")
     task = asyncio.create_task(health_loop())
@@ -339,9 +358,20 @@ def infer(body: InferBody):
     request_id = str(uuid.uuid4())
     plan_node_ids = [n["node_id"] for n in chain]          # the chain WE chose (incl. replica)
     complete_token = secrets.token_hex(config.TOKEN_BYTES)  # only the caller who got this may complete
-    models.create_request(request_id, body.prompt, body.max_tokens, plan_node_ids, complete_token)
+    # Fixed-supply ledger (Workstream B): hold the worst-case cost BEFORE dispatching anything.
+    # A driver that doesn't know its real tokenizer count yet gets a cheap char/3 estimate --
+    # only an upper bound is needed here, settle() charges the real metered cost afterward.
+    est_input = (body.prompt_tokens_estimate if body.prompt_tokens_estimate is not None
+                else max(1, len(body.prompt) // 3))
+    hold_amount = ledger.quote(body.max_tokens, est_input)
+    if not models.hold(request_id, body.wallet_id, hold_amount):
+        raise HTTPException(status_code=402,
+                            detail=f"insufficient NRN balance; this request needs "
+                                   f"{hold_amount} NRN held")
+    models.create_request(request_id, body.prompt, body.max_tokens, plan_node_ids,
+                          complete_token, wallet_id=body.wallet_id, hold_amount=hold_amount)
     return {"chain": router.chain_public(chain), "request_id": request_id,
-            "complete_token": complete_token}
+            "complete_token": complete_token, "hold_amount": hold_amount}
 
 
 @app.post("/infer/{request_id}/complete")
@@ -359,16 +389,76 @@ def complete(request_id: str, body: CompleteBody):
     # completion can only ever pay the nodes the coordinator actually routed (incl. the chosen replica).
     plan = json.loads(req["plan_node_ids"]) if req.get("plan_node_ids") else list(body.node_ids)
     tokens = max(0, min(int(body.tokens_generated), int(req["max_tokens"] or body.tokens_generated)))
+    # server-side recount clamp, same trust posture as the tokens_generated clamp above: the
+    # coordinator can't tokenize (stays torch-free) but CAN bound a lying driver's report
+    # against the prompt it already stored, so a lie can only under-report, never over-charge
+    # past the hold.
+    prompt_tokens = max(0, min(int(body.prompt_tokens), len(req.get("prompt") or "")))
     # complete_request's UPDATE is conditioned on WHERE status='pending' and reports whether IT
     # was the call that flipped the row — the true single-writer guard. The status check above
     # (line ~352) is only a fast pre-check; two concurrent /complete calls with the SAME valid
-    # token both pass it before either commits, so distribute() must gate on THIS return value,
+    # token both pass it before either commits, so settle() must gate on THIS return value,
     # not the pre-check, or the race pays every racer instead of paying once (post-audit fix).
     won = models.complete_request(request_id, tokens, body.duration_ms, plan)
     if not won:
         raise HTTPException(status_code=409, detail="request already completed")
-    rewards = ledger.distribute(plan)
+    plan_nodes = [models.get_node(nid) for nid in plan]
+    rewards = ledger.settle(request_id, req.get("wallet_id"), req.get("hold_amount") or 0.0,
+                            prompt_tokens, tokens, plan_nodes)
     return {"status": "completed", "request_id": request_id, "rewards": rewards}
+
+
+@app.get("/pricing")
+def pricing():
+    """Single source of truth for what a request costs -- kills the old duplicated constant
+    (config.py vs api/openai_compat.py had the same NRN_PER_REQUEST defined twice)."""
+    return {"price_per_1k_weighted_tokens": config.PRICE_PER_1K_WEIGHTED,
+           "input_weight": config.INPUT_WEIGHT, "coordinator_fee": config.COORDINATOR_FEE,
+           "reference_model": config.MODEL_ID, "reference_layers": config.TOTAL_LAYERS,
+           "head_bonus_layer_equivalents": config.HEAD_BONUS_LE}
+
+
+@app.get("/supply")
+def supply():
+    """Public per-bucket supply + the fixed-1e9 invariant check. Only genesis buckets +
+    escrow are named -- never a per-wallet or per-node balance (same privacy posture as the
+    public /dashboard, which also never shows individual balances)."""
+    return models.supply_snapshot()
+
+
+@app.post("/wallet/oauth")
+def wallet_oauth(body: WalletOAuthBody, x_wallet_link_secret: str = Header(default=None)):
+    """Resolve (or create) the wallet for a (provider, external_id) OAuth identity. Gated by
+    a shared secret -- the CALLER (a driver process) is trusted to have already verified this
+    identity with the real OAuth provider; this endpoint itself does no verification of its
+    own, so without the secret anyone could squat a wallet under an external_id they don't
+    control. A brand-new wallet gets the faucet claimed in the SAME call (models.wallet_for_
+    oauth), so login and spend-ability ship together."""
+    if not (isinstance(x_wallet_link_secret, str)
+           and secrets.compare_digest(x_wallet_link_secret, config.WALLET_LINK_SECRET)):
+        raise HTTPException(status_code=401, detail="invalid or missing X-Wallet-Link-Secret")
+    wallet_id, is_new = models.wallet_for_oauth(body.provider, body.external_id, body.email)
+    return {"wallet_id": wallet_id, "is_new": is_new}
+
+
+@app.post("/wallet/faucet")
+def wallet_faucet(body: WalletFaucetBody):
+    """One-time grant per wallet_id. Ships in the same release as the debit -- a wallet that
+    can never receive anything can never spend anything either (TOKENOMICS.md §11.6)."""
+    if models.claim_faucet(body.wallet_id, config.FAUCET_AMOUNT_NRN):
+        return {"wallet_id": body.wallet_id, "granted": config.FAUCET_AMOUNT_NRN}
+    raise HTTPException(status_code=409, detail="faucet already claimed for this wallet")
+
+
+@app.get("/wallet/{wallet_id}")
+def wallet_balance(wallet_id: str):
+    """wallet_id is an unguessable secret minted by wallet_for_oauth() (32 hex chars) -- same
+    bearer-capability pattern this codebase already uses for complete_token/node tokens, so
+    knowing it is the authorization. Not listable/enumerable anywhere."""
+    row = models.get_ledger(wallet_id)
+    if row is None or row.get("account_type") != "wallet":
+        raise HTTPException(status_code=404, detail="unknown wallet")
+    return {"wallet_id": wallet_id, "balance": row["balance"], "total_earned": row["total_earned"]}
 
 
 # --------------------------------------------------------------------------- #
