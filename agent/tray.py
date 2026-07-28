@@ -72,11 +72,17 @@ class Tray:
         def pause_label(_):
             return "Resume" if self.agent.user_paused.is_set() else "Pause"
 
+        def chat_label(_):
+            return "Open Chat UI" if self._chat_ready() else "Chat UI (starting…)"
+
         donation = pystray.Menu(*[self._mode_item(m, label) for m, label in DONATION_LABELS])
         return pystray.Menu(
             pystray.MenuItem(title, None, enabled=False),
             pystray.MenuItem(status, None, enabled=False),
             pystray.MenuItem(earned, None, enabled=False),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(chat_label, self._open_chat, enabled=lambda item: self._chat_ready()),
+            pystray.MenuItem("API Docs", self._open_api_docs, enabled=lambda item: self._chat_ready()),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(pause_label, self._toggle_pause),
             pystray.MenuItem("Donation level", donation),
@@ -85,6 +91,20 @@ class Tray:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", self._quit),
         )
+
+    # -- personal Chat UI / API (agent/local_chat.py, api/openai_compat.py) -- #
+    def _chat_ready(self):
+        return self.agent.local_chat_server is not None
+
+    def _chat_base_url(self):
+        port = self.agent.cfg.get("local_chat_port", 8080)
+        return f"http://127.0.0.1:{port}"
+
+    def _open_chat(self, icon, item):
+        webbrowser.open(self._chat_base_url())
+
+    def _open_api_docs(self, icon, item):
+        webbrowser.open(f"{self._chat_base_url()}/api-docs")
 
     # -- donation dial ------------------------------------------------------- #
     def _mode_item(self, mode, label):

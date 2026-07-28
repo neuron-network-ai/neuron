@@ -24,6 +24,18 @@ log = logging.getLogger("neuron.agent.local_chat")
 
 DEFAULT_PORT = 8080
 
+# config.json's "oauth" keys -> the env vars ui/oauth.py reads at import time. config.json is
+# the only place a packaged, console-less desktop install can supply these -- there's no shell
+# to set NEURON_GOOGLE_CLIENT_ID etc. before a double-clicked tray app starts.
+_OAUTH_ENV_MAP = {
+    "google_client_id": "NEURON_GOOGLE_CLIENT_ID",
+    "google_client_secret": "NEURON_GOOGLE_CLIENT_SECRET",
+    "github_client_id": "NEURON_GITHUB_CLIENT_ID",
+    "github_client_secret": "NEURON_GITHUB_CLIENT_SECRET",
+    "session_secret": "NEURON_SESSION_SECRET",
+    "wallet_link_secret": "NEURON_WALLET_LINK_SECRET",
+}
+
 
 def ensure_driver_slice(model_id, target_dir):
     """Download the fixed driver shard if not already present. Reuses the exact same
@@ -44,7 +56,7 @@ def ensure_driver_slice(model_id, target_dir):
     return target_dir
 
 
-def start(coordinator, model_id, slice_dir, port=DEFAULT_PORT, host="127.0.0.1"):
+def start(coordinator, model_id, slice_dir, port=DEFAULT_PORT, host="127.0.0.1", oauth_cfg=None):
     """Download the driver slice (if needed) and serve the Chat UI on `host:port` in a
     background thread. Returns the running uvicorn.Server (call .should_exit = True to stop
     it) or None if startup failed -- a broken local chat UI must never take down the agent's
@@ -59,6 +71,12 @@ def start(coordinator, model_id, slice_dir, port=DEFAULT_PORT, host="127.0.0.1")
         neuron_driver.DRIVER.load_from_slice(slice_dir)
 
         os.environ.setdefault("NEURON_COORDINATOR", coordinator)
+        # setdefault, not assignment: a real shell env var (dev testing) still wins over
+        # whatever's saved in config.json.
+        for cfg_key, env_name in _OAUTH_ENV_MAP.items():
+            value = (oauth_cfg or {}).get(cfg_key)
+            if value:
+                os.environ.setdefault(env_name, value)
         import uvicorn
         from ui.app import app
 

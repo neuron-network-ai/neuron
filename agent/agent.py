@@ -64,6 +64,15 @@ DEFAULT_CONFIG = {
     # internet (127.0.0.1 only). Independent of donation_mode: pausing compute-sharing
     # when you're active shouldn't also take away your own ability to use the network.
     "local_chat": True, "local_chat_port": 8080,
+    # Google/GitHub OAuth for wallet login (ui/oauth.py) -- None until set. This is the only
+    # way to hand credentials to a packaged, console-less desktop install: ui/oauth.py reads
+    # plain os.environ, which nobody can set for a double-clicked tray app, so
+    # start_local_chat() copies these into the process environment before importing ui.app.
+    "oauth": {
+        "google_client_id": None, "google_client_secret": None,
+        "github_client_id": None, "github_client_secret": None,
+        "session_secret": None, "wallet_link_secret": None,
+    },
 }
 
 
@@ -126,6 +135,7 @@ class Agent:
         self.user_paused = threading.Event()   # set by the tray's Pause button
         self.relay = self.cfg.get("relay")     # relay params if this node is behind NAT
         self.server = None                     # the running NodeServer (migration reload target)
+        self.local_chat_server = None          # set once start_local_chat() finishes (tray readiness check)
 
     # -- config persistence -------------------------------------------------- #
     def _save(self):
@@ -277,8 +287,10 @@ class Agent:
             log.warning("local chat skipped: model_id not known yet (setup() hasn't run)")
             return
         driver_slice_dir = os.path.join(HERE, "driver_slice")
-        local_chat.start(self.base, self.cfg["model_id"], driver_slice_dir,
-                         port=self.cfg.get("local_chat_port", local_chat.DEFAULT_PORT))
+        self.local_chat_server = local_chat.start(
+            self.base, self.cfg["model_id"], driver_slice_dir,
+            port=self.cfg.get("local_chat_port", local_chat.DEFAULT_PORT),
+            oauth_cfg=self.cfg.get("oauth"))
 
     def heartbeat_loop(self):
         while not self._stop.is_set():
