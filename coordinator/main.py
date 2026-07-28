@@ -151,6 +151,14 @@ def apply_migration_cutover(model_id, layers):
     set_serving_model(model_id, layers)
 
 
+def apply_gap_heal(assignments):
+    """Self-heal cutover callback: persist each surplus node's new layer range. Unlike a tier
+    migration this never changes the serving model, so there's no set_serving_model() call --
+    just closing a coverage gap within whatever model is already being served."""
+    for a in assignments:
+        models.update_layers(a["node_id"], a["layer_start"], a["layer_end"])
+
+
 async def health_loop():
     while True:
         await asyncio.sleep(config.HEALTH_CHECK_INTERVAL_S)
@@ -169,6 +177,19 @@ async def health_loop():
             # advance any model migration toward the qualified target tier
             target = {"model_id": tier["model_id"], "layers": tier["layers"]}
             with _migration_lock:
+                # self-heal first: closes a coverage gap in the CURRENTLY serving model using
+                # idle surplus nodes, only while no real tier migration is in flight (it's a
+                # no-op the instant update() below starts preparing one).
+                healing_before = _migration.heal_status()["healing"]
+                _migration.self_heal(models.list_nodes(), serving_model(), time.time(),
+                                     apply_gap_heal)
+                healing_after = _migration.heal_status()["healing"]
+                if healing_after and not healing_before:
+                    print(f"[gap-heal] coverage gap detected, reassigning idle node(s) "
+                          f"(serving={serving_model()['model_id']})")
+                elif healing_before and not healing_after:
+                    print(f"[gap-heal] coverage restored (serving={serving_model()['model_id']})")
+
                 before = _migration.phase
                 _migration.update(models.list_nodes(), target, serving_model(),
                                   time.time(), apply_migration_cutover)
@@ -604,6 +625,15 @@ def network_migration():
     """Current model-migration status (Build 3): phase, target, per-node readiness."""
     with _migration_lock:
         return _migration.status()
+
+
+@app.get("/network/gap-heal")
+def network_gap_heal():
+    """Current self-heal status: is a coverage gap being closed right now, with which idle
+    node(s), and are they ready yet. Separate from /network/migration -- self-heal never
+    changes the serving model, only reassigns already-idle capacity to close a gap."""
+    with _migration_lock:
+        return _migration.heal_status()
 
 
 @app.get("/node/{node_id}/migration")
