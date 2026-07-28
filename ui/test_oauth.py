@@ -83,7 +83,14 @@ def main():
         check("_link_wallet sends the shared secret header",
               headers.get("X-Wallet-Link-Secret") == oauth_module.WALLET_LINK_SECRET)
         check("_link_wallet sends provider/external_id/email",
-              body == {"provider": "google", "external_id": "sub-abc", "email": "a@b.com"})
+              body == {"provider": "google", "external_id": "sub-abc", "email": "a@b.com",
+                       "email_verified": False})
+        # the provider's own verified-email assertion is forwarded, so an operator reviewing an
+        # abusive identity can tell a real account from a throwaway
+        calls.clear()
+        oauth_module._link_wallet("google", "sub-abc", "a@b.com", email_verified=True)
+        check("_link_wallet forwards the provider's email_verified claim",
+              calls[0][1]["email_verified"] is True)
     finally:
         oauth_module.requests.post = real_post
 

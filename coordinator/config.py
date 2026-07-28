@@ -117,3 +117,10 @@ WALLET_LINK_SECRET = os.environ.get("NEURON_WALLET_LINK_SECRET", "neuron-wallet-
 # requests. Deliberately > 1 -- a single false-positive keyword match (the blocklist is
 # a cheap v1, see safety/moderation.py) shouldn't lock someone out immediately.
 MODERATION_BAN_THRESHOLD = int(os.environ.get("NEURON_MODERATION_BAN_THRESHOLD", "3"))
+
+# How long a completed request row is kept (models.py::prune_old_requests). `requests` is the
+# only table that grows with TRAFFIC rather than with users -- at 1M users x 5 requests/day it
+# would add ~1.25 GB/day, which no single-file SQLite on a 1 GB VM survives. Identities, ledger
+# rows and moderation_events are NEVER pruned: bans depend on them and they grow slowly.
+# 0 disables pruning entirely.
+REQUEST_RETENTION_DAYS = int(os.environ.get("NEURON_REQUEST_RETENTION_DAYS", "90"))

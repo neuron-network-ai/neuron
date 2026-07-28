@@ -62,6 +62,7 @@ class WalletOAuthBody(BaseModel):
     provider: str
     external_id: str
     email: str | None = None
+    email_verified: bool = False   # provider-asserted; distinguishes a throwaway address
 
 
 class AttestBody(BaseModel):
@@ -160,12 +161,25 @@ def apply_gap_heal(assignments):
 
 
 async def health_loop():
+    prune_due_at = 0.0
     while True:
         await asyncio.sleep(config.HEALTH_CHECK_INTERVAL_S)
         try:
             for node_id in models.sweep():
                 print(f"[health] node '{node_id}' went OFFLINE "
                       f"(no ping in {config.HEARTBEAT_TIMEOUT_S}s)")
+            # Retention: `requests` is the only table that grows with TRAFFIC rather than with
+            # users, so it's the one that would actually kill a single-file SQLite DB (~1.25
+            # GB/day at 1M users x 5 requests). Identities, ledger rows and moderation_events
+            # are never pruned -- bans depend on them and they grow slowly. Piggybacks the
+            # existing sweep rather than adding a second timer; hourly is plenty for a daily
+            # cutoff.
+            if config.REQUEST_RETENTION_DAYS > 0 and time.time() >= prune_due_at:
+                prune_due_at = time.time() + 3600
+                pruned = models.prune_old_requests()
+                if pruned:
+                    print(f"[retention] pruned {pruned} request row(s) older than "
+                          f"{config.REQUEST_RETENTION_DAYS}d")
             for rid in models.release_stale_holds(config.HOLD_TTL_S):
                 print(f"[ledger] released stale hold for request '{rid}' "
                       f"(crashed/abandoned, {config.HOLD_TTL_S}s TTL)")
@@ -375,6 +389,13 @@ def slice_info(node_id: str):
 # --------------------------------------------------------------------------- #
 @app.post("/infer")
 def infer(body: InferBody):
+    # Login is enforced HERE, not in the UI. Every driver -- including a self-hosted one whose
+    # owner has stripped the client-side moderation gate -- must call /infer to get a node
+    # chain, so this is the one identity check a user cannot patch out of their own copy.
+    if not models.is_oauth_wallet(body.wallet_id):
+        raise HTTPException(status_code=403,
+                            detail="this wallet is not linked to a verified Google/GitHub "
+                                   "login; sign in to use the network")
     if models.wallet_moderation_status(body.wallet_id)["banned"]:
         raise HTTPException(status_code=403,
                             detail="this wallet is blocked for repeated content-policy "
@@ -456,6 +477,16 @@ def supply():
     return models.supply_snapshot()
 
 
+def require_link_secret(x_wallet_link_secret):
+    """Shared gate for every endpoint that may only be called by a trusted driver or by the
+    operator -- factored out of the copies in /wallet/oauth and /wallet/{id}/violation so a
+    new privileged endpoint can't silently ship without it (which is exactly how
+    /wallet/faucet ended up world-callable)."""
+    if not (isinstance(x_wallet_link_secret, str)
+           and secrets.compare_digest(x_wallet_link_secret, config.WALLET_LINK_SECRET)):
+        raise HTTPException(status_code=401, detail="invalid or missing X-Wallet-Link-Secret")
+
+
 @app.post("/wallet/oauth")
 def wallet_oauth(body: WalletOAuthBody, x_wallet_link_secret: str = Header(default=None)):
     """Resolve (or create) the wallet for a (provider, external_id) OAuth identity. Gated by
@@ -467,7 +498,8 @@ def wallet_oauth(body: WalletOAuthBody, x_wallet_link_secret: str = Header(defau
     if not (isinstance(x_wallet_link_secret, str)
            and secrets.compare_digest(x_wallet_link_secret, config.WALLET_LINK_SECRET)):
         raise HTTPException(status_code=401, detail="invalid or missing X-Wallet-Link-Secret")
-    wallet_id, is_new = models.wallet_for_oauth(body.provider, body.external_id, body.email)
+    wallet_id, is_new = models.wallet_for_oauth(body.provider, body.external_id, body.email,
+                                                email_verified=bool(body.email_verified))
     return {"wallet_id": wallet_id, "is_new": is_new}
 
 
@@ -488,12 +520,70 @@ def wallet_violation(wallet_id: str, body: ViolationBody,
 
 
 @app.post("/wallet/faucet")
-def wallet_faucet(body: WalletFaucetBody):
+def wallet_faucet(body: WalletFaucetBody, x_wallet_link_secret: str = Header(default=None)):
     """One-time grant per wallet_id. Ships in the same release as the debit -- a wallet that
-    can never receive anything can never spend anything either (TOKENOMICS.md §11.6)."""
+    can never receive anything can never spend anything either (TOKENOMICS.md §11.6).
+
+    SECURITY: this endpoint used to be completely open, and models.claim_faucet CREATES the
+    ledger row for whatever wallet_id it's handed. So anyone could POST an arbitrary string,
+    get a funded wallet with a clean record, use it as an API bearer key, and mint a fresh one
+    the moment it was banned -- no login, no cost, unlimited. That made the whole
+    login/ban system decorative. Now gated like its sibling endpoints AND restricted to
+    wallets that came from a real Google/GitHub login."""
+    require_link_secret(x_wallet_link_secret)
+    if not models.is_oauth_wallet(body.wallet_id):
+        raise HTTPException(status_code=403,
+                            detail="faucet is only available to wallets created by a real "
+                                   "Google/GitHub login")
     if models.claim_faucet(body.wallet_id, config.FAUCET_AMOUNT_NRN):
         return {"wallet_id": body.wallet_id, "granted": config.FAUCET_AMOUNT_NRN}
     raise HTTPException(status_code=409, detail="faucet already claimed for this wallet")
+
+
+# --------------------------------------------------------------------------- #
+# Operator review + enforcement (see SAFETY.md)
+# --------------------------------------------------------------------------- #
+@app.post("/wallet/{wallet_id}/ban")
+def wallet_ban(wallet_id: str, x_wallet_link_secret: str = Header(default=None)):
+    """Ban an identity by hand. The automatic threshold only counts violations the DRIVER
+    self-reports, and for a self-hosted install the driver is the user's own machine -- so a
+    stripped client never reports itself and never trips it. This is the operator lever for
+    everything the keyword filter misses (jailbreaks, paraphrase, abuse reports). Enforced at
+    /infer, which is server-side, so it holds against a modified client."""
+    require_link_secret(x_wallet_link_secret)
+    if not models.set_ban(wallet_id, True):
+        raise HTTPException(status_code=404, detail="unknown wallet")
+    return {"wallet_id": wallet_id, "banned": True}
+
+
+@app.post("/wallet/{wallet_id}/unban")
+def wallet_unban(wallet_id: str, x_wallet_link_secret: str = Header(default=None)):
+    """Reverse a ban (operator error, successful appeal, resolved false positive)."""
+    require_link_secret(x_wallet_link_secret)
+    if not models.set_ban(wallet_id, False):
+        raise HTTPException(status_code=404, detail="unknown wallet")
+    return {"wallet_id": wallet_id, "banned": False}
+
+
+@app.get("/wallet/{wallet_id}/activity")
+def wallet_activity(wallet_id: str, x_wallet_link_secret: str = Header(default=None)):
+    """One identity's reviewable history -- who they are, their moderation events, and their
+    recent requests -- for deciding whether to ban. Request rows carry prompt_len only, never
+    prompt text (SAFETY.md), so this answers 'who did this, when, how much' and deliberately
+    not 'what did they type'."""
+    require_link_secret(x_wallet_link_secret)
+    data = models.wallet_activity(wallet_id)
+    if data["identity"] is None:
+        raise HTTPException(status_code=404, detail="unknown wallet")
+    return data
+
+
+@app.get("/admin/identities")
+def admin_identities(banned_only: bool = False, limit: int = 200,
+                     x_wallet_link_secret: str = Header(default=None)):
+    """Every identity that has ever logged in -- backs the admin review page."""
+    require_link_secret(x_wallet_link_secret)
+    return {"identities": models.list_identities(limit=limit, banned_only=banned_only)}
 
 
 @app.get("/wallet/{wallet_id}")
@@ -653,6 +743,147 @@ def node_migration_ready(node_id: str, _node=Depends(require_node_token)):
         ok = _migration.mark_ready(node_id)
         st = _migration.status() if ok else None
     return {"node_id": node_id, "acknowledged": ok, "status": st}
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_page():
+    """Operator console for reviewing identities and banning abusers.
+
+    The PAGE is public but carries no data -- every figure on it comes from the
+    secret-gated /admin/identities and /wallet/{id}/activity endpoints, which the browser
+    calls with the operator's key held in sessionStorage. So the key never appears in a URL,
+    never lands in server logs or browser history, and closing the tab forgets it. Serving
+    the empty shell unauthenticated is what makes that possible."""
+    return """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NEURON — identity review</title>
+<style>
+ :root{--bg:#f6f7f9;--panel:#fff;--ink:#1f2328;--muted:#6a737d;--line:#e3e6ea;--brand:#4f46e5;
+   --danger:#c5221f;--ok:#137333}
+ @media(prefers-color-scheme:dark){:root{--bg:#0e1116;--panel:#161b22;--ink:#e6edf3;
+   --muted:#8b949e;--line:#2a2f37;--brand:#8b8cf7}}
+ *{box-sizing:border-box}
+ body{margin:0;background:var(--bg);color:var(--ink);
+   font:14px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+ .wrap{max-width:1150px;margin:0 auto;padding:1.5rem 1rem 4rem}
+ h1{margin:0 0 .2rem;font-size:1.4rem} h1 span{color:var(--brand)}
+ .sub{color:var(--muted);margin-bottom:1.2rem}
+ .bar{display:flex;gap:.5rem;align-items:center;margin-bottom:1rem;flex-wrap:wrap}
+ input,button{font:inherit;padding:.45rem .7rem;border-radius:8px;border:1px solid var(--line)}
+ input{background:var(--panel);color:var(--ink);min-width:260px}
+ button{background:var(--brand);color:#fff;border:0;cursor:pointer}
+ button.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}
+ button.danger{background:var(--danger)} button.ok{background:var(--ok)}
+ .tablewrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);
+   border-radius:10px}
+ table{border-collapse:collapse;width:100%;min-width:860px}
+ th,td{border-bottom:1px solid var(--line);padding:.5rem .7rem;text-align:left;
+   white-space:nowrap}
+ th{background:var(--line);font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+ tr:last-child td{border-bottom:0}
+ .pill{padding:2px 8px;border-radius:10px;font-size:12px;color:#fff;display:inline-block}
+ .muted{color:var(--muted)} .mono{font-family:ui-monospace,Consolas,monospace;font-size:12px}
+ .empty{padding:2rem;text-align:center;color:var(--muted)}
+ dialog{border:1px solid var(--line);border-radius:12px;background:var(--panel);color:var(--ink);
+   max-width:760px;width:92%}
+ dialog::backdrop{background:rgba(0,0,0,.5)}
+</style></head><body><div class="wrap">
+<h1>NE<span>U</span>RON — identity review</h1>
+<div class="sub">Every account that has signed in. Ban here and the block takes effect at
+<code>/infer</code> — server-side, so it holds even against a modified client.</div>
+<div class="bar">
+  <input id="key" type="password" placeholder="operator key (X-Wallet-Link-Secret)">
+  <button id="load">Load</button>
+  <button id="toggle" class="ghost">Show banned only</button>
+  <span id="msg" class="muted"></span>
+</div>
+<div class="tablewrap"><table>
+<thead><tr><th>identity</th><th>provider</th><th>email verified</th><th>violations</th>
+<th>requests</th><th>balance</th><th>last seen</th><th>status</th><th></th></tr></thead>
+<tbody id="rows"><tr><td colspan="9" class="empty">Enter your operator key and press Load.</td></tr></tbody>
+</table></div>
+<dialog id="detail"><div style="padding:1.2rem"><h3 id="dtitle" style="margin:0 0 .6rem"></h3>
+<div id="dbody" class="mono"></div>
+<div style="margin-top:1rem;text-align:right"><button class="ghost" id="dclose">Close</button></div>
+</div></dialog>
+</div>
+<script>
+const $=s=>document.querySelector(s);
+let bannedOnly=false;
+const key=()=>$("#key").value.trim()||sessionStorage.getItem("neuronAdminKey")||"";
+const hdr=()=>({"X-Wallet-Link-Secret":key()});
+const when=t=>t?new Date(t*1000).toLocaleString():"—";
+const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",
+  '"':"&quot;","'":"&#39;"}[c]));
+
+async function load(){
+  const k=key();
+  if(!k){$("#msg").textContent="operator key required";return;}
+  sessionStorage.setItem("neuronAdminKey",k);
+  $("#msg").textContent="loading…";
+  let r;
+  try{ r=await fetch("/admin/identities?banned_only="+bannedOnly,{headers:hdr()}); }
+  catch(e){ $("#msg").textContent="network error"; return; }
+  if(r.status===401){$("#msg").textContent="wrong operator key";return;}
+  if(!r.ok){$("#msg").textContent="error "+r.status;return;}
+  const {identities}=await r.json();
+  $("#msg").textContent=identities.length+" identit"+(identities.length===1?"y":"ies");
+  $("#rows").innerHTML = identities.length? identities.map(i=>{
+    const banned=!!i.moderation_banned;
+    return `<tr>
+      <td>${esc(i.email)||'<span class="muted">no email</span>'}
+          <div class="mono muted">${esc(i.wallet_id)}</div></td>
+      <td>${esc(i.provider)}</td>
+      <td>${i.email_verified?'<span class="pill" style="background:var(--ok)">verified</span>'
+                            :'<span class="pill" style="background:#9aa0a6">no</span>'}</td>
+      <td>${i.violation_count}</td><td>${i.request_count}</td>
+      <td>${Number(i.balance).toFixed(2)}</td><td>${when(i.last_seen)}</td>
+      <td>${banned?'<span class="pill" style="background:var(--danger)">banned</span>'
+                  :'<span class="pill" style="background:var(--ok)">active</span>'}</td>
+      <td><button class="ghost act" data-w="${esc(i.wallet_id)}">View</button>
+          <button class="${banned?'ok':'danger'} ban" data-w="${esc(i.wallet_id)}"
+                  data-b="${banned?1:0}">${banned?'Unban':'Ban'}</button></td></tr>`;
+  }).join("") : '<tr><td colspan="9" class="empty">No identities yet.</td></tr>';
+}
+
+document.addEventListener("click",async e=>{
+  const b=e.target.closest("button"); if(!b) return;
+  if(b.id==="load"){ load(); return; }
+  if(b.id==="toggle"){ bannedOnly=!bannedOnly;
+    b.textContent=bannedOnly?"Show all":"Show banned only"; load(); return; }
+  if(b.id==="dclose"){ $("#detail").close(); return; }
+  const w=b.dataset.w; if(!w) return;
+  if(b.classList.contains("ban")){
+    const isBanned=b.dataset.b==="1";
+    if(!confirm((isBanned?"Unban":"Ban")+" this identity?\\n\\n"+w)) return;
+    const r=await fetch("/wallet/"+encodeURIComponent(w)+(isBanned?"/unban":"/ban"),
+                        {method:"POST",headers:hdr()});
+    $("#msg").textContent = r.ok ? (isBanned?"unbanned":"banned") : "failed ("+r.status+")";
+    load(); return;
+  }
+  if(b.classList.contains("act")){
+    const r=await fetch("/wallet/"+encodeURIComponent(w)+"/activity",{headers:hdr()});
+    if(!r.ok){ $("#msg").textContent="activity failed ("+r.status+")"; return; }
+    const d=await r.json();
+    $("#dtitle").textContent=(d.identity.email||"(no email)")+" — "+d.identity.provider;
+    const ev=d.moderation_events.length? d.moderation_events.map(e=>
+        "· "+when(e.created_at)+"  ["+esc(e.direction)+"] "+esc(e.category)).join("<br>")
+      : '<span class="muted">no moderation events</span>';
+    const rq=d.requests.length? d.requests.slice(0,25).map(q=>
+        "· "+when(q.created_at)+"  "+esc(q.status)+"  prompt_len="+q.prompt_len+
+        "  tokens="+(q.tokens_generated==null?"—":q.tokens_generated)).join("<br>")
+      : '<span class="muted">no requests</span>';
+    $("#dbody").innerHTML="<b>wallet</b><br>"+esc(d.identity.wallet_id)+
+      "<br><br><b>joined</b> "+when(d.identity.created_at)+
+      " &nbsp; <b>last seen</b> "+when(d.identity.last_seen)+
+      "<br><br><b>moderation events</b><br>"+ev+
+      "<br><br><b>recent requests</b> <span class='muted'>(length only — never prompt text)</span><br>"+rq;
+    $("#detail").showModal();
+  }
+});
+$("#key").addEventListener("keydown",e=>{ if(e.key==="Enter") load(); });
+if(sessionStorage.getItem("neuronAdminKey")){ $("#key").value=sessionStorage.getItem("neuronAdminKey"); load(); }
+</script></body></html>"""
 
 
 @app.get("/dashboard", response_class=HTMLResponse)

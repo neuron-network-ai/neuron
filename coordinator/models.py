@@ -64,11 +64,13 @@ CREATE TABLE IF NOT EXISTS holds (
     status      TEXT NOT NULL DEFAULT 'held'
 );
 CREATE TABLE IF NOT EXISTS oauth_identities (
-    provider     TEXT NOT NULL,
-    external_id  TEXT NOT NULL,
-    wallet_id    TEXT NOT NULL,
-    email        TEXT,
-    created_at   REAL NOT NULL,
+    provider       TEXT NOT NULL,
+    external_id    TEXT NOT NULL,
+    wallet_id      TEXT NOT NULL,
+    email          TEXT,
+    email_verified INTEGER NOT NULL DEFAULT 0,
+    created_at     REAL NOT NULL,
+    last_seen      REAL,
     PRIMARY KEY (provider, external_id)
 );
 CREATE TABLE IF NOT EXISTS moderation_events (
@@ -146,6 +148,16 @@ def init_db():
             c.execute("ALTER TABLE ledger ADD COLUMN violation_count INTEGER NOT NULL DEFAULT 0")
         if "moderation_banned" not in lcols:
             c.execute("ALTER TABLE ledger ADD COLUMN moderation_banned INTEGER NOT NULL DEFAULT 0")
+        # Verified identity (abuse accountability): a filter is always evadable, so the real
+        # control is knowing WHO sent a request and being able to act on them. email_verified
+        # distinguishes a real provider-verified address from a throwaway; last_seen shows
+        # whether an identity is live or dormant when reviewing it.
+        ocols = {r["name"] for r in c.execute("PRAGMA table_info(oauth_identities)").fetchall()}
+        if "email_verified" not in ocols:
+            c.execute("ALTER TABLE oauth_identities ADD COLUMN email_verified "
+                     "INTEGER NOT NULL DEFAULT 0")
+        if "last_seen" not in ocols:
+            c.execute("ALTER TABLE oauth_identities ADD COLUMN last_seen REAL")
 
 
 def _status(last_seen, now=None):
@@ -442,25 +454,42 @@ def supply_snapshot():
            "invariant_ok": abs(total - 1_000_000_000) < 1e-6}
 
 
-def wallet_for_oauth(provider, external_id, email=None):
+def wallet_for_oauth(provider, external_id, email=None, email_verified=False):
     """Look up (or create) the wallet_id for an OAuth identity. A brand-new wallet gets
     the faucet claimed automatically in the SAME call -- ships faucet+debit together, or the
-    demo dies (per TOKENOMICS.md §11.6)."""
+    demo dies (per TOKENOMICS.md §11.6). Also stamps last_seen on every login (not just
+    creation), so the admin view can tell a live identity from a dormant one."""
     now = time.time()
     with _db() as c:
         row = c.execute(
             "SELECT wallet_id FROM oauth_identities WHERE provider=? AND external_id=?",
             (provider, external_id)).fetchone()
         if row:
+            c.execute("UPDATE oauth_identities SET last_seen=?, email=COALESCE(?, email), "
+                     "email_verified=? WHERE provider=? AND external_id=?",
+                     (now, email, int(bool(email_verified)), provider, external_id))
             return row["wallet_id"], False
         import secrets as _secrets
         wallet_id = "w_" + _secrets.token_hex(16)
         c.execute("INSERT INTO oauth_identities (provider, external_id, wallet_id, email, "
-                 "created_at) VALUES (?,?,?,?,?)", (provider, external_id, wallet_id, email, now))
+                 "email_verified, created_at, last_seen) VALUES (?,?,?,?,?,?,?)",
+                 (provider, external_id, wallet_id, email, int(bool(email_verified)), now, now))
         c.execute("INSERT OR IGNORE INTO ledger (node_id, account_type) VALUES (?, 'wallet')",
                  (wallet_id,))
     claim_faucet(wallet_id, config.FAUCET_AMOUNT_NRN)
     return wallet_id, True
+
+
+def is_oauth_wallet(wallet_id):
+    """True only if this wallet was minted by a real Google/GitHub login. The gate that makes
+    login MANDATORY rather than cosmetic: /infer, the API's bearer auth and the faucet all
+    refuse a wallet_id that isn't backed by an identity here, so an attacker can't just invent
+    a wallet string and use the network anonymously (which /wallet/faucet used to allow)."""
+    if not wallet_id:
+        return False
+    with _db() as c:
+        return c.execute("SELECT 1 FROM oauth_identities WHERE wallet_id=?",
+                         (wallet_id,)).fetchone() is not None
 
 
 # --------------------------------------------------------------------------- #
@@ -495,6 +524,80 @@ def wallet_moderation_status(wallet_id):
         return {"violation_count": 0, "banned": False}
     return {"violation_count": row.get("violation_count", 0) or 0,
            "banned": bool(row.get("moderation_banned", 0))}
+
+
+def set_ban(wallet_id, banned):
+    """Ban/unban an identity BY HAND. The automatic MODERATION_BAN_THRESHOLD path only fires
+    on violations the driver self-reports (safety/moderation.py runs on the user's own machine
+    for a self-hosted install, so a stripped client never reports itself). This is the operator
+    lever for everything the filter misses -- a jailbreak, an abuse report, anything spotted by
+    a human. Enforcement is at /infer, which is server-side, so a ban bites even a modified
+    client. Returns False for an unknown wallet -- deliberately does NOT create the row (a
+    typo'd id must fail loudly, not silently mint a banned ghost account)."""
+    if not is_oauth_wallet(wallet_id):
+        return False
+    ensure_account(wallet_id, "wallet")
+    with _db() as c:
+        cur = c.execute("UPDATE ledger SET moderation_banned=? WHERE node_id=?",
+                        (1 if banned else 0, wallet_id))
+        return cur.rowcount > 0
+
+
+def list_identities(limit=200, banned_only=False):
+    """Everyone who has ever logged in, newest first -- backs the admin review page."""
+    where = "WHERE l.moderation_banned=1" if banned_only else ""
+    with _db() as c:
+        rows = c.execute(f"""
+            SELECT o.provider, o.external_id, o.wallet_id, o.email, o.email_verified,
+                   o.created_at, o.last_seen,
+                   COALESCE(l.violation_count, 0)   AS violation_count,
+                   COALESCE(l.moderation_banned, 0) AS moderation_banned,
+                   COALESCE(l.balance, 0)           AS balance,
+                   (SELECT COUNT(*) FROM requests r WHERE r.wallet_id = o.wallet_id)
+                                                    AS request_count
+            FROM oauth_identities o
+            LEFT JOIN ledger l ON l.node_id = o.wallet_id
+            {where}
+            ORDER BY COALESCE(o.last_seen, o.created_at) DESC
+            LIMIT ?""", (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def wallet_activity(wallet_id, limit=100):
+    """One identity's full reviewable history: who they are, their moderation events, and
+    their recent requests. Requests carry prompt_len only -- never prompt text (SAFETY.md);
+    this answers 'who did this and when', not 'what did they type'."""
+    with _db() as c:
+        identity = c.execute(
+            "SELECT provider, external_id, wallet_id, email, email_verified, created_at, "
+            "last_seen FROM oauth_identities WHERE wallet_id=?", (wallet_id,)).fetchone()
+        events = c.execute(
+            "SELECT direction, category, created_at FROM moderation_events "
+            "WHERE wallet_id=? ORDER BY created_at DESC LIMIT ?", (wallet_id, limit)).fetchall()
+        reqs = c.execute(
+            "SELECT request_id, prompt_len, max_tokens, status, created_at, completed_at, "
+            "tokens_generated FROM requests WHERE wallet_id=? ORDER BY created_at DESC LIMIT ?",
+            (wallet_id, limit)).fetchall()
+    return {"identity": dict(identity) if identity else None,
+           "moderation_events": [dict(r) for r in events],
+           "requests": [dict(r) for r in reqs],
+           "status": wallet_moderation_status(wallet_id)}
+
+
+def prune_old_requests(older_than_days=None):
+    """Delete request rows past the retention window. `requests` is the ONLY unbounded table
+    here -- identities and ledger rows grow with users (slowly, and must be kept forever since
+    bans depend on them), but this one grows with TRAFFIC and would be ~1.25 GB/day at 1M
+    users x 5 requests. Ban evidence survives pruning: moderation_events is never touched, and
+    violation_count/moderation_banned live on the ledger row. Returns rows deleted."""
+    days = config.REQUEST_RETENTION_DAYS if older_than_days is None else older_than_days
+    if not days or days <= 0:
+        return 0
+    cutoff = time.time() - (days * 86400)
+    with _db() as c:
+        cur = c.execute("DELETE FROM requests WHERE created_at < ? AND status != 'pending'",
+                        (cutoff,))
+        return cur.rowcount
 
 
 # --------------------------------------------------------------------------- #

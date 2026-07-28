@@ -76,6 +76,29 @@ content" property. At `MODERATION_BAN_THRESHOLD` violations (3 by default,
 `coordinator/config.py`) the wallet is banned: `/infer` refuses it with a 403, before any
 funds are even held.
 
+**A login is now genuinely required, not just offered.** This used to be bypassable, which
+made everything in this section decorative: `POST /wallet/faucet` was ungated (unlike the two
+sibling endpoints that check `X-Wallet-Link-Secret`), and `claim_faucet` *creates* the ledger
+row for whatever `wallet_id` string it receives. So anyone could mint a funded wallet with no
+account, use it as an API bearer key, and mint a fresh one the moment it was banned — free,
+instant, unlimited. Closed on three fronts:
+
+- `/wallet/faucet` requires the operator secret **and** a wallet already linked to a real
+  Google/GitHub login.
+- **`/infer` refuses any wallet not backed by a login.** This is the load-bearing one: every
+  driver must call `/infer` to get a node chain, so it's the one check a user cannot patch out
+  of their own copy of the client.
+- The OpenAI-compatible API verifies the bearer key against the coordinator instead of
+  accepting any non-empty string as a wallet.
+
+**Operator review and manual bans.** The automatic threshold only counts violations the driver
+*self-reports*, and for a self-hosted install the driver runs on the user's own machine — so a
+stripped client never reports itself and never trips it. `/admin` is a console listing every
+identity (provider, whether the provider verified their email, violation count, request count,
+last seen) with per-identity history and a ban button, backed by secret-gated endpoints. That
+is the lever for everything the keyword filter misses: a jailbreak, a paraphrase, an abuse
+report. Bans are enforced at `/infer`, server-side, so they bite a modified client too.
+
 **Honest limits:** (1) a determined bad actor can create a new OAuth identity (different
 Google/GitHub account, or the same person under a different email) and get a fresh wallet with
 a clean record — this raises the cost of repeat abuse, it does not make it impossible; a real
@@ -83,7 +106,11 @@ identity-verification layer is a much bigger, separate project. (2) the ban thre
 low enough on purpose that a wallet isn't locked out from one blocklist false-positive, but
 that also means genuine repeat bad-faith use gets exactly 2 free attempts before consequences.
 (3) this only escalates INSIDE NEURON (wallet banned from `/infer`) — it is not, and does not
-claim to be, a report to any external authority.
+claim to be, a report to any external authority. (4) **content policy itself is only
+enforceable on drivers NEURON runs.** Someone running their own agent holds the plaintext and
+the moderation code on their own machine and can simply delete the check. Against that user
+the controls are not content-based at all: they need a real account to get a chain from the
+coordinator, and that account can be banned.
 
 A blocked request never reaches the node network (no volunteer compute is spent on it), and a
 blocked generation is never billed or reported as completed.
@@ -126,7 +153,12 @@ maintainer directly.
 - ~~A durable per-user identity (tied to the wallet system) to handle repeat violations~~ —
   **done**: see "Repeat violations escalate against your wallet identity" above. Still open:
   real identity verification to make a ban actually costly to evade with a fresh login.
-- Formal log retention policy once real user volume exists.
+- ~~Formal log retention policy once real user volume exists.~~ — **partly done**: the
+  coordinator's `requests` table (the only table that grows with traffic rather than with
+  users — roughly 1.25 GB/day at 1M users × 5 requests) is pruned to
+  `NEURON_REQUEST_RETENTION_DAYS` (90 by default) on the existing health sweep. Identities,
+  ledger rows and `moderation_events` are never pruned: bans depend on them and they grow
+  slowly. The driver-side moderation log still has no retention policy.
 
 ---
 

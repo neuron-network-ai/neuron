@@ -60,10 +60,14 @@ if _github_id and _github_secret:
     _PROVIDERS_CONFIGURED.add("github")
 
 
-def _link_wallet(provider, external_id, email=None):
-    """Call the coordinator's shared-secret-gated endpoint to resolve/create the wallet."""
+def _link_wallet(provider, external_id, email=None, email_verified=False):
+    """Call the coordinator's shared-secret-gated endpoint to resolve/create the wallet.
+    email_verified is the PROVIDER's own assertion (Google's OIDC claim / GitHub's verified
+    flag) -- recorded so an operator reviewing an abusive identity can tell a real, verified
+    account from a throwaway."""
     r = requests.post(f"{COORDINATOR}/wallet/oauth",
-                      json={"provider": provider, "external_id": str(external_id), "email": email},
+                      json={"provider": provider, "external_id": str(external_id), "email": email,
+                            "email_verified": bool(email_verified)},
                       headers={"X-Wallet-Link-Secret": WALLET_LINK_SECRET}, timeout=15)
     r.raise_for_status()
     return r.json()   # {"wallet_id": ..., "is_new": ...}
@@ -93,16 +97,20 @@ async def callback(provider: str, request: Request):
     if provider == "google":
         userinfo = token.get("userinfo") or await client.userinfo(token=token)
         external_id, email = userinfo["sub"], userinfo.get("email")
+        email_verified = bool(userinfo.get("email_verified"))
     else:   # github -- no OIDC userinfo; a separate API call, and email can be private
         profile = (await client.get("user", token=token)).json()
         external_id = profile["id"]
         email = profile.get("email")
+        email_verified = False
         if not email:
             emails = (await client.get("user/emails", token=token)).json()
             primary = next((e for e in emails if e.get("primary")), None)
-            email = (primary or emails[0])["email"] if emails else None
+            chosen = primary or (emails[0] if emails else None)
+            if chosen:
+                email, email_verified = chosen["email"], bool(chosen.get("verified"))
 
-    link = _link_wallet(provider, external_id, email)
+    link = _link_wallet(provider, external_id, email, email_verified)
     request.session["wallet_id"] = link["wallet_id"]
     request.session["email"] = email
     return RedirectResponse(url="/")

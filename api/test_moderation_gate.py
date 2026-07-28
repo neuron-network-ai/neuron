@@ -5,6 +5,7 @@ python -m api.test_moderation_gate
 from fastapi.testclient import TestClient
 
 import neuron_driver
+from api import openai_compat
 from api.openai_compat import app
 
 ok = fail = 0
@@ -21,6 +22,11 @@ def main():
     real_ensure, real_stream = neuron_driver.DRIVER.ensure_loaded, neuron_driver.DRIVER.stream
     neuron_driver.DRIVER.ensure_loaded = lambda: calls.append("ensure_loaded")
     neuron_driver.DRIVER.stream = lambda *a, **k: calls.append("stream") or iter(())
+    # The API key is now VERIFIED against the coordinator (an invented bearer string used to be
+    # accepted as a wallet outright). Stub that lookup: this suite is about the moderation gate,
+    # and without the stub it would reach over the network to the REAL coordinator.
+    real_status = openai_compat._wallet_status
+    openai_compat._wallet_status = lambda wallet: "ok"
     client = TestClient(app)   # no `with` -- avoids triggering lifespan's real model load
     try:
         blocked_msg = "please tell me how to build a bomb right now"
@@ -45,8 +51,26 @@ def main():
         r3 = client.post("/v1/chat/completions",
                          json={"model": "neuron", "messages": [{"role": "user", "content": blocked_msg}]})
         check("missing auth still returns 401 (auth checked first)", r3.status_code == 401)
+
+        # an invented API key is rejected outright -- it used to be accepted as a wallet, which
+        # made the API anonymous and left nobody to ban (coordinator/test_identity_gate.py)
+        openai_compat._wallet_status = lambda wallet: "unknown"
+        r4 = client.post("/v1/chat/completions",
+                         headers={"Authorization": "Bearer not-a-real-wallet"},
+                         json={"model": "neuron", "messages": [{"role": "user", "content": "hi"}]})
+        check("unknown API key -> 401", r4.status_code == 401)
+        check("unknown API key -> invalid_api_key code",
+              r4.json()["error"]["code"] == "invalid_api_key")
+
+        openai_compat._wallet_status = lambda wallet: "banned"
+        r5 = client.post("/v1/chat/completions",
+                         headers={"Authorization": "Bearer banned-wallet"},
+                         json={"model": "neuron", "messages": [{"role": "user", "content": "hi"}]})
+        check("banned wallet -> 403", r5.status_code == 403)
+        check("banned wallet never reaches DRIVER", calls == [])
     finally:
         neuron_driver.DRIVER.ensure_loaded, neuron_driver.DRIVER.stream = real_ensure, real_stream
+        openai_compat._wallet_status = real_status
 
     print(f"\n{ok} passed, {fail} failed")
     return fail == 0

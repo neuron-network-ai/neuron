@@ -44,8 +44,13 @@ def bal(nid):
 
 
 def main():
+    global WALLET
     models.init_db()
     genesis.seed_genesis()
+    # /infer now refuses any wallet that isn't backed by a real Google/GitHub login (that gate
+    # is what makes a ban un-evadable -- see coordinator/test_identity_gate.py), so this test's
+    # spending wallet has to be a genuine OAuth-minted one rather than an invented string.
+    WALLET, _ = models.wallet_for_oauth("test", "complete-auth-user", "test@example.com")
     models.transfer(config.GENESIS_BUCKETS_ECOSYSTEM_ID, WALLET, 100.0)   # fund the test wallet
     reg("driver-a", 0, S1 - 1)
     reg("middle-c", S1, S2 - 1)

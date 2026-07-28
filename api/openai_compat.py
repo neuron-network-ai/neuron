@@ -31,6 +31,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 
+import requests
 from fastapi import APIRouter, FastAPI, Header
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
@@ -84,7 +85,14 @@ def _error_response(status: int, message: str, err_type: str, code: str):
 
 
 def _auth(authorization: str | None):
-    """Returns the wallet (str) or a JSONResponse error. The bearer key = NRN wallet."""
+    """Returns the wallet (str) or a JSONResponse error. The bearer key = NRN wallet.
+
+    The key is VERIFIED against the coordinator, not merely parsed: it must resolve to a real
+    wallet that came from a Google/GitHub login and isn't banned. Previously any non-empty
+    string was accepted as a wallet id, so the API was effectively anonymous -- an abuser could
+    invent a key, and (before /wallet/faucet was gated) fund it, with no identity behind it and
+    nothing to ban. A wallet that fails here can still be refused later at /infer; this just
+    fails fast with a proper OpenAI-shaped 401 instead of a confusing downstream error."""
     if not authorization or not authorization.lower().startswith("bearer "):
         return _error_response(
             401, "Missing bearer token. Use your NRN wallet address as the API key.",
@@ -93,7 +101,46 @@ def _auth(authorization: str | None):
     if not wallet:
         return _error_response(401, "Empty API key.", "invalid_request_error",
                                "invalid_api_key")
+    status = _wallet_status(wallet)
+    if status == "unknown":
+        return _error_response(
+            401, "Unknown API key. Sign in with Google or GitHub in the Chat UI to get your "
+                 "NRN wallet address.", "invalid_request_error", "invalid_api_key")
+    if status == "banned":
+        return _error_response(
+            403, "This wallet is blocked for repeated content-policy violations "
+                 "(see SAFETY.md).", "permission_error", "account_blocked")
     return wallet
+
+
+# wallet -> (checked_at, status). Without this, verifying the key would add a blocking HTTP
+# round-trip to the coordinator on EVERY API call. The TTL is short because it only delays how
+# fast a ban shows up on this fast path -- /infer re-checks both the identity and the ban on
+# every request and is the authoritative gate, so a stale entry here can never actually let a
+# banned wallet through to the node network.
+_wallet_cache = {}
+_WALLET_CACHE_TTL_S = 60
+
+
+def _wallet_status(wallet):
+    """'ok' | 'banned' | 'unknown'. Returns 'ok' when the coordinator is unreachable: a blip
+    must not take the API down, and /infer still refuses an unbacked or banned wallet."""
+    now = time.time()
+    cached = _wallet_cache.get(wallet)
+    if cached and now - cached[0] < _WALLET_CACHE_TTL_S:
+        return cached[1]
+    try:
+        r = requests.get(f"{COORDINATOR}/wallet/{wallet}", timeout=8)
+    except requests.RequestException:
+        return "ok"
+    if r.status_code == 404:
+        status = "unknown"
+    elif r.status_code == 200 and r.json().get("moderation_banned"):
+        status = "banned"
+    else:
+        status = "ok"
+    _wallet_cache[wallet] = (now, status)
+    return status
 
 
 def _moderate_or_error(text: str, wallet_id: str = None):

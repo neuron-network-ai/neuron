@@ -268,26 +268,40 @@ def moderation_violation_tests():
           resp == {"wallet_id": "w-fresh-endpoint", "violation_count": 1, "banned": False})
 
     # ---- /infer refuses a banned wallet BEFORE any hold/chain-building happens ---- #
-    models.ensure_account("w-banned-infer", "wallet")
-    models.transfer(config.GENESIS_BUCKETS_ECOSYSTEM_ID, "w-banned-infer", 100.0)
+    # These wallets are minted through wallet_for_oauth rather than ensure_account: /infer now
+    # also refuses any wallet with no Google/GitHub login behind it, so an invented wallet id
+    # would 403 for the WRONG reason and the ban assertion below would pass vacuously.
+    banned_wallet, _ = models.wallet_for_oauth("test", "banned-user", "banned@example.com")
+    models.transfer(config.GENESIS_BUCKETS_ECOSYSTEM_ID, banned_wallet, 100.0)
     for _ in range(config.MODERATION_BAN_THRESHOLD):
-        models.record_violation("w-banned-infer", "in", "x")
-    check("setup: wallet is now banned", models.wallet_moderation_status("w-banned-infer")["banned"])
-    balance_before = models.get_ledger("w-banned-infer")["balance"]
+        models.record_violation(banned_wallet, "in", "x")
+    check("setup: wallet is now banned", models.wallet_moderation_status(banned_wallet)["banned"])
+    balance_before = models.get_ledger(banned_wallet)["balance"]
     try:
-        infer(InferBody(prompt="hello", max_tokens=10, wallet_id="w-banned-infer"))
+        infer(InferBody(prompt="hello", max_tokens=10, wallet_id=banned_wallet))
         check("/infer rejects a banned wallet (403)", False)
     except HTTPException as e:
-        check("/infer rejects a banned wallet (403)", e.status_code == 403)
+        check("/infer rejects a banned wallet (403)",
+              e.status_code == 403 and "blocked for repeated" in str(e.detail))
     check("a rejected banned-wallet request never touches its balance (no hold attempted)",
-          models.get_ledger("w-banned-infer")["balance"] == balance_before)
+          models.get_ledger(banned_wallet)["balance"] == balance_before)
 
-    # a well-funded, NOT-banned wallet clears the ban gate (whatever it fails on next --
-    # an empty test network -- is unrelated to moderation, proving the gate isn't over-firing)
-    models.ensure_account("w-clean", "wallet")
-    models.transfer(config.GENESIS_BUCKETS_ECOSYSTEM_ID, "w-clean", 100.0)
+    # ---- /infer also refuses a wallet with no login behind it (the anonymous-access gate) ---- #
+    models.ensure_account("w-no-login", "wallet")
+    models.transfer(config.GENESIS_BUCKETS_ECOSYSTEM_ID, "w-no-login", 100.0)
     try:
-        infer(InferBody(prompt="hello", max_tokens=10, wallet_id="w-clean"))
+        infer(InferBody(prompt="hello", max_tokens=10, wallet_id="w-no-login"))
+        check("/infer rejects a funded wallet that never logged in", False)
+    except HTTPException as e:
+        check("/infer rejects a funded wallet that never logged in",
+              e.status_code == 403 and "not linked" in str(e.detail))
+
+    # a well-funded, logged-in, NOT-banned wallet clears both gates (whatever it fails on next --
+    # an empty test network -- is unrelated to moderation, proving the gate isn't over-firing)
+    clean_wallet, _ = models.wallet_for_oauth("test", "clean-user", "clean@example.com")
+    models.transfer(config.GENESIS_BUCKETS_ECOSYSTEM_ID, clean_wallet, 100.0)
+    try:
+        infer(InferBody(prompt="hello", max_tokens=10, wallet_id=clean_wallet))
         check("clean wallet passes the moderation gate", True)
     except HTTPException as e:
         check("clean wallet passes the moderation gate (fails later, not with 403)",
