@@ -165,6 +165,15 @@ class Agent:
         secret = self.cfg.get("register_secret")
         if secret:
             headers["X-Register-Secret"] = secret
+        # Self-recovery: a re-registration of an already-trusted/verified node_id with no
+        # secret is rejected as a possible hijack (coordinator/main.py's guard) UNLESS it
+        # proves ownership via the node's own CURRENT token. Never exercised before this
+        # session -- setup() only ever called register() for a brand-new node; the new
+        # stale-relay-ticket refresh (see setup()) is the first path that re-registers an
+        # ALREADY-credentialed node, and without this header that legitimately hits a 409.
+        existing_token = self.cfg.get("node_token")
+        if existing_token:
+            headers["X-Node-Token"] = existing_token
         r = requests.post(f"{self.base}/node/register", json=body, headers=headers, timeout=15)
         r.raise_for_status()
         data = r.json()
