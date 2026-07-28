@@ -208,6 +208,71 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
   relay fabric; coordination: regional → DHT; topology: many small pipelines; phased plan; Petals
   as the proven reference model; and the rule: don't build the scale layer before the first stranger).
 
+### [P17] 🟢 Anyone could mint a funded wallet with no login — the whole ban system was decorative — fixed (2026-07-29)
+- **`POST /wallet/faucet` was completely ungated**, unlike its two sibling endpoints
+  (`/wallet/oauth`, `/wallet/{id}/violation`), which both verify `X-Wallet-Link-Secret`. And
+  `models.claim_faucet` opens with `INSERT OR IGNORE INTO ledger … VALUES (?, 'wallet')` — it
+  *creates* the row for whatever string it is handed. Chained with `api/openai_compat.py`'s
+  `_auth()`, which accepted any non-empty bearer string as a wallet with zero validation:
+
+      POST /wallet/faucet {"wallet_id":"abuse-1"}  -> funded wallet, no account, no cost
+      use "abuse-1" as the API key                 -> full anonymous model access
+      banned -> mint "abuse-2"                     -> unlimited, instant ban reset
+
+  So every ban was one HTTP call away from being reset, and there was no real identity behind
+  any request to act on. `SAFETY.md`'s "repeat violations escalate against your wallet
+  identity" was, in practice, unenforceable.
+- **Fix (three gates):** the faucet now requires the operator secret **and** a wallet already
+  linked to a real Google/GitHub login; **`/infer` refuses any wallet with no login behind it**
+  — the load-bearing one, since every driver must call `/infer` to get a node chain, so it is
+  the one check a user cannot patch out of their own client; and the API verifies bearer keys
+  against the coordinator (60 s TTL cache, so it is not a per-request round-trip).
+- **Plus the operator lever that was missing:** bans previously only fired via the automatic
+  `MODERATION_BAN_THRESHOLD`, which counts violations the **driver self-reports** — and for a
+  self-hosted install the driver is the user's own machine, so a stripped client never reports
+  itself. Added `/admin` (identity console: provider, provider-verified-email flag, violation
+  and request counts, last seen, per-identity history, ban/unban) backed by secret-gated
+  endpoints. 23 regression tests in `coordinator/test_identity_gate.py`.
+- **Still true:** a determined abuser can make a fresh Google account (`SAFETY.md` says so
+  honestly), and **content policy remains unenforceable on a driver NEURON does not run** —
+  that user holds the plaintext and the moderation code. Against them the control is not
+  content-based at all: they need a real account to get a chain, and that account can be banned.
+- **Also added:** `requests`-table retention (`NEURON_REQUEST_RETENTION_DAYS`, 90d default,
+  pruned on the health sweep). It is the only table that grows with *traffic* rather than users
+  — ~1.25 GB/day at 1M users × 5 requests, which no single-file SQLite on the 1 GB coordinator
+  VM survives. Identities, ledger rows and `moderation_events` are never pruned: bans depend on
+  them. **Open:** SQLite on a 1-core/1 GB VM will hit write-concurrency limits in the low
+  hundreds of concurrent users, well before disk — Postgres is the migration when that nears.
+
+### [P16] 🟢 Auto-placement piled every new machine on the tail, capping network throughput at ONE request — fixed (2026-07-29)
+- **Found by simulating the founder's question "what happens when 10 users hit send at once?"**
+  `router.suggest_placement` advised a joining node to *"replicate the LAST segment"* once the
+  chain was complete. With layers split 0-9 / 10-18 / 19-27, seven machines joining a 3-node
+  network **all** landed on 19-27. Every request still funnelled through the single node holding
+  0-9 and the single node holding 10-18 — and `agent/node_server.py`'s module-level
+  `compute_lock` serialises each machine's forward pass, so those two ran strictly one request
+  at a time. Simulated: **node_a served 10/10 concurrent requests, node_b 10/10.** Ten machines
+  delivered one machine's throughput; the seven added zero.
+- **Why it hid:** the policy's own comment claimed replicating the tail "adds throughput", and
+  `[P8]`'s segment-level replication (S18) genuinely does work — `build_chain` picks among
+  replicas correctly at *every* cursor position. The routing engine was never the problem; it
+  was being handed a lopsided topology. Nothing tested the resulting layout, only that a single
+  request could be routed.
+- **Fix:** placement now replicates the **least-replicated stage**, ties breaking toward the
+  earliest (every request traverses the front first, so a shortfall there throttles everything
+  behind it). Same 10-machine simulation now spreads 4/3/3 across stages, busiest node 5/10
+  instead of 10/10. Regression tests in `coordinator/test_placement.py` assert the layout is
+  balanced and that many distinct parallel chains exist.
+- **Still true after the fix (physics, not bugs):** concurrent users ≈ machines ÷ machines-per-
+  chain, so ~3 machines per concurrent user at 28 layers — 100k concurrent needs ~300k machines.
+  And `compute_lock` means **no batching**: a datacenter GPU amortises one forward pass across
+  many users, this cannot, which is a genuine structural ceiling. Related: `[P13]` — latency,
+  not concurrency, is the nearer blocker (a session is ~40 min wall-clock today).
+- **Also corrected the same day:** `TOKENOMICS.md` §0/§8's "green AI / no new power draw" claim,
+  which §11.5 already contradicted (*"the ~0.1 W green figure describes idle, not inference"*).
+  Consumer-CPU inference costs *more* energy per token than a datacenter GPU; the defensible
+  claims are no-new-hardware, sovereignty, and privacy-by-architecture.
+
 ### [P12] 🟡 Ledger MINTS per request + payout path is unauthenticated (economics integrity)
 > **PAYOUT-AUTH HALF RESOLVED (2026-07-25, Session 19).** `/infer` now issues a per-request
 > `complete_token` and records the chain it chose; `/complete` requires that token (wrong/missing →

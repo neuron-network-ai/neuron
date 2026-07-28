@@ -10,6 +10,7 @@ a machine that lifts throughput rather than deepening the pipeline (PROBLEMS.md 
 assembled chain is still the usual driver -> middle -> last shape, so the drivers are
 unchanged; only which node fills a slot varies per request.
 """
+import collections
 import random
 
 from coordinator import config, models
@@ -85,10 +86,20 @@ def suggest_placement(now=None, total=None):
     """Advise a JOINING node which layer slice to serve (Session 20 — zero-config open join).
 
     A stranger shouldn't pick layer numbers. Policy: if the eligible chain has a coverage GAP,
-    fill the first one; otherwise the chain is complete, so replicate the LAST segment — it adds
-    throughput (S18 replica routing) and is the segment proof-of-compute can verify (S16). Returns
-    {layer_start, layer_end, role, reason}. Advisory only; the node still registers normally.
-    `total` = serving model's layer count (defaults to config.TOTAL_LAYERS).
+    fill the first one; otherwise the chain is complete, so replicate the segment that has the
+    FEWEST replicas today. Returns {layer_start, layer_end, role, reason}. Advisory only; the
+    node still registers normally. `total` = serving model's layer count.
+
+    This used to always replicate the LAST segment, which silently capped the whole network's
+    throughput at one request at a time. A pipeline is only as parallel as its least-replicated
+    stage: with layers split 0-9 / 10-18 / 19-27, seven machines joining a 3-node network all
+    piled onto 19-27, so every request still funnelled through the single node holding 0-9 and
+    the single node holding 10-18 -- and node_server.py's module-level `compute_lock` serialises
+    each machine's forward pass, so those two ran strictly one request at a time. Ten machines
+    delivered one machine's throughput. Balancing replicas across stages is what actually turns
+    added machines into added concurrency (each complete extra set of replicas = one more
+    request served in parallel). Ties break toward the EARLIEST segment: every request traverses
+    the front of the pipeline first, so a shortfall there throttles everything behind it.
     """
     total = total if total is not None else config.TOTAL_LAYERS
     chain, missing = build_chain(now, total=total)
@@ -96,11 +107,18 @@ def suggest_placement(now=None, total=None):
         start, end = missing[0]
         return {"layer_start": start, "layer_end": end, "role": "fill-gap",
                 "reason": f"chain is missing layers {start}-{end}"}
-    last = chain[-1]      # complete chain => non-empty; last node defines the final segment
-    return {"layer_start": last["layer_start"], "layer_end": last["layer_end"],
-            "role": "replica-last",
-            "reason": "chain is complete; replicate the last segment to add throughput "
-                      "(verifiable via proof-of-compute)"}
+    # Count how many eligible online nodes serve each exact segment, then advise the joiner to
+    # copy whichever segment in the serving chain is currently the scarcest.
+    nodes = [n for n in models.online_nodes(now) if n.get("eligible")]
+    replicas = collections.Counter((n["layer_start"], n["layer_end"]) for n in nodes)
+    idx, seg = min(enumerate(chain),
+                   key=lambda t: (replicas[(t[1]["layer_start"], t[1]["layer_end"])], t[0]))
+    count = replicas[(seg["layer_start"], seg["layer_end"])]
+    return {"layer_start": seg["layer_start"], "layer_end": seg["layer_end"],
+            "role": "replica-balance",
+            "reason": f"chain is complete; layers {seg['layer_start']}-{seg['layer_end']} are "
+                      f"the least-replicated stage ({count} node(s), stage {idx + 1} of "
+                      f"{len(chain)}) -- copying it adds real concurrency"}
 
 
 def chain_public(chain):
