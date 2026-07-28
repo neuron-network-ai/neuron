@@ -18,18 +18,22 @@ Donation modes (config `donation_mode`):
 `low memory` (< 500 MB) always pauses, in every mode — that's a safety rail, not a
 donation choice. (Thermal throttling is a future rail; psutil temps aren't portable.)
 
-ARM-compatible: pure Python + psutil + ctypes only (no x86-specific code).
-Idle detection: Windows GetLastInputInfo; Linux xprintidle if present, else a
-headless server (no interactive session) is treated as always-idle.
+ARM-compatible: pure Python + psutil + ctypes only (no x86-specific code, no pyobjc).
+Idle detection: Windows GetLastInputInfo; macOS CGEventSourceSecondsSinceLastEventType
+(CoreGraphics via ctypes); Linux xprintidle if present; else a headless server (no
+interactive session) is treated as always-idle.
 """
 import ctypes
+import ctypes.util
 import platform
 import shutil
 import subprocess
 
 import psutil
 
-_IS_WINDOWS = platform.system() == "Windows"
+_SYSTEM = platform.system()
+_IS_WINDOWS = _SYSTEM == "Windows"
+_IS_MACOS = _SYSTEM == "Darwin"
 MIN_FREE_RAM_BYTES = 500 * 1024 * 1024
 
 # mode -> policy. cpu_ceiling = pause (yield) if system CPU exceeds this; honor_user =
@@ -43,6 +47,21 @@ DONATION_MODES = {
 DEFAULT_MODE = "idle"
 
 
+def _macos_idle_seconds():
+    """Seconds since the last HID (mouse/keyboard) event, via CoreGraphics. Pure ctypes
+    against the system framework — no pyobjc dependency, consistent with the rest of this
+    module. Needs no special OS permission (unlike some other input-monitoring APIs)."""
+    lib = ctypes.util.find_library("CoreGraphics") \
+        or "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"
+    cg = ctypes.CDLL(lib)
+    cg.CGEventSourceSecondsSinceLastEventType.restype = ctypes.c_double
+    cg.CGEventSourceSecondsSinceLastEventType.argtypes = [ctypes.c_int, ctypes.c_uint32]
+    kCGEventSourceStateHIDSystemState = 1
+    kCGAnyInputEventType = 0xFFFFFFFF
+    return cg.CGEventSourceSecondsSinceLastEventType(kCGEventSourceStateHIDSystemState,
+                                                      kCGAnyInputEventType)
+
+
 def seconds_since_input():
     """Seconds since last mouse/keyboard input; a large number if unknown/headless."""
     if _IS_WINDOWS:
@@ -54,6 +73,13 @@ def seconds_since_input():
             elapsed_ms = ctypes.windll.kernel32.GetTickCount() - info.dwTime
             return elapsed_ms / 1000.0
         return 1e9
+    if _IS_MACOS:
+        # previously fell straight through to the "headless -> always idle" default below,
+        # which meant the idle donation mode never yielded to an actively-used Mac — fixed.
+        try:
+            return _macos_idle_seconds()
+        except OSError:
+            return 1e9   # framework not loadable (unexpected on real macOS) -> fail safe
     if shutil.which("xprintidle"):
         try:
             out = subprocess.run(["xprintidle"], capture_output=True, text=True, timeout=3)

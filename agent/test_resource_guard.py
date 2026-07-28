@@ -8,6 +8,10 @@ import types
 
 import agent.resource_guard as rg
 
+_real_seconds_since_input = rg.seconds_since_input  # reasons() below permanently overwrites
+                                                     # rg.seconds_since_input with a lambda,
+                                                     # so later tests need this saved reference
+                                                     # to exercise the REAL dispatch logic.
 ok = fail = 0
 
 
@@ -67,6 +71,23 @@ def main():
 
     # ---- back-compat: explicit ceiling override (old max_cpu_pct) ----
     check("override raises the ceiling", rg.ResourceGuard("idle", overrides={"cpu_ceiling": 90.0}).cpu_ceiling == 90)
+
+    # ---- macOS idle detection dispatch (this dev machine is Windows, so exercise the
+    # branch by flipping the platform flags rather than actually being on a Mac) ----
+    real_windows, real_macos, real_macos_fn = rg._IS_WINDOWS, rg._IS_MACOS, rg._macos_idle_seconds
+    try:
+        rg._IS_WINDOWS, rg._IS_MACOS = False, True
+        rg._macos_idle_seconds = lambda: 42.0
+        check("macOS: dispatches to CoreGraphics idle seconds, not the headless fallback",
+              _real_seconds_since_input() == 42.0)
+
+        def _boom():
+            raise OSError("framework not loadable")
+        rg._macos_idle_seconds = _boom
+        check("macOS: framework load failure fails safe to always-idle (1e9), not a crash",
+              _real_seconds_since_input() == 1e9)
+    finally:
+        rg._IS_WINDOWS, rg._IS_MACOS, rg._macos_idle_seconds = real_windows, real_macos, real_macos_fn
 
     print(f"\n{ok} passed, {fail} failed")
     raise SystemExit(1 if fail else 0)

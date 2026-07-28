@@ -333,6 +333,27 @@ finding independently spot-verified by reading the actual source before acting o
 
 ---
 
+### [P15] 🟢 macOS idle-detection silently always-idle — fixed (2026-07-28)
+The founder's friend (the planned first real stranger) has a Mac. `INSTALL.md` lists macOS as
+supported for the source-install path, but `agent/resource_guard.py`'s idle detection only
+handled Windows (`GetLastInputInfo`) and Linux (`xprintidle`) — on macOS neither branch
+matched, so it silently fell through to the headless-server default (`return 1e9`, "always
+idle"). Under the default `idle` donation mode (which is supposed to yield the moment the
+owner touches the machine), a Mac node would never actually detect real user activity and
+would keep donating compute while the owner was using it — defeating the mode's whole point.
+Not a crash, a silent correctness gap, found by directly re-checking the code rather than
+assuming "macOS: supported" in `INSTALL.md` was accurate. **Fix:** `_macos_idle_seconds()` —
+pure `ctypes` call to `CGEventSourceSecondsSinceLastEventType` (CoreGraphics), no `pyobjc`
+dependency, matching the module's existing minimal-deps style; needs no special OS permission.
+Wired into `seconds_since_input()`'s dispatch, fails safe to always-idle if the framework
+somehow isn't loadable. Never tested on real macOS hardware (this dev environment is
+Windows) — verified by flipping the platform-detection flags and mocking the CoreGraphics
+call (`agent/test_resource_guard.py`, 2 new cases, 18/18 total). **Still open:** no macOS
+packaging exists at all (no `.dmg`/PyInstaller build — only Windows has a real installer);
+the friend would need to run the source-install path (`INSTALL.md`).
+
+---
+
 ## Not-doing (deliberately, for now)
 - Chasing single-user latency parity with GPU clouds — unwinnable, wrong hill.
 - Productionising quantization before there are real users (measure first, integrate later).
