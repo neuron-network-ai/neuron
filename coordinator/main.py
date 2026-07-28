@@ -377,7 +377,7 @@ def infer(body: InferBody):
         raise HTTPException(status_code=402,
                             detail=f"insufficient NRN balance; this request needs "
                                    f"{hold_amount} NRN held")
-    models.create_request(request_id, body.prompt, body.max_tokens, plan_node_ids,
+    models.create_request(request_id, len(body.prompt), body.max_tokens, plan_node_ids,
                           complete_token, wallet_id=body.wallet_id, hold_amount=hold_amount)
     return {"chain": router.chain_public(chain), "request_id": request_id,
             "complete_token": complete_token, "hold_amount": hold_amount}
@@ -400,9 +400,9 @@ def complete(request_id: str, body: CompleteBody):
     tokens = max(0, min(int(body.tokens_generated), int(req["max_tokens"] or body.tokens_generated)))
     # server-side recount clamp, same trust posture as the tokens_generated clamp above: the
     # coordinator can't tokenize (stays torch-free) but CAN bound a lying driver's report
-    # against the prompt it already stored, so a lie can only under-report, never over-charge
-    # past the hold.
-    prompt_tokens = max(0, min(int(body.prompt_tokens), len(req.get("prompt") or "")))
+    # against the prompt LENGTH it recorded at /infer (never the text itself, see SAFETY.md),
+    # so a lie can only under-report, never over-charge past the hold.
+    prompt_tokens = max(0, min(int(body.prompt_tokens), req.get("prompt_len") or 0))
     # complete_request's UPDATE is conditioned on WHERE status='pending' and reports whether IT
     # was the call that flipped the row — the true single-writer guard. The status check above
     # (line ~352) is only a fast pre-check; two concurrent /complete calls with the SAME valid

@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS ledger (
 CREATE TABLE IF NOT EXISTS requests (
     request_id       TEXT PRIMARY KEY,
     prompt           TEXT,
+    prompt_len       INTEGER,
     max_tokens       INTEGER,
     status           TEXT NOT NULL DEFAULT 'pending',
     created_at       REAL NOT NULL,
@@ -117,6 +118,17 @@ def init_db():
                 c.execute(f"ALTER TABLE requests ADD COLUMN {col} TEXT")
         if "hold_amount" not in rcols:
             c.execute("ALTER TABLE requests ADD COLUMN hold_amount REAL")
+        # SAFETY.md gap closed: the coordinator used to store every request's FULL raw prompt
+        # text forever (only ever needed for its LENGTH, to clamp a driver's self-reported
+        # prompt_tokens in /complete against something at settlement time). Backfill prompt_len
+        # for existing rows from their already-stored prompt, then stop writing prompt text at
+        # all going forward (create_request() below now takes a length, not text) -- existing
+        # rows' prompt text is left as-is here (a retroactive scrub is a separate, deliberate
+        # decision, not bundled into a schema migration).
+        if "prompt_len" not in rcols:
+            c.execute("ALTER TABLE requests ADD COLUMN prompt_len INTEGER")
+            c.execute("UPDATE requests SET prompt_len = LENGTH(prompt) "
+                     "WHERE prompt_len IS NULL AND prompt IS NOT NULL")
         # Fixed-supply ledger (Workstream B): every pre-existing ledger row (all real nodes
         # today) becomes account_type='node' via the column default -- zero data loss, zero
         # behavior change for existing rows. Buckets/wallets are new rows, not migrated ones.
@@ -488,14 +500,18 @@ def wallet_moderation_status(wallet_id):
 # --------------------------------------------------------------------------- #
 # Requests
 # --------------------------------------------------------------------------- #
-def create_request(request_id, prompt, max_tokens, plan_node_ids=None, complete_token=None,
+def create_request(request_id, prompt_len, max_tokens, plan_node_ids=None, complete_token=None,
                    wallet_id=None, hold_amount=None):
+    """Stores prompt_len (a character COUNT), never the prompt text itself -- the only
+    persistent use was ever /complete's anti-cheat clamp (`min(reported prompt_tokens, actual
+    length)`), which needs a number, not the content. The `prompt` TEXT column stays in the
+    schema for pre-existing rows' history; new rows leave it NULL (see SAFETY.md)."""
     with _db() as c:
         c.execute(
-            "INSERT INTO requests (request_id, prompt, max_tokens, status, created_at, "
+            "INSERT INTO requests (request_id, prompt_len, max_tokens, status, created_at, "
             "plan_node_ids, complete_token, wallet_id, hold_amount) "
             "VALUES (?,?,?, 'pending', ?, ?, ?, ?, ?)",
-            (request_id, prompt, max_tokens, time.time(),
+            (request_id, prompt_len, max_tokens, time.time(),
              json.dumps(plan_node_ids) if plan_node_ids is not None else None,
              complete_token, wallet_id, hold_amount),
         )

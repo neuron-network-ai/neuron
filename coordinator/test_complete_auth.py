@@ -140,6 +140,29 @@ def main():
         check(f"{nid} credited exactly the single-completion amount (no multiplication)",
               abs(got - amount) < 1e-9)
 
+    # ---- prompt privacy: the coordinator stores a LENGTH, never the prompt text ----
+    real_prompt = "how do I bake a sourdough loaf"
+    out3 = infer(InferBody(prompt=real_prompt, max_tokens=50, wallet_id=WALLET))
+    rid3, token3 = out3["request_id"], out3["complete_token"]
+    chain3_ids = [c["node_id"] for c in out3["chain"]]
+    stored = models.get_request(rid3)
+    check("stored request has no prompt text (column stays NULL)", stored.get("prompt") is None)
+    check("stored request records the correct LENGTH instead",
+          stored.get("prompt_len") == len(real_prompt))
+    # a driver that (lies and) over-reports prompt_tokens gets clamped using prompt_len --
+    # not the removed prompt text -- as the ceiling. Verify by checking the SETTLED COST
+    # actually charged matches the clamped value, not the inflated 530 the caller claimed.
+    from coordinator import config as _cfg
+    wallet_before = bal(WALLET)          # AFTER /infer's hold already left the wallet
+    complete(rid3, CompleteBody(tokens_generated=10, duration_ms=100, node_ids=chain3_ids,
+                                complete_token=token3, prompt_tokens=len(real_prompt) + 500))
+    refund = bal(WALLET) - wallet_before  # settle() refunds hold_amount - actual_cost back
+    actual_cost = out3["hold_amount"] - refund
+    expected_weighted = 10 + len(real_prompt) * _cfg.INPUT_WEIGHT   # clamped prompt_tokens
+    expected_cost = expected_weighted / 1000 * _cfg.PRICE_PER_1K_WEIGHTED
+    check("prompt_tokens is clamped to prompt_len, not the inflated 530 the caller reported",
+          abs(actual_cost - expected_cost) < 1e-9)
+
     # ---- unknown request -> 404 ----
     try:
         complete("no-such-id", CompleteBody(tokens_generated=1, duration_ms=1,

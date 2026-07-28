@@ -87,12 +87,19 @@ A blocked request/response logs: timestamp, direction (input/output), category, 
 hashed identity (not raw), and a snippet truncated to 40 characters — **on the driver machine
 only, never sent to the coordinator.**
 
-**Separately, and independent of this policy:** the coordinator's database already stores the
-full raw prompt text of every request (`coordinator/models.py`'s `requests` table), for
-operational reasons unrelated to moderation. `SECURITY.md`'s "zero personal data collected"
-claim is scoped to *node* telemetry (node id, layer range, core/RAM counts, IP) and is accurate
-as scoped — but if you're a chat/API user, your prompts are not private from the coordinator
-operator today. Stated here plainly rather than left implicit.
+**Update:** the coordinator used to also store the full raw prompt text of every request in
+its own database (`coordinator/models.py`'s `requests` table) — for an operational reason
+unrelated to moderation (bounding a driver's self-reported token count against something real
+at settlement time), but it was full plaintext, sitting there indefinitely, readable by
+whoever has DB access. That only ever needed the prompt's *length*, not its content, so the
+coordinator now stores `prompt_len` (a character count) instead and never writes prompt text
+for new requests. Historical rows from before this change still have their old text — this
+was a stop-the-leak fix, not a retroactive scrub, and that's a separate decision. `SECURITY.md`'s
+"zero personal data collected" claim is scoped to *node* telemetry (node id, layer range,
+core/RAM counts, IP) and is accurate as scoped; for chat/API users, the prompt text itself
+still passes through the coordinator process transiently on every `/infer` call (it's part of
+the request body) even though it's no longer persisted — stated here plainly rather than left
+implicit.
 
 ---
 
