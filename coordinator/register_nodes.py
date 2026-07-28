@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import socket
+import threading
 import time
 from pathlib import Path
 
@@ -118,6 +119,14 @@ def main():
     ap.add_argument("--node-c-host", default=None,
                     help="override node_c address (e.g. run node_c locally as 127.0.0.1)")
     ap.add_argument("--node-c-port", type=int, default=None)
+    ap.add_argument("--auto-verify", action="store_true",
+                    help="also run proof-of-compute continuously against every probationary "
+                         "node found (security.proof_of_compute.verify_loop), so a new "
+                         "arrival gets promoted within --verify-interval seconds with no "
+                         "manual command ever needed -- this is the founder's own "
+                         "always-on watcher, since the coordinator itself stays torch-free "
+                         "and can't run the challenge/verify comparison on its own.")
+    ap.add_argument("--verify-interval", type=int, default=60)
     args = ap.parse_args()
     base = args.coordinator.rstrip("/")
 
@@ -132,6 +141,14 @@ def main():
     tokens = register_all(base)
     if args.register_only:
         return
+    if args.auto_verify:
+        from security import proof_of_compute
+        threading.Thread(
+            target=proof_of_compute.verify_loop,
+            args=(base, REGISTER_SECRET),
+            kwargs={"interval": args.verify_interval},
+            daemon=True, name="auto-verify",
+        ).start()
     try:
         heartbeat_loop(base, tokens)
     except KeyboardInterrupt:

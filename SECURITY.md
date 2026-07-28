@@ -13,8 +13,20 @@ A lazy/malicious node could return garbage to farm NRN without computing. To cat
 - **Honest work matches to ~1e-5; garbage or lazy (echo-the-input) cheating is off by ~25+.**
   A tolerance of `atol=0.05` cleanly separates them (verified live against a real node).
 - Code: `security/proof_of_compute.py` (verifier side; needs torch). It challenges a
-  LAST-stage node (`layers[s2:n]` + final norm). Middle-node challenges need a no-relay mode
-  on node_c (extension). The coordinator stays torch-free — it only records pass/fail.
+  LAST-stage node (`layers[s2:n]` + final norm) via `attest()`, or a MIDDLE node via a
+  **probe mode**: a config message with no `host_b` tells `node_c.py` / `agent/node_server.py`
+  to run its own layers in isolation and return the raw result instead of relaying to a next
+  hop, so it can be challenged without a real downstream chain (`attest_middle()`). The probe
+  ack echoes the node's OWN actual range, checked by the verifier — a node whose real range
+  doesn't match what the coordinator thinks it registered fails loudly instead of silently
+  passing. The coordinator stays torch-free — it only records pass/fail.
+- **Automatic, no manual command needed**: `coordinator/register_nodes.py --auto-verify` runs
+  `verify_loop()` continuously in the background alongside the existing heartbeat — it finds
+  every probationary, non-flagged node and challenges it every `--verify-interval` seconds
+  (default 60), so a new arrival gets promoted (or correctly stays probationary if it fails)
+  without anyone running the CLI by hand. This has to live in a founder-run, secret-holding
+  process (not the coordinator itself, which is deliberately torch-free and can't compute the
+  comparison) and not in every stranger's own agent (that would let anyone self-verify).
 
 ## Reputation — cheaters get flagged and cut off
 - The coordinator tracks `challenges_passed` / `challenges_failed` per node;
@@ -45,9 +57,19 @@ A lazy/malicious node could return garbage to farm NRN without computing. To cat
   built here are the foundation). Tie NRN payout to sustained good reputation.
 
 ## Open / future
-- **Verifier automation** — a periodic challenger (like the heartbeat) that attests each node
-  and reports results; currently attestations are issued manually / by the driver.
-- **Middle-node challenges** (no-relay mode on node_c) and tolerance vs bit-exactness across
-  heterogeneous hardware (a stranger's different CPU may need a looser `atol`).
+- ~~Verifier automation~~ / ~~Middle-node challenges~~ — **done**, see above.
+- Tolerance vs bit-exactness across heterogeneous hardware (a stranger's different CPU may
+  need a looser `atol` than `0.05`) — not yet needed live, no real stranger hardware tested.
 - **Sybil resistance** — one attacker spinning up many nodes. Proof-of-compute + reputation
   raise the cost, but stake/identity may be needed at real scale (ties to on-chain NRN, S17).
+- **Self-healing coverage gaps with NO existing replica** (deliberately NOT built this
+  session — see below): today, verification lets an ALREADY-REGISTERED replica become
+  usable automatically the instant it passes (routing/coverage are computed live from
+  current online+eligible status on every read, so nothing else has to happen). But if a
+  segment has ZERO nodes registered for it at all, nothing can conjure capacity from
+  nothing — closing that gap needs actively reassigning an already-assigned node's range
+  (robbing one segment to patch another) or recruiting genuine spare capacity, which means
+  extending the tested `MigrationController` state machine (currently hard-coded to trigger
+  only on a MODEL-tier change, not a same-model roster change) or building a parallel
+  mechanism. That's real, separate, riskier surgery on economically-critical, already-tested
+  code — not something to bolt on hastily alongside this session's changes.

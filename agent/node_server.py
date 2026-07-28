@@ -60,7 +60,8 @@ class NodeServer:
 
                 if mtype == "config":
                     cache, past = common.new_cache(), 0
-                    if "host_b" in msg:                      # MIDDLE relay role
+                    is_true_last = (self.hi == self.n - 1)
+                    if "host_b" in msg:                      # MIDDLE relay role (real pipeline traffic)
                         role, s1, s2 = "middle", msg["s1"], msg["s2"]
                         bconn = socket.create_connection((msg["host_b"], msg["port_b"]),
                                                          timeout=common.COLD_CONNECT_TIMEOUT_S)
@@ -69,9 +70,20 @@ class NodeServer:
                         assert back.get("ok"), f"next hop refused: {back}"
                         bconn.settimeout(common.HOT_TIMEOUT_S)
                         common.send_msg(conn, {"ok": True, "layers": self.n, "s1": s1, "s2": s2})
-                    else:                                     # LAST stage role
+                    elif is_true_last:                        # LAST stage role (real pipeline traffic)
                         role, s2 = "last", msg["s2"]
                         common.send_msg(conn, {"ok": True, "layers": msg.get("n", self.n), "s2": s2})
+                    else:
+                        # PROBE role (security/proof_of_compute.py): a config with no host_b,
+                        # on a node whose own range does NOT reach the model's final layer, can
+                        # only mean a verifier challenging this node's layers in isolation --
+                        # calling last_stage() here would be WRONG (and likely crash: this
+                        # shard was downloaded without norm/later layers, which stay on the
+                        # meta device, uninitialized). Uses OUR OWN self.lo/self.hi, never the
+                        # caller's claimed s1/s2 -- this tests what we actually loaded, not
+                        # what a challenger asserts.
+                        role, s1, s2 = "probe", self.lo, self.hi
+                        common.send_msg(conn, {"ok": True, "layers": self.n, "s1": s1, "s2": s2})
 
                 elif mtype == "act":
                     hidden = msg["hidden"]
@@ -86,6 +98,13 @@ class NodeServer:
                         resp = common.recv_msg(bconn)
                         common.send_msg(conn, {"hidden": resp["hidden"], "c_compute_ms": c_ms,
                                                "b_compute_ms": resp["b_compute_ms"]})
+                    elif role == "probe":
+                        with compute_lock:
+                            tc = time.time()
+                            h2 = common.mid_stage(self.model, s1, s2, hidden, cache, past)
+                            c_ms = (time.time() - tc) * 1000
+                        past += q
+                        common.send_msg(conn, {"hidden": h2, "c_compute_ms": c_ms})
                     else:  # last
                         with compute_lock:
                             tb = time.time()

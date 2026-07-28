@@ -49,13 +49,15 @@ def serve(conn, addr):
                 s1, s2 = msg["s1"], msg["s2"]
                 ensure_loaded(s1, s2)
                 cache, past = common.new_cache(), 0
-                # open + configure our own connection to node_b (the last stage)
-                bconn = socket.create_connection((msg["host_b"], msg["port_b"]),
-                                                 timeout=common.COLD_CONNECT_TIMEOUT_S)
-                common.send_msg(bconn, {"type": "config", "s2": s2, "n": state["n"]})
-                back = common.recv_msg(bconn)
-                assert back.get("ok"), f"node_b refused: {back}"
-                bconn.settimeout(common.HOT_TIMEOUT_S)
+                probing = "host_b" not in msg
+                if not probing:
+                    # open + configure our own connection to node_b (the last stage)
+                    bconn = socket.create_connection((msg["host_b"], msg["port_b"]),
+                                                     timeout=common.COLD_CONNECT_TIMEOUT_S)
+                    common.send_msg(bconn, {"type": "config", "s2": s2, "n": state["n"]})
+                    back = common.recv_msg(bconn)
+                    assert back.get("ok"), f"node_b refused: {back}"
+                    bconn.settimeout(common.HOT_TIMEOUT_S)
                 common.send_msg(conn, {"ok": True, "layers": state["n"], "s1": s1, "s2": s2})
 
             elif mtype == "act":
@@ -67,11 +69,17 @@ def serve(conn, addr):
                                           hidden, cache, past)
                     c_ms = (time.time() - tc) * 1000
                 past += q
-                common.send_msg(bconn, {"type": "act", "hidden": h2})    # -> node_b
-                resp = common.recv_msg(bconn)                            # <- node_b
-                common.send_msg(conn, {"hidden": resp["hidden"],
-                                       "c_compute_ms": c_ms,
-                                       "b_compute_ms": resp["b_compute_ms"]})
+                if bconn is None:
+                    # PROBE mode (security/proof_of_compute.py): a config with no host_b
+                    # means the caller wants to verify THIS node's own layers in isolation --
+                    # return the raw mid-stage output directly, no relay to a next hop.
+                    common.send_msg(conn, {"hidden": h2, "c_compute_ms": c_ms})
+                else:
+                    common.send_msg(bconn, {"type": "act", "hidden": h2})    # -> node_b
+                    resp = common.recv_msg(bconn)                            # <- node_b
+                    common.send_msg(conn, {"hidden": resp["hidden"],
+                                           "c_compute_ms": c_ms,
+                                           "b_compute_ms": resp["b_compute_ms"]})
 
             elif mtype == "bye":
                 if bconn:
