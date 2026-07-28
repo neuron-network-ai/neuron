@@ -212,7 +212,16 @@ class Agent:
         """Register + slice-info + download + start the server. Retries on failure."""
         while not self._stop.is_set():
             try:
-                if not self.cfg.get("node_id") or not self.cfg.get("node_token"):
+                # Also re-register (safe/idempotent -- the coordinator's hijack-guard allows
+                # self-recovery with the current node_token) if this is a NAT'd node whose
+                # cached relay config predates the relay-auth ticket system, or otherwise
+                # never got a ticket. Without this, an already-registered node restarting
+                # would carry that gap forever: register() is normally skipped once
+                # credentials exist, so a missing ticket could never self-heal, and the
+                # tunnel would churn forever against the relay's "bad/missing ticket" check.
+                stale_relay = self.cfg.get("behind_nat") and self.cfg.get("relay") \
+                    and not self.cfg["relay"].get("ticket")
+                if not self.cfg.get("node_id") or not self.cfg.get("node_token") or stale_relay:
                     self.register()
                 info = self.slice_info()
                 self.state.update(node_id=self.cfg["node_id"],
