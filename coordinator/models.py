@@ -480,8 +480,17 @@ def network_stats():
             "SELECT COUNT(*) AS n, COALESCE(SUM(tokens_generated),0) AS toks "
             "FROM requests WHERE status='completed'"
         ).fetchone()
+        # Workstream B found this live, TWICE: (1) excluding only __coordinator__ isn't
+        # enough once wallets exist -- a wallet's total_earned includes faucet grants and
+        # hold refunds (transfer() bumps total_earned on any credited recipient), not node
+        # compute earnings -- so account_type='node' is also required. (2) account_type=
+        # 'node' ALONE isn't enough either: __coordinator__'s ledger row was never
+        # reclassified off the schema default, so it's STILL account_type='node' -- the
+        # original query's explicit node_id exclusion was doing real work (excluding the
+        # protocol fee from "distributed to compute nodes") and had to be kept, not dropped.
         distributed = c.execute(
-            "SELECT COALESCE(SUM(total_earned),0) AS d FROM ledger WHERE node_id != ?",
+            "SELECT COALESCE(SUM(total_earned),0) AS d FROM ledger "
+            "WHERE account_type='node' AND node_id != ?",
             (config.COORDINATOR_LEDGER_ID,),
         ).fetchone()
     return {

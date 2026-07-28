@@ -166,6 +166,30 @@ def settle_tests():
     check("invariant still holds after the full settle test suite", models.supply_snapshot()["invariant_ok"])
 
     wallet_oauth_endpoint_tests()
+    network_stats_scoping_test()
+
+
+def network_stats_scoping_test():
+    """Found live on the production deploy, TWICE, in the same stat:
+    (1) total_nrn_distributed jumped by exactly a faucet grant amount -- it summed
+        total_earned for every non-coordinator ledger row, which now includes wallets.
+    (2) the first fix (account_type='node' alone) OVER-corrected: __coordinator__'s row was
+        never reclassified off the schema default, so it's STILL account_type='node' -- the
+        fee it earns started leaking back in. Needs BOTH account_type='node' AND the explicit
+        __coordinator__ exclusion."""
+    before = models.network_stats()["total_nrn_distributed"]
+    models.claim_faucet("stats-scoping-wallet", 25.0)
+    after_faucet = models.network_stats()["total_nrn_distributed"]
+    check("faucet grant to a wallet does NOT move total_nrn_distributed", after_faucet == before)
+
+    models.credit(config.COORDINATOR_LEDGER_ID, 4.0, count_request=False)
+    after_fee = models.network_stats()["total_nrn_distributed"]
+    check("a coordinator fee credit does NOT move total_nrn_distributed", after_fee == after_faucet)
+
+    models.credit("node_c", 3.0, count_request=True)   # simulate a node earning (account_type='node' by default)
+    after_node = models.network_stats()["total_nrn_distributed"]
+    check("a real node earning DOES move total_nrn_distributed",
+          round(after_node - after_fee, 6) == 3.0)
 
 
 def wallet_oauth_endpoint_tests():
