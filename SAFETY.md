@@ -20,6 +20,15 @@ dispatched to the network, and on the generated text as it streams back.
 This does **not** mean electricity/hardware use by volunteer nodes is irrelevant just because
 the content is unseen to them — see `INSTALL.md`'s node-operator disclosure.
 
+**"The driver" is no longer just one machine.** Every installed agent can now also run its
+own personal Chat UI (`agent/local_chat.py`) — a small, fixed driver shard downloaded
+separately from whatever compute range that machine happens to serve for the network. That
+means each person's own installation moderates their own requests locally, on their own
+plaintext, before anything reaches the shared network — instead of a single centralized
+website acting as the one choke point for everyone. Compute nodes stay exactly as blind as
+before either way; this only multiplies *where* the driver role can run, not what it's
+allowed to see.
+
 ---
 
 ## Prohibited uses

@@ -20,6 +20,12 @@ Add/Remove Programs entry, optional auto-start, clean uninstall that deregisters
   Writable state (`config.json`, `agent.log`, `model_slice\`) → `%LOCALAPPDATA%\NEURON` — because an
   app folder can be read-only. The frozen app creates a default `config.json` on first run (open join,
   auto-placement, `donation_mode: idle`, relay on), so a fresh install just works.
+- **Personal Chat UI bundled in** (`agent/local_chat.py`): every agent also runs its own local driver
+  + Chat UI on `http://localhost:8080` by default (`local_chat: true` in config) — a separate, fixed
+  driver slice downloaded alongside whatever compute range the coordinator assigns this machine. Pulls
+  in the same stack `ui.app` needs standalone (fastapi/uvicorn/starlette/authlib) — see the spec's
+  `datas`/`hiddenimports` for `ui.static` and `safety/blocklist.json`, which are plain data files
+  PyInstaller won't discover on its own. Set `local_chat: false` to opt out (compute-only node).
 
 ## Build (two steps)
 

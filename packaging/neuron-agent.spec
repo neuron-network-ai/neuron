@@ -21,7 +21,10 @@ datas, binaries, hiddenimports = [], [], []
 for pkg in ("torch", "transformers", "accelerate", "safetensors", "tokenizers",
             "huggingface_hub", "regex", "numpy", "psutil", "requests", "certifi",
             "filelock", "tqdm", "yaml", "packaging", "sympy", "networkx",
-            "pystray", "PIL"):    # system-tray icon
+            "pystray", "PIL",    # system-tray icon
+            # Bundled personal Chat UI (agent/local_chat.py) — the same stack ui.app /
+            # api.openai_compat need standalone: web server, sessions, OAuth client.
+            "fastapi", "starlette", "uvicorn", "itsdangerous", "authlib", "anyio", "sniffio"):
     try:
         d, b, h = collect_all(pkg)
         datas += d
@@ -34,7 +37,7 @@ for pkg in ("torch", "transformers", "accelerate", "safetensors", "tokenizers",
 # raises at import. Distribution names (not import names) go here.
 for dist in ("transformers", "torch", "tokenizers", "huggingface-hub", "safetensors",
              "accelerate", "numpy", "tqdm", "regex", "requests", "filelock", "packaging",
-             "pyyaml", "psutil"):
+             "pyyaml", "psutil", "fastapi", "starlette", "uvicorn", "itsdangerous", "authlib"):
     try:
         datas += copy_metadata(dist)
     except Exception:
@@ -43,9 +46,20 @@ for dist in ("transformers", "torch", "tokenizers", "huggingface-hub", "safetens
 # transformers loads model classes lazily — force the Qwen2 model module (our model) in.
 hiddenimports += collect_submodules("transformers.models.qwen2")
 # our own top-level modules, bundled so the frozen app can import them.
-hiddenimports += ["common", "slice_downloader", "tunnel_client",
+hiddenimports += ["common", "slice_downloader", "tunnel_client", "neuron_driver", "node_a",
                   "agent", "agent.agent", "agent.resource_guard", "agent.node_server",
-                  "agent.tray", "agent.uninstall"]
+                  "agent.tray", "agent.uninstall", "agent.local_chat",
+                  "ui", "ui.app", "ui.oauth", "api", "api.openai_compat",
+                  "safety", "safety.moderation", "rag", "rag.retriever",
+                  "coordinator", "coordinator.ledger", "coordinator.config"]
+
+# ui.app's Chat page (static HTML/JS/CSS) and the moderation blocklist are plain data files,
+# not Python — PyInstaller only follows imports, so these need to be listed explicitly or
+# the frozen personal Chat UI serves a 404 / the moderation gate can't find its blocklist.
+datas += [
+    (os.path.join(ROOT, "ui", "static"), os.path.join("ui", "static")),
+    (os.path.join(ROOT, "safety", "blocklist.json"), "safety"),
+]
 
 a = Analysis(
     # a distinct launcher (NOT agent/agent.py) so the top-level frozen script isn't named

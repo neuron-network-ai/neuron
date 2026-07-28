@@ -52,9 +52,31 @@ class _Driver:
                 print(f"[driver] loading shard (embed + layers 0..{S1 - 1} + lm_head) ...")
                 t0 = time.time()
                 tok, model, n = common.load_model_shard(0, S1, embed=True, head=True)
-                self.tok, self.model, self.n, self.eos_id = tok, model, n, tok.eos_token_id
-                print(f"[driver] ready in {time.time() - t0:.1f}s | {common.MODEL_ID} | "
-                      f"layers={n} | A owns 0..{S1 - 1}")
+                self._finish_load(tok, model, n, t0, common.MODEL_ID)
+
+    def load_from_slice(self, slice_dir):
+        """Alternate loader for a byte-range-downloaded SLICE directory (agent/local_chat.py)
+        instead of the full local HF cache ensure_loaded() reads from -- same driver role
+        (embed + layers 0..S1-1 + lm_head), same fixed S1, just a lighter on-disk footprint
+        so a personal agent install doesn't need the whole model just to run its own Chat UI.
+        The slice must have been downloaded with is_first_node=True (slice_downloader),
+        which for a tied-lm_head model pulls in everything this role needs."""
+        with self._load_lock:
+            if self.model is None:
+                from transformers import AutoConfig, AutoTokenizer
+
+                import slice_downloader
+                print(f"[driver] loading personal driver slice from {slice_dir} ...")
+                t0 = time.time()
+                model = slice_downloader.load_slice_model(slice_dir)
+                tok = AutoTokenizer.from_pretrained(slice_dir)
+                n = AutoConfig.from_pretrained(slice_dir).num_hidden_layers
+                self._finish_load(tok, model, n, t0, f"slice:{slice_dir}")
+
+    def _finish_load(self, tok, model, n, t0, source):
+        self.tok, self.model, self.n, self.eos_id = tok, model, n, tok.eos_token_id
+        print(f"[driver] ready in {time.time() - t0:.1f}s | {source} | "
+              f"layers={n} | owns 0..{S1 - 1}")
 
     # -- input helpers (caller picks chat-template vs raw text) --------------- #
     def encode_chat(self, messages):

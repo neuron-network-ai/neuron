@@ -39,6 +39,7 @@ if getattr(sys, "frozen", False):
 else:
     HERE = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, os.path.dirname(HERE))             # repo root
+from agent import local_chat                               # noqa: E402
 from agent import resource_guard                          # noqa: E402
 from agent.node_server import NodeServer                  # noqa: E402
 import slice_downloader                                   # noqa: E402
@@ -58,6 +59,11 @@ DEFAULT_CONFIG = {
     "slice_dir": "./model_slice/",
     "donation_mode": "idle", "idle_threshold_seconds": 60,
     "behind_nat": True, "log_level": "INFO",
+    # every installed agent also runs its own personal Chat UI (agent/local_chat.py) --
+    # your own front door to the network, on your own machine, off by default to the
+    # internet (127.0.0.1 only). Independent of donation_mode: pausing compute-sharing
+    # when you're active shouldn't also take away your own ability to use the network.
+    "local_chat": True, "local_chat_port": 8080,
 }
 
 
@@ -242,6 +248,20 @@ class Agent:
                 log.warning("coordinator unreachable, retrying in %ds: %s", RETRY_SECONDS, e)
                 self._stop.wait(RETRY_SECONDS)
 
+    # -- personal Chat UI (agent/local_chat.py) ------------------------------ #
+    def start_local_chat(self):
+        """Best-effort: a broken/slow local Chat UI must never stop this machine from
+        serving the network (that's the agent's primary job) -- local_chat.start() already
+        swallows its own errors, this just decides whether to call it at all."""
+        if not self.cfg.get("local_chat", True):
+            return
+        if not self.cfg.get("model_id"):
+            log.warning("local chat skipped: model_id not known yet (setup() hasn't run)")
+            return
+        driver_slice_dir = os.path.join(HERE, "driver_slice")
+        local_chat.start(self.base, self.cfg["model_id"], driver_slice_dir,
+                         port=self.cfg.get("local_chat_port", local_chat.DEFAULT_PORT))
+
     def heartbeat_loop(self):
         while not self._stop.is_set():
             reasons = ["paused by user"] if self.user_paused.is_set() else self.guard.reasons_to_pause()
@@ -355,6 +375,7 @@ class Agent:
     def run(self):
         self.setup()
         threading.Thread(target=self.migration_loop, daemon=True).start()
+        threading.Thread(target=self.start_local_chat, daemon=True).start()
         self.heartbeat_loop()
 
     def stop(self):
