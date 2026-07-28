@@ -23,6 +23,9 @@ else:
     HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
 IS_WINDOWS = platform.system() == "Windows"
+IS_MACOS = platform.system() == "Darwin"
+LAUNCHD_LABEL = "com.neuron.agent"
+LAUNCHD_PLIST_PATH = os.path.expanduser(f"~/Library/LaunchAgents/{LAUNCHD_LABEL}.plist")
 
 
 def _total_earned(cfg):
@@ -58,6 +61,10 @@ def _stop_agent():
                     p.kill()
         except Exception:
             pass
+    elif IS_MACOS:
+        # unload both stops the running process (KeepAlive-managed) and de-registers it —
+        # the plist FILE itself is removed separately in _remove_startup, mirroring Linux.
+        subprocess.run(["launchctl", "unload", "-w", LAUNCHD_PLIST_PATH], check=False)
     else:
         subprocess.run(["systemctl", "--user", "stop", "neuron-agent"], check=False)
         subprocess.run(["systemctl", "--user", "disable", "neuron-agent"], check=False)
@@ -76,6 +83,10 @@ def _remove_startup():
             pass
         except OSError:
             pass
+    elif IS_MACOS:
+        if os.path.exists(LAUNCHD_PLIST_PATH):
+            os.remove(LAUNCHD_PLIST_PATH)
+            print("  removed LaunchAgent")
     else:
         dst = os.path.expanduser("~/.config/systemd/user/neuron-agent.service")
         if os.path.exists(dst):

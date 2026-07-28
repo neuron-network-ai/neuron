@@ -4,8 +4,8 @@ agent/install.py — one-command setup on a fresh machine.
   python install.py --coordinator http://150.230.22.250:8001
 
 Creates config.json, (optionally) registers auto-start, and launches the agent in
-the background. Auto-start uses the Windows HKCU Run key or a Linux systemd --user
-service — both fully removed by uninstall.py. ARM-compatible.
+the background. Auto-start uses the Windows HKCU Run key, a macOS LaunchAgent, or a
+Linux systemd --user service — all fully removed by uninstall.py. ARM-compatible.
 
 Flags: --layer-start/--layer-end (which layers this node claims; auto-assignment is
 a later session), --no-startup (skip auto-start), --no-run (just write config).
@@ -21,6 +21,9 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
 IS_WINDOWS = platform.system() == "Windows"
+IS_MACOS = platform.system() == "Darwin"
+LAUNCHD_LABEL = "com.neuron.agent"
+LAUNCHD_PLIST_PATH = os.path.expanduser(f"~/Library/LaunchAgents/{LAUNCHD_LABEL}.plist")
 
 DEFAULT_CONFIG = {
     "coordinator": "http://150.230.22.250:8001",
@@ -54,6 +57,37 @@ def add_to_startup_windows():
     print("  added Windows auto-start (HKCU\\...\\Run : NEURONAgent)")
 
 
+def add_to_startup_macos():
+    """A per-user LaunchAgent (~/Library/LaunchAgents) — the macOS equivalent of the
+    Windows Run key / Linux systemd --user service above. RunAtLoad+KeepAlive means
+    `launchctl load -w` both registers it for next login AND starts it right now, so
+    (unlike the Linux path) no separate start_background() call is needed afterward."""
+    plist = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>{LAUNCHD_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{sys.executable}</string>
+        <string>{os.path.join(HERE, "agent.py")}</string>
+    </array>
+    <key>WorkingDirectory</key><string>{HERE}</string>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>StandardOutPath</key><string>{os.path.join(HERE, "agent.log")}</string>
+    <key>StandardErrorPath</key><string>{os.path.join(HERE, "agent.log")}</string>
+</dict>
+</plist>
+"""
+    os.makedirs(os.path.dirname(LAUNCHD_PLIST_PATH), exist_ok=True)
+    with open(LAUNCHD_PLIST_PATH, "w") as f:
+        f.write(plist)
+    subprocess.run(["launchctl", "unload", "-w", LAUNCHD_PLIST_PATH], check=False)  # in case of a stale prior load
+    subprocess.run(["launchctl", "load", "-w", LAUNCHD_PLIST_PATH], check=False)
+    print(f"  created + loaded LaunchAgent: {LAUNCHD_PLIST_PATH}")
+
+
 def add_to_startup_linux():
     unit = (
         "[Unit]\nDescription=NEURON agent\nAfter=network-online.target\n\n"
@@ -76,6 +110,11 @@ def start_background():
         py = shutil.which("pythonw") or sys.executable
         subprocess.Popen([py, os.path.join(HERE, "agent.py")], cwd=HERE,
                          creationflags=0x00000008)   # DETACHED_PROCESS
+    elif IS_MACOS:
+        # add_to_startup_macos()'s RunAtLoad already started it if that ran; this covers
+        # --no-startup (no LaunchAgent) by just spawning it directly, same as Windows.
+        subprocess.Popen([sys.executable, os.path.join(HERE, "agent.py")], cwd=HERE,
+                         start_new_session=True)
     else:
         subprocess.run(["systemctl", "--user", "start", "neuron-agent"], check=False)
     print("  agent launched in background")
@@ -98,7 +137,12 @@ def main():
     print(f"Installing NEURON agent (coordinator = {coordinator})")
     write_config(coordinator, args.layer_start, args.layer_end)
     if not args.no_startup:
-        (add_to_startup_windows if IS_WINDOWS else add_to_startup_linux)()
+        if IS_WINDOWS:
+            add_to_startup_windows()
+        elif IS_MACOS:
+            add_to_startup_macos()
+        else:
+            add_to_startup_linux()
     if not args.no_run:
         start_background()
     print("NEURON agent installed. It will register, download its slice, and start earning.")

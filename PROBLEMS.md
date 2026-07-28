@@ -352,6 +352,20 @@ call (`agent/test_resource_guard.py`, 2 new cases, 18/18 total). **Still open:**
 packaging exists at all (no `.dmg`/PyInstaller build — only Windows has a real installer);
 the friend would need to run the source-install path (`INSTALL.md`).
 
+**Update (2026-07-28, same day) — macOS `launchd` auto-start added.** `agent/install.py`'s
+optional `--startup` helper only handled Windows (registry) / Linux (`systemd --user`) —
+found by the same "verify, don't trust the platform list" check: on macOS it took the Linux
+branch and would have crashed outright (`FileNotFoundError: systemctl`, no systemd on
+macOS). Added `add_to_startup_macos()` — writes a per-user LaunchAgent plist
+(`~/Library/LaunchAgents/com.neuron.agent.plist`, `RunAtLoad`+`KeepAlive`) and loads it via
+`launchctl load -w`; `agent/uninstall.py` mirrors it (`launchctl unload -w` to stop, then
+removes the plist file). `start_background()`'s macOS path spawns `agent.py` directly
+(like Windows) rather than assuming a LaunchAgent already exists, so `--no-startup` still
+works. New `agent/test_install_macos.py` (13/13, mocks `launchctl`/file paths — no real Mac
+available to test against). This is still the OPTIONAL auto-start helper, not the base
+`INSTALL.md` flow (`python agent/agent.py` run directly) — the base flow already worked on
+macOS without this.
+
 ---
 
 ## Not-doing (deliberately, for now)
