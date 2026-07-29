@@ -208,6 +208,34 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
   relay fabric; coordination: regional → DHT; topology: many small pipelines; phased plan; Petals
   as the proven reference model; and the rule: don't build the scale layer before the first stranger).
 
+### [P18] 🟢 Sign-in was unshippable, and the network ran on plain HTTP — both fixed live (2026-07-29)
+- **Login could not ship.** It ran on the driver, so an OAuth *client secret* had to exist in
+  that process — i.e. on every stranger's PC once each installed agent began serving its own
+  Chat UI. A secret inside a distributed binary is extractable, and the alternative (each user
+  registering their own Google Cloud project before they can send a message) is not a product.
+  Moved to the coordinator: the founder registers ONE app, every install just gets a button.
+  Agent holds no secret at all; the browser hand-back is a single-use 120s code, never the
+  wallet_id (which spends real NRN and must not sit in a URL or history).
+- **Google forced the HTTPS work.** Google rejects redirect URIs that are plain HTTP or a raw
+  IP, so `http://150.230.22.250:8001/...` could not be registered at all — GitHub accepted it,
+  but GitHub is a developer platform, so GitHub-only silently capped the audience at people who
+  already write code. `coordinator/setup_https.sh` (Caddy + Let's Encrypt, auto-renewing) took
+  the coordinator to `https://neuronnet.duckdns.org`. Node tokens no longer cross the internet
+  in cleartext either, which mattered independently ([P11]).
+- **Verified live, both providers, in the ledger** — `google … email_verified: 1` and `github`,
+  distinct identities and wallets. A normal person can now install, click once, and chat.
+- **Gotchas worth keeping:** (1) systemd **drop-ins override the main unit**, so
+  setup_https.sh's edit to `.service` was silently beaten by an older `PUBLIC_BASE_URL` in
+  `.service.d/*.conf` — the coordinator advertised a redirect_uri that no longer matched, with
+  no error until a login was attempted. The script now writes the drop-in and prints the
+  effective value. (2) DuckDNS defaults a new subdomain to the IP of whoever created it, not
+  the server. (3) Oracle has a SECOND firewall in the cloud console; without ingress rules for
+  80/443 the certificate request just times out. (4) Changing PUBLIC_BASE_URL invalidates every
+  registered redirect URI — each provider's callback must be updated in the same breath.
+- **Open:** `RELAY_HOST` stays a bare IP on purpose (raw TCP, no TLS name). The consent screen
+  must be PUBLISHED, not left in Testing, or only hand-added test users can sign in (cap 100);
+  NEURON asks only for openid/email/profile, all non-sensitive, so publishing needs no review.
+
 ### [P17] 🟢 Anyone could mint a funded wallet with no login — the whole ban system was decorative — fixed (2026-07-29)
 - **`POST /wallet/faucet` was completely ungated**, unlike its two sibling endpoints
   (`/wallet/oauth`, `/wallet/{id}/violation`), which both verify `X-Wallet-Link-Secret`. And

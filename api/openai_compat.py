@@ -42,7 +42,7 @@ from engine import local_gguf
 from neuron_driver import DRIVER
 from safety import moderation
 
-COORDINATOR = os.environ.get("NEURON_COORDINATOR", "http://150.230.22.250:8001").rstrip("/")
+COORDINATOR = os.environ.get("NEURON_COORDINATOR", "https://neuronnet.duckdns.org").rstrip("/")
 MODEL_ID = common.MODEL_ID
 MODEL_ALIASES = {MODEL_ID, "neuron", "neuron-1", "gpt-3.5-turbo"}  # accept common names
 

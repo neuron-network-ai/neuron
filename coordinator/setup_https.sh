@@ -101,14 +101,25 @@ fi
 say "pointing the coordinator at its new public address"
 # PUBLIC_BASE_URL is what the coordinator sends to Google/GitHub as redirect_uri, and providers
 # compare it verbatim -- so it must be the HTTPS name from now on, not the old IP.
+#
+# Write it to a DROP-IN, not the main unit. systemd applies drop-ins after the unit, so a value
+# set in .service.d/*.conf silently overrides the same key in the .service file. Editing only the
+# main unit (as this did) left the old http:// value winning, and the coordinator kept sending a
+# redirect_uri that no longer matched the provider -- with no error until a login was attempted.
 UNIT=/etc/systemd/system/neuron-coordinator.service
-if grep -q NEURON_PUBLIC_BASE_URL "$UNIT"; then
-  sed -i "s|Environment=NEURON_PUBLIC_BASE_URL=.*|Environment=NEURON_PUBLIC_BASE_URL=https://$DOMAIN|" "$UNIT"
-else
-  sed -i "/^\[Service\]/a Environment=NEURON_PUBLIC_BASE_URL=https://$DOMAIN" "$UNIT"
-fi
+DROPIN_DIR="$UNIT.d"
+mkdir -p "$DROPIN_DIR"
+# strip the key wherever it may already live, so exactly one definition survives
+sed -i '/^Environment=NEURON_PUBLIC_BASE_URL=/d' "$UNIT"
+for f in "$DROPIN_DIR"/*.conf; do
+  [ -e "$f" ] && sed -i '/^Environment=NEURON_PUBLIC_BASE_URL=/d' "$f"
+done
+printf '[Service]\nEnvironment=NEURON_PUBLIC_BASE_URL=https://%s\n' "$DOMAIN" \
+  > "$DROPIN_DIR/public-url.conf"
+chmod 644 "$DROPIN_DIR/public-url.conf"
 systemctl daemon-reload && systemctl restart neuron-coordinator
 sleep 4
+echo "   effective value: $(systemctl show neuron-coordinator -p Environment | tr ' ' '\n' | grep PUBLIC_BASE_URL || echo '(NOT SET)')"
 
 cat <<EOF
 

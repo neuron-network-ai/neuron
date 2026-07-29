@@ -20,7 +20,7 @@ Run (from C:\\Users\\optin\\neuron, node_a machine):
     then open http://localhost:8080  (API docs at http://localhost:8080/api-docs)
 
 Env overrides:
-    NEURON_COORDINATOR   coordinator base URL   (default http://150.230.22.250:8001)
+    NEURON_COORDINATOR   coordinator base URL   (default https://neuronnet.duckdns.org)
     NEURON_S1            layers node_a owns = 0..S1-1  (default 10)
     NEURON_MAX_TOKENS    hard cap on tokens per response (default 512)
 """
@@ -47,7 +47,7 @@ from safety import moderation
 from ui import conversations
 from ui import oauth as oauth_module
 
-COORDINATOR = os.environ.get("NEURON_COORDINATOR", "http://150.230.22.250:8001").rstrip("/")
+COORDINATOR = os.environ.get("NEURON_COORDINATOR", "https://neuronnet.duckdns.org").rstrip("/")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 log = logging.getLogger("neuron.ui")
 SESSION_SECRET = os.environ.get("NEURON_SESSION_SECRET", "neuron-session-dev-secret")

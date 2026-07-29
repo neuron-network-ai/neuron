@@ -136,4 +136,4 @@ GITHUB_CLIENT_ID = os.environ.get("NEURON_GITHUB_CLIENT_ID")
 GITHUB_CLIENT_SECRET = os.environ.get("NEURON_GITHUB_CLIENT_SECRET")
 # Where providers send the user back. MUST match the redirect URI registered with Google/GitHub
 # exactly, so it has to be the coordinator's real public address, not a guess from the request.
-PUBLIC_BASE_URL = os.environ.get("NEURON_PUBLIC_BASE_URL", "http://150.230.22.250:8001")
+PUBLIC_BASE_URL = os.environ.get("NEURON_PUBLIC_BASE_URL", "https://neuronnet.duckdns.org")

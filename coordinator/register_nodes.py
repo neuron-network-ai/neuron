@@ -113,7 +113,7 @@ def heartbeat_loop(base, tokens):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--coordinator", default="http://150.230.22.250:8001",
+    ap.add_argument("--coordinator", default="https://neuronnet.duckdns.org",
                     help="coordinator URL (default: OptiPlex cloud host on :8001)")
     ap.add_argument("--register-only", action="store_true")
     ap.add_argument("--node-c-host", default=None,

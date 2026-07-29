@@ -53,7 +53,7 @@ MIGRATION_POLL_SECONDS = 20
 # Written on first run if no config exists (so a freshly-installed app just works): open join,
 # auto-placement, green idle donation, relay on. Matches agent/config.json.
 DEFAULT_CONFIG = {
-    "coordinator": "http://150.230.22.250:8001",
+    "coordinator": "https://neuronnet.duckdns.org",
     "node_id": None, "node_token": None, "model_id": None,
     "layer_start": None, "layer_end": None,
     "slice_dir": "./model_slice/",

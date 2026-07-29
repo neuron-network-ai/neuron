@@ -1,7 +1,7 @@
 """
 agent/install.py — one-command setup on a fresh machine.
 
-  python install.py --coordinator http://150.230.22.250:8001
+  python install.py --coordinator https://neuronnet.duckdns.org
 
 Creates config.json, (optionally) registers auto-start, and launches the agent in
 the background. Auto-start uses the Windows HKCU Run key, a macOS LaunchAgent, or a
@@ -26,7 +26,7 @@ LAUNCHD_LABEL = "com.neuron.agent"
 LAUNCHD_PLIST_PATH = os.path.expanduser(f"~/Library/LaunchAgents/{LAUNCHD_LABEL}.plist")
 
 DEFAULT_CONFIG = {
-    "coordinator": "http://150.230.22.250:8001",
+    "coordinator": "https://neuronnet.duckdns.org",
     "node_id": None, "node_token": None,
     "layer_start": 10, "layer_end": 18,
     "slice_dir": "./model_slice/",
@@ -131,8 +131,8 @@ def main():
 
     coordinator = args.coordinator
     if not coordinator:
-        coordinator = input("Coordinator URL [http://150.230.22.250:8001]: ").strip() \
-            or "http://150.230.22.250:8001"
+        coordinator = input("Coordinator URL [https://neuronnet.duckdns.org]: ").strip() \
+            or "https://neuronnet.duckdns.org"
 
     print(f"Installing NEURON agent (coordinator = {coordinator})")
     write_config(coordinator, args.layer_start, args.layer_end)

@@ -17,7 +17,7 @@ per tensor — and reassembles into a small, valid safetensors file the node loa
 
 Usage:
   # the command a fresh node runs (asks the coordinator what it owns):
-  python slice_downloader.py --coordinator http://150.230.22.250:8001 --node-id node_a --output-dir ./model_slice
+  python slice_downloader.py --coordinator https://neuronnet.duckdns.org --node-id node_a --output-dir ./model_slice
   # or fully manual:
   python slice_downloader.py --model-id Qwen/Qwen2.5-1.5B-Instruct --layer-start 0 --layer-end 9 --first --output-dir ./slice_a
 """

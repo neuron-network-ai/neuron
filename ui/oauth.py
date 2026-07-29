@@ -31,7 +31,7 @@ import requests
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
-COORDINATOR = os.environ.get("NEURON_COORDINATOR", "http://150.230.22.250:8001").rstrip("/")
+COORDINATOR = os.environ.get("NEURON_COORDINATOR", "https://neuronnet.duckdns.org").rstrip("/")
 # The port this Chat UI is actually reachable on, so the coordinator knows where to send the
 # browser back. Set by agent/local_chat.py; the default matches its DEFAULT_PORT.
 LOCAL_PORT = int(os.environ.get("NEURON_LOCAL_CHAT_PORT", "8080"))
