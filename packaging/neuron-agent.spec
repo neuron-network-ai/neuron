@@ -24,7 +24,12 @@ for pkg in ("torch", "transformers", "accelerate", "safetensors", "tokenizers",
             "pystray", "PIL",    # system-tray icon
             # Bundled personal Chat UI (agent/local_chat.py) — the same stack ui.app /
             # api.openai_compat need standalone: web server, sessions, OAuth client.
-            "fastapi", "starlette", "uvicorn", "itsdangerous", "authlib", "anyio", "sniffio"):
+            "fastapi", "starlette", "uvicorn", "itsdangerous", "authlib", "anyio", "sniffio",
+            # Local quantized engine (engine/local_gguf.py). llama_cpp is a thin Python wrapper
+            # around a NATIVE library (llama.dll + ggml*.dll); collect_all pulls those in, and
+            # without them the frozen app imports llama_cpp and dies at load time instead of
+            # falling back cleanly.
+            "llama_cpp", "diskcache"):
     try:
         d, b, h = collect_all(pkg)
         datas += d
@@ -32,6 +37,14 @@ for pkg in ("torch", "transformers", "accelerate", "safetensors", "tokenizers",
         hiddenimports += h
     except Exception:
         pass  # an absent optional package must not break the build
+
+# Belt and braces for the native side: collect_all misses DLLs that aren't declared as package
+# data on some llama-cpp-python builds, and a missing ggml DLL is a silent runtime failure.
+try:
+    from PyInstaller.utils.hooks import collect_dynamic_libs
+    binaries += collect_dynamic_libs("llama_cpp")
+except Exception:
+    pass
 
 # transformers checks installed versions via importlib.metadata — ship that metadata or it
 # raises at import. Distribution names (not import names) go here.
@@ -51,6 +64,7 @@ hiddenimports += ["common", "slice_downloader", "tunnel_client", "neuron_driver"
                   "agent.tray", "agent.uninstall", "agent.local_chat",
                   "ui", "ui.app", "ui.oauth", "api", "api.openai_compat",
                   "safety", "safety.moderation", "rag", "rag.retriever",
+                  "engine", "engine.local_gguf",
                   "coordinator", "coordinator.ledger", "coordinator.config"]
 
 # ui.app's Chat page (static HTML/JS/CSS) and the moderation blocklist are plain data files,

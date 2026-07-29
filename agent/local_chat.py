@@ -62,13 +62,27 @@ def start(coordinator, model_id, slice_dir, port=DEFAULT_PORT, host="127.0.0.1",
     it) or None if startup failed -- a broken local chat UI must never take down the agent's
     actual node-serving role, so failures here are logged and swallowed, not raised."""
     try:
-        ensure_driver_slice(model_id, slice_dir)
-
-        # neuron_driver.DRIVER is a process-wide singleton also used by ui.app / api.
-        # openai_compat -- pre-load it from OUR slice dir before ui.app's own lifespan
-        # hook calls ensure_loaded(), which is then a no-op (self.model is already set).
-        import neuron_driver
-        neuron_driver.DRIVER.load_from_slice(slice_dir)
+        # Fetch exactly ONE set of weights, whichever this machine will actually use.
+        # If it can run the model itself (engine/local_gguf.py) that is the ~1.1 GB quantized
+        # build, and the ~1.4 GB pipeline-driver slice is never needed -- answers come back in
+        # ~10s instead of minutes, and nothing is spent on a role this machine won't play.
+        # Otherwise it takes the driver role for the node pipeline and needs the slice.
+        from engine import local_gguf
+        if local_gguf.can_serve(model_id):
+            log.info("this machine can run %s itself — fetching quantized weights instead of "
+                     "the pipeline-driver slice", model_id)
+            if local_gguf.ensure_weights(model_id) is None:
+                log.warning("quantized weights unavailable; falling back to the driver slice")
+                ensure_driver_slice(model_id, slice_dir)
+                import neuron_driver
+                neuron_driver.DRIVER.load_from_slice(slice_dir)
+        else:
+            ensure_driver_slice(model_id, slice_dir)
+            # neuron_driver.DRIVER is a process-wide singleton also used by ui.app / api.
+            # openai_compat -- pre-load it from OUR slice dir before ui.app's own lifespan
+            # hook calls ensure_loaded(), which is then a no-op (self.model is already set).
+            import neuron_driver
+            neuron_driver.DRIVER.load_from_slice(slice_dir)
 
         os.environ.setdefault("NEURON_COORDINATOR", coordinator)
         # setdefault, not assignment: a real shell env var (dev testing) still wins over

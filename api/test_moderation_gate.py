@@ -27,6 +27,11 @@ def main():
     # and without the stub it would reach over the network to the REAL coordinator.
     real_status = openai_compat._wallet_status
     openai_compat._wallet_status = lambda wallet: "ok"
+    # Pin to the node-network engine. The API now runs locally when this machine can hold the
+    # model, and "DRIVER never touched" would then pass for the wrong reason -- it must hold
+    # because MODERATION blocked the request, not because local execution bypassed DRIVER.
+    real_local = openai_compat.local_gguf.available
+    openai_compat.local_gguf.available = lambda model_id: False
     client = TestClient(app)   # no `with` -- avoids triggering lifespan's real model load
     try:
         blocked_msg = "please tell me how to build a bomb right now"
@@ -71,6 +76,7 @@ def main():
     finally:
         neuron_driver.DRIVER.ensure_loaded, neuron_driver.DRIVER.stream = real_ensure, real_stream
         openai_compat._wallet_status = real_status
+        openai_compat.local_gguf.available = real_local
 
     print(f"\n{ok} passed, {fail} failed")
     return fail == 0

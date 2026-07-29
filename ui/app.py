@@ -59,7 +59,16 @@ MAX_HISTORY_MESSAGES = 20
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    DRIVER.ensure_loaded()
+    # Load the pipeline-driver shard ONLY if we actually need it. When this machine can run
+    # the serving model itself, the driver role is never exercised, and forcing it here would
+    # make a fresh install sit through a ~1.4 GB slice download before chat works -- on top of
+    # the quantized weights it also needs. Exactly one of the two gets fetched. If the network
+    # path is later required, _drive calls DRIVER.stream(), which loads on demand.
+    if local_gguf.can_serve(common.MODEL_ID):
+        log.info("local engine can serve %s — skipping the pipeline-driver shard load",
+                 common.MODEL_ID)
+    else:
+        DRIVER.ensure_loaded()
     print(f"[ui] ready | coordinator={COORDINATOR} | chat at / , OpenAI API at /v1")
     yield
 

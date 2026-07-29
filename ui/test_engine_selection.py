@@ -92,6 +92,30 @@ def main():
         check("/network reports local_capable False when only the network can serve",
               client.get("/network").json().get("local_capable") is False)
 
+        # ---- the OpenAI-compatible API uses the SAME tiered rule ---- #
+        # It previously always went to DRIVER, which would have left the API ~7x slower than
+        # the chat page on identical hardware.
+        from api import openai_compat
+        real_api_avail, real_api_stream = openai_compat.local_gguf.available, openai_compat.local_gguf.stream
+        real_wallet_status = openai_compat._wallet_status
+        openai_compat._wallet_status = lambda w: "ok"
+        api_used = []
+        openai_compat.local_gguf.stream = lambda *a, **k: api_used.append("local") or _events("api local", True)
+        try:
+            openai_compat.local_gguf.available = lambda model_id: True
+            r = client.post("/v1/chat/completions",
+                            headers={"Authorization": "Bearer w_test"},
+                            json={"model": "neuron",
+                                  "messages": [{"role": "user", "content": "hi"}]})
+            check("API uses the local engine when the machine can serve", api_used == ["local"])
+            check("API local answer is returned", "api local" in r.text)
+            check("API local run is not billed", '"nrn_cost": 0.0' in r.text or
+                  r.json()["usage"]["nrn_cost"] in (0.0, None))
+        finally:
+            openai_compat.local_gguf.available = real_api_avail
+            openai_compat.local_gguf.stream = real_api_stream
+            openai_compat._wallet_status = real_wallet_status
+
         # ---- login is still required on BOTH paths (abuse accountability, SAFETY.md) ---- #
         used.clear()
         ui_app.local_gguf.available = lambda model_id: True

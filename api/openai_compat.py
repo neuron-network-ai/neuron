@@ -38,6 +38,7 @@ from pydantic import BaseModel, ConfigDict
 
 import common
 from coordinator import config as coord_config, ledger as coord_ledger, model_registry
+from engine import local_gguf
 from neuron_driver import DRIVER
 from safety import moderation
 
@@ -224,16 +225,26 @@ def chat_completions(body: ChatBody, authorization: str = Header(default=None)):
     blocked = _moderate_or_error("\n".join(m["content"] for m in messages), wallet)
     if blocked is not None:
         return blocked
-    DRIVER.ensure_loaded()
-
-    input_ids = DRIVER.encode_chat(messages)
     max_new = body.max_tokens or 256
     router_prompt = next((m["content"] for m in reversed(messages)
                           if m["role"] == "user"), "")
     cid = "chatcmpl-" + uuid.uuid4().hex
     created = int(time.time())
     model_name = body.model or MODEL_ID
-    hold_estimate = coord_ledger.quote(max_new, int(input_ids.shape[1]))
+
+    # Tiered execution, same rule as the Chat UI (ui/app.py): run the model here when this
+    # machine can hold it -- 36 ms/token quantized vs 240 ms/token across the node pipeline --
+    # and use the pipeline only for models it cannot hold. Without this the API would be ~7x
+    # slower than the chat page on identical hardware.
+    if local_gguf.available(MODEL_ID):
+        events = local_gguf.stream(messages, max_new, MODEL_ID,
+                                   coordinator=COORDINATOR, wallet_id=wallet)
+        hold_estimate = 0.0          # local execution spends nobody else's compute
+    else:
+        DRIVER.ensure_loaded()
+        input_ids = DRIVER.encode_chat(messages)
+        hold_estimate = coord_ledger.quote(max_new, int(input_ids.shape[1]))
+        events = DRIVER.stream(input_ids, max_new, COORDINATOR, router_prompt, wallet)
 
     def chunk(delta, finish):
         return {"id": cid, "object": "chat.completion.chunk", "created": created,
@@ -242,7 +253,7 @@ def chat_completions(body: ChatBody, authorization: str = Header(default=None)):
 
     if body.stream:
         def gen():
-            for ev in DRIVER.stream(input_ids, max_new, COORDINATOR, router_prompt, wallet):
+            for ev in events:
                 if ev["type"] == "error":
                     yield _sse(_stream_error_chunk(ev))
                     yield "data: [DONE]\n\n"
@@ -265,7 +276,7 @@ def chat_completions(body: ChatBody, authorization: str = Header(default=None)):
 
     # non-streaming: consume the generator, build one response
     text, finish, pt, ct, cost, err, err_ev = "", "stop", 0, 0, None, None, None
-    for ev in DRIVER.stream(input_ids, max_new, COORDINATOR, router_prompt, wallet):
+    for ev in events:
         if ev["type"] == "error":
             err, err_ev = ev["detail"], ev
             break
