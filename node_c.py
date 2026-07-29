@@ -21,6 +21,7 @@ import threading
 import time
 
 import common
+import wire_codec
 
 state = {"model": None, "n": None, "s1": None, "s2": None}
 load_lock = threading.Lock()
@@ -40,6 +41,7 @@ def ensure_loaded(s1, s2):
 def serve(conn, addr):
     cache, past = None, 0
     bconn = None
+    codec = bcodec = None
     try:
         while True:
             msg = common.recv_msg(conn)
@@ -49,16 +51,25 @@ def serve(conn, addr):
                 s1, s2 = msg["s1"], msg["s2"]
                 ensure_loaded(s1, s2)
                 cache, past = common.new_cache(), 0
+                # Each hop negotiates its own codec: what the driver agreed with us says
+                # nothing about what node_b can decode, and in a rolling upgrade the two
+                # ends of the chain will not be on the same build.
+                codec = wire_codec.negotiate(msg.get("wire"))
                 probing = "host_b" not in msg
                 if not probing:
                     # open + configure our own connection to node_b (the last stage)
                     bconn = socket.create_connection((msg["host_b"], msg["port_b"]),
                                                      timeout=common.COLD_CONNECT_TIMEOUT_S)
-                    common.send_msg(bconn, {"type": "config", "s2": s2, "n": state["n"]})
+                    common.send_msg(bconn, {"type": "config", "s2": s2, "n": state["n"],
+                                            "wire": wire_codec.preference(state["model"].config.hidden_size)})
                     back = common.recv_msg(bconn)
                     assert back.get("ok"), f"node_b refused: {back}"
+                    bcodec = wire_codec.negotiate([back["wire"]] if back.get("wire") else None)
                     bconn.settimeout(common.HOT_TIMEOUT_S)
-                common.send_msg(conn, {"ok": True, "layers": state["n"], "s1": s1, "s2": s2})
+                ack = {"ok": True, "layers": state["n"], "s1": s1, "s2": s2}
+                if codec:
+                    ack["wire"] = codec
+                common.send_msg(conn, ack)
 
             elif mtype == "act":
                 hidden = msg["hidden"]
@@ -73,13 +84,13 @@ def serve(conn, addr):
                     # PROBE mode (security/proof_of_compute.py): a config with no host_b
                     # means the caller wants to verify THIS node's own layers in isolation --
                     # return the raw mid-stage output directly, no relay to a next hop.
-                    common.send_msg(conn, {"hidden": h2, "c_compute_ms": c_ms})
+                    common.send_msg(conn, {"hidden": h2, "c_compute_ms": c_ms}, codec=codec)
                 else:
-                    common.send_msg(bconn, {"type": "act", "hidden": h2})    # -> node_b
+                    common.send_msg(bconn, {"type": "act", "hidden": h2}, codec=bcodec)
                     resp = common.recv_msg(bconn)                            # <- node_b
                     common.send_msg(conn, {"hidden": resp["hidden"],
                                            "c_compute_ms": c_ms,
-                                           "b_compute_ms": resp["b_compute_ms"]})
+                                           "b_compute_ms": resp["b_compute_ms"]}, codec=codec)
 
             elif mtype == "bye":
                 if bconn:

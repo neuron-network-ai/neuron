@@ -72,18 +72,50 @@ failures transparently.
 | DHT discovery | ➖ central coordinator. Fine for Phase 1–2; `SCALING.md` plans DHT for Phase 3 |
 | Latency-aware beam-search routing | ❌ `router.build_chain` uses `random.choice` among replicas |
 | Client-side junction cache | ❌ **a node failing mid-generation kills the whole request** |
-| 8-bit weights | ❌ fp32 (`common.DTYPE`) — ~7× the download, 6.7× slower than Q4 |
-| Compressed activations between nodes | ❌ `common.send_msg` does `torch.save` of raw fp32 tensors over TCP |
+| 8-bit weights | ❌ bf16 on disk, **fp32 resident** — see the correction below |
+| Compressed activations between nodes | ✅ **done 2026-07-29** — `wire_codec.py`, and it needed more than Petals' scheme |
+
+### Correction to the weight-size claim above
+The first version of this file said the download was fp32 and "~7× the download". Checked
+against the actual bytes: HuggingFace ships Qwen2.5-1.5B as **BF16** (3.09 GB / 1.54 B params
+= 2.00 bytes/param), and `slice_downloader.py` copies safetensors byte ranges **verbatim** —
+so the download was never fp32. The fp32 is `load_slice_model`, which upcasts on load. So:
+
+| | download | resident |
+|---|---|---|
+| today | 2.00 B/param | 4.00 B/param |
+| Q4_K_M | ~0.55 B/param | ~0.55 B/param |
+| measured, one 9-layer middle slice | 0.84 GB | 1.68 GB |
+
+For 70B over 20 nodes that is **7 GB downloaded and 14 GB resident per node**, against ~2 GB
+for both at Q4. The 14 GB is the recruiting blocker — a 16 GB laptop has no 14 GB to give —
+and it is a **RAM** problem, not a bandwidth one. Worth stating precisely, because the two
+have completely different fixes.
+
+### The obvious fix for weights is blocked, and it is worth knowing why now
+`PROBLEMS.md` [P9] pencilled in "llama.cpp GGUF + its RPC backend" as the production-engine
+pivot: quantized *and* distributed, exactly NEURON's shape. The RPC backend does work and is
+actively maintained — but its own documentation says it is "currently in a proof-of-concept
+development stage… fragile and insecure. **Never run the RPC server on an open network or in
+a sensitive environment!**" An open network of strangers is precisely the disqualifying case,
+so this is not a drop-in for the public path. It remains viable for a *trusted* cluster (a
+LAN, or one operator's own machines). Decide it on that basis, not on "Petals-like, therefore
+fine". → [llama.cpp/tools/rpc](https://github.com/ggml-org/llama.cpp/tree/master/tools/rpc)
 
 ### Gaps in impact order
 
-1. **Quantize the network path.** 70B fp32 = 282 GB total / 14 GB per node at 20 nodes.
-   At 4-bit that is 40 GB total / **2 GB per node** — the difference between recruiting
-   volunteers and not. The local engine (`engine/local_gguf.py`) already proves Q4_K_M keeps
-   quality at 6.7× speed; the pipeline never got the same treatment.
-2. **Compress activations on the wire.** Petals halves bandwidth here. NEURON pickles
-   full-precision tensors once per token per hop — on home connections this plausibly dominates
-   latency, and it is currently unmeasured.
+1. ~~**Compress activations on the wire.**~~ **Done 2026-07-29** — 4.3× smaller, measured, and
+   the interesting part is that **Petals' own scheme was not good enough here.** Blockwise int8
+   without a rotation diverged from the fp32 answer on 1 of 3 prompts, because NEURON's real
+   junction activations have one channel ~750× the median. Adding a Hadamard rotation at the
+   transport layer (QuaRot's trick, no weight surgery, no calibration) cut the error ~7× at
+   identical byte cost. Details in `wire_codec.py`; numbers in `PROBLEMS.md` [P20],
+   reproducible with `bench_wire.py`. The same work removed a pickle-deserialisation RCE on
+   the wire ([P19]) — the wire was carrying executable content, which no document had noticed.
+2. **Quantize the weights.** The 14 GB-per-node figure above, not the download. Blocked on a
+   method: the llama.cpp RPC route is disqualified for the open path (above), and naive int8
+   is [P9]. Weight-only int4 with dequant-on-the-fly is the candidate worth measuring next —
+   it cuts RAM even if it does not speed up the matmul, and RAM is the actual blocker.
 3. **Junction caching.** Without it one flaky laptop kills a long generation. Petals treats
    this as essential, not an optimization.
 4. **Latency-aware routing.** `random.choice` will pick a node on another continent as readily

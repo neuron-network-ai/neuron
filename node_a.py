@@ -31,6 +31,7 @@ import requests
 import torch
 
 import common
+import wire_codec
 
 PROMPTS = [
     "Why is the sky blue",
@@ -124,10 +125,15 @@ def _run(idx, prompt, model, tok, s1, s2, host_c, port_c, host_b, port_b,
          max_new, eos_id, results, coordinator, request_id, node_ids, t_start,
          complete_token=None):
     sock = socket.create_connection((host_c, port_c), timeout=common.COLD_CONNECT_TIMEOUT_S)
+    # The config itself goes out in the legacy format -- it is the one message whose reader
+    # might predate wire_codec, and it is tiny. Its "wire" field is the offer; the ack names
+    # the codec the peer picked, or omits it, in which case codec stays None (legacy).
     common.send_msg(sock, {"type": "config", "s1": s1, "s2": s2,
-                           "host_b": host_b, "port_b": port_b})
+                           "host_b": host_b, "port_b": port_b,
+                           "wire": wire_codec.preference(model.config.hidden_size)})
     ack = common.recv_msg(sock)
     assert ack.get("ok"), f"node_c refused: {ack}"
+    codec = wire_codec.negotiate([ack["wire"]] if ack.get("wire") else None)
     sock.settimeout(common.HOT_TIMEOUT_S)
 
     input_ids = tok.apply_chat_template(
@@ -144,7 +150,7 @@ def _run(idx, prompt, model, tok, s1, s2, host_c, port_c, host_b, port_b,
             h1 = common.first_stage(model, s1, token_block, cache, past)
             a_ms += (time.time() - t) * 1000
         t = time.time()
-        common.send_msg(sock, {"type": "act", "hidden": h1})
+        common.send_msg(sock, {"type": "act", "hidden": h1}, codec=codec)
         resp = common.recv_msg(sock)
         rt = (time.time() - t) * 1000
         past += token_block.shape[1]

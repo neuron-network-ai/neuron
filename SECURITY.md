@@ -44,6 +44,19 @@ A lazy/malicious node could return garbage to farm NRN without computing. To cat
 - A node sends only: `node_id`, layer range, core/RAM counts, and its IP. Never user files,
   network traffic, or screen. Provable by reading the open code.
 
+## The pipeline wire carries no executable content
+- Activations move over a raw TCP frame that is a **JSON header plus raw tensor bytes**
+  (`wire_codec.py`). Nothing in that format can run code.
+- This replaced `torch.save`/`torch.load`, which is **pickle**. `common.recv_msg` used to
+  call `torch.load(..., weights_only=False)` on whatever arrived, so any peer could execute
+  arbitrary code in the receiving process — in both directions, driver ↔ node, and reachable
+  from the public relay ports rather than only from the chain. Fixed 2026-07-29; see
+  `PROBLEMS.md` [P19]. Legacy senders are still accepted for a rolling upgrade, but now via
+  `weights_only=True`, which admits only plain tensors and primitives.
+- The declared message length is capped (`common.MAX_MSG_BYTES`, 512 MB) so a stray scanner
+  on a public node port cannot make a small VM allocate an arbitrary buffer.
+- Regression tests: `test_wire_codec.py`.
+
 ---
 
 ## Manual / pre-launch (NOT code — needs certs / ops)

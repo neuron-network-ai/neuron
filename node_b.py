@@ -14,6 +14,7 @@ import threading
 import time
 
 import common
+import wire_codec
 
 state = {"model": None, "n": None, "s2": None}
 load_lock = threading.Lock()
@@ -31,7 +32,7 @@ def ensure_loaded(s2, n):
 
 
 def serve(conn, addr):
-    cache, past = None, 0
+    cache, past, codec = None, 0, None
     while True:
         msg = common.recv_msg(conn)
         mtype = msg.get("type")
@@ -40,7 +41,15 @@ def serve(conn, addr):
             s2, n = msg["s2"], msg["n"]
             ensure_loaded(s2, n)
             cache, past = common.new_cache(), 0
-            common.send_msg(conn, {"ok": True, "layers": state["n"], "s2": s2})
+            # The caller lists the wire codecs it can decode; we answer with the one we
+            # picked, or omit the field entirely if we recognise none. An older caller sends
+            # no list, gets no field back, and both ends stay on the legacy format -- so a
+            # half-upgraded fleet keeps working.
+            codec = wire_codec.negotiate(msg.get("wire"))
+            ack = {"ok": True, "layers": state["n"], "s2": s2}
+            if codec:
+                ack["wire"] = codec
+            common.send_msg(conn, ack)
 
         elif mtype == "act":
             hidden = msg["hidden"]
@@ -50,7 +59,7 @@ def serve(conn, addr):
                 out = common.last_stage(state["model"], state["s2"], hidden, cache, past)
                 b_ms = (time.time() - tb) * 1000
             past += q
-            common.send_msg(conn, {"hidden": out, "b_compute_ms": b_ms})
+            common.send_msg(conn, {"hidden": out, "b_compute_ms": b_ms}, codec=codec)
 
         elif mtype == "bye":
             return

@@ -61,6 +61,110 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
     (comfortably readable) is within reach → see new caveat [P9].
   - qengines available on this box: `onednn, x86, fbgemm` (fbgemm used).
 
+### [P19] 🟢 The pipeline wire ran arbitrary code from any peer — fixed (2026-07-29)
+- **Symptom:** `common.recv_msg` did `torch.load(io.BytesIO(data), weights_only=False)` on
+  whatever arrived on the socket. A `torch.save` payload is a **pickle**, and unpickling with
+  `weights_only=False` calls whatever the sender's `__reduce__` names. Demonstrated locally:
+  a crafted `act` message executes the sender's code in the receiver's process.
+- **Why it mattered here specifically:** this is not a "don't accept files from strangers"
+  theoretical. Every node deserialises messages from the node before it in the chain, and the
+  driver deserialises the reply — so the reach was **both directions**, driver ↔ node. Since
+  Session 12 each node's port is published on a **public relay**, so the sender need not even
+  be in the chain. `router.build_chain` will happily put an open-join stranger's machine in
+  the pipeline of a request originating on the founder's PC. It was the single most direct
+  path from "a stranger installed the agent" to "a stranger runs code on your desktop", and
+  no document (`SECURITY.md`, the S14 audit, [P14]) had ever named it.
+- **Fixed:** `weights_only=True` on the legacy path — verified against every message shape the
+  protocol actually sends (config, config-ack, act, act-reply, bye all carry only
+  dict/str/int/float/bool/Tensor). The new `wire_codec` frames are JSON + raw tensor bytes and
+  contain nothing executable at all. Also capped the 8-byte length prefix at 512 MB: node
+  ports face the open internet, and an unchecked length let a stray scanner make a 1 GB relay
+  VM allocate an arbitrary buffer (same class of bug as the `relay.recv_json` hardening).
+- **Regression tests:** `test_wire_codec.py` — a hostile pickle is refused, an absurd length
+  prefix is refused before allocating, and a legacy `torch.save` sender still round-trips.
+
+### [P20] 🟡 The wire ships raw fp32 activations, once per token per hop — measured, now 4.3× smaller
+- **Symptom:** `common.send_msg` `torch.save`d full-precision tensors. Measured on the real
+  3-stage chain (Qwen2.5-1.5B, H=1536, 6 prompts × 48 tokens): **12,508 bytes per message**,
+  of which 1,153 is pure pickle framing. Paid at every junction, every token — and since
+  Session 12 a relayed hop crosses the public VM **twice**, so relay egress pays it twice.
+- **What the number means at the size NEURON actually exists for.** A 70B model is H=8192
+  over ~20 stages. One decode token then costs 33.6 KB per hop, **0.69 MB across the chain**,
+  before TCP and relay overhead. On a 10 Mbit/s home upload that is ~27 ms of pure
+  serialisation per hop — **~0.55 s/token spent on the wire**, latency the compute never
+  sees. At `i8h` it is 8.2 KB/hop, 0.17 MB/token, ~0.13 s. [P3] already observed the network
+  dominates per-token cost; this is one of the reasons why, and it was never measured
+  until now.
+- **Measured (2026-07-29, `bench_wire.py`, 6 prompts × 48 tokens, codec at all three
+  junctions so error compounds exactly as on the wire):**
+
+  | codec | B/msg | vs before | text identical to fp32 | max abs Δlogit |
+  |---|---|---|---|---|
+  | `torch.save` fp32 (was) | 12508 | 1.00× | 6/6 | 0.0000 |
+  | `f32` (new framing, no pickle) | 11355 | 1.10× | 6/6 | 0.0000 |
+  | `f16` | 5723 | 2.19× | 6/6 | 0.0069 |
+  | **`i8h`** (Hadamard + blockwise int8) | **2946** | **4.25×** | **6/6** | **0.2054** |
+
+  and the schemes measured and **rejected** (exploratory sweep, 3 prompts × 48 tokens, so
+  the identity column is out of 3):
+
+  | codec | B/msg | vs before | identical | max abs Δlogit |
+  |---|---|---|---|---|
+  | fp8 e4m3 | 2786 | 4.43× | 0/3 | **nan** |
+  | int8 per-tensor | 2792 | 4.42× | 0/3 | 30.46 |
+  | int8 blockwise-256 (*Petals' scheme*) | 2812 | 4.39× | 2/3 | 1.13 |
+  | int8 blockwise-64 | 3014 | 4.09× | 1/3 | 0.59 |
+  | int4 blockwise-32 | 1577 | 7.82× | 0/3 | 4.52 |
+
+- **[P9] again, on the wire.** Real junction activations measured at **absmax 6620, std 42,
+  worst channel ≈ 750× the median**. An absmax quantizer takes its scale from that one
+  channel, so everything else collapses — which is why plain int8 lands at Δlogit 30. fp8
+  e4m3 cannot even represent 6620 (its max is 448), overflows to inf, and the generation goes
+  NaN. **Note that Petals' own scheme — blockwise int8, no rotation — diverged on 1 of 3
+  prompts here.** Copying the paper's mechanism verbatim was not sufficient.
+- **What fixed it:** QuaRot's insight (arXiv:2404.00456), applied at the transport layer
+  instead of the model. A Hadamard rotation is orthogonal, so it spreads the outlier evenly
+  across the block without changing the vector; the sender rotates before quantizing and the
+  receiver rotates back. Because it is pure transport there is **no weight surgery and no
+  calibration** — the model never sees it. Same bytes as unrotated int8, ~7× less error
+  (rel_l2 0.0037 vs 0.0276).
+- **The rotation has to be cheap or it is not worth doing.** The textbook log-n butterfly
+  cost 1.26 ms per call at H=8192 — a fifth of the wire time it was saving. Done instead as
+  a single matmul against a cached Hadamard matrix: **0.045 ms, 28× faster**. Whole-codec
+  cost is now 0.54 ms encode+decode per hop against ~6.4 ms of transmission saved on a
+  10 Mbit/s upload. **On a fast link that trade reverses** (0.54 ms to save 0.06 ms), so
+  `NEURON_WIRE_CODEC` pins the codec for LAN/datacenter deployments; the default assumes
+  volunteers' home connections, which is what NEURON is.
+- **int4 was measured and deliberately NOT shipped:** ~0.53 B/elem at ~9% relative error per
+  hop. Survivable over a 3-node chain, not over the 20-node chain a 70B model implies, and
+  the wire is the one place where being wrong is silent.
+- **i8h is gated on model size, because the same benchmark run against 0.5B disagrees with
+  the 1.5B result:**
+
+  | model | `i8h` identical | `i8h` max Δlogit | `f16` identical | `f16` max Δlogit |
+  |---|---|---|---|---|
+  | Qwen2.5-1.5B (H=1536) | 6/6 | 0.2054 | 6/6 | 0.0069 |
+  | Qwen2.5-0.5B (H=896) | **3/6** | 0.5034 | 6/6 | 0.0075 |
+
+  The diverging 0.5B answers stay correct and on-topic — they re-word, typically 100+
+  characters in — so this is drift, not the [P9]-style collapse unrotated int8 causes. But
+  it is drift the larger model does not show, in the expected direction: fewer parameters,
+  less redundancy to absorb the noise. `wire_codec.preference()` therefore offers `i8h` only
+  at H ≥ 1536 and `f16` (still 2.3×, 6/6) below it. Small models are both the fragile ones
+  and the cheap ones to ship uncompressed, so nothing is given up. **Two data points, not a
+  curve** — measure a third model before trusting the threshold away from 896/1536.
+- **A false lead worth recording.** An end-to-end socket run appeared to show i8h giving a
+  factually worse answer on 0.5B ("the sky is blue because it reflects sunlight" vs
+  "because of the scattering of sunlight by tiny…"). That was a test-rig artifact: a stray
+  earlier `node_b.py` was still bound to the port, and `SO_REUSEADDR` let a second one bind
+  alongside it, so connections landed on either process. With one listener, all four codecs
+  return the identical answer. The size gate rests on the in-process benchmark above, which
+  has no sockets and no such failure mode.
+- **Rollout:** codec is negotiated per hop in the config handshake, and a peer that offers
+  nothing recognised keeps the legacy format — so a half-upgraded fleet keeps working.
+  **Not yet deployed to the live nodes** (Pavilion/OptiPlex still run the old build; they
+  will negotiate down to legacy until updated).
+
 ### [P3] 🟡 Network latency dominates per-token cost
 - **Symptom:** in the 8-request run, ~0.4 s **per token** was network. The Pavilion was on
   an Amsterdam **relay** (`relay "ams"`), not a direct link.

@@ -28,6 +28,7 @@ import time
 import torch
 
 import common
+import wire_codec
 import node_a  # coord_get_chain / coord_complete (its main() is __main__-guarded)
 from safety import moderation
 
@@ -118,12 +119,18 @@ class _Driver:
         sock = None
         try:
             sock = socket.create_connection((host_c, port_c), timeout=common.COLD_CONNECT_TIMEOUT_S)
+            # The config goes out in the legacy format -- it is the one message whose reader
+            # might predate wire_codec -- and offers the codecs we can decode. The ack names
+            # the peer's pick, or omits it, in which case codec stays None and this
+            # connection keeps using the legacy format for the whole request.
             common.send_msg(sock, {"type": "config", "s1": S1, "s2": s2,
-                                   "host_b": host_b, "port_b": port_b})
+                                   "host_b": host_b, "port_b": port_b,
+                                   "wire": wire_codec.preference(model.config.hidden_size)})
             ack = common.recv_msg(sock)
             if not ack.get("ok"):
                 yield {"type": "error", "detail": f"node_c refused config: {ack}"}
                 return
+            codec = wire_codec.negotiate([ack["wire"]] if ack.get("wire") else None)
             sock.settimeout(common.HOT_TIMEOUT_S)
 
             cache, past = common.new_cache(), 0
@@ -132,7 +139,7 @@ class _Driver:
                 nonlocal past
                 with self.compute_lock:
                     h1 = common.first_stage(model, S1, token_block, cache, past)
-                common.send_msg(sock, {"type": "act", "hidden": h1})
+                common.send_msg(sock, {"type": "act", "hidden": h1}, codec=codec)
                 resp = common.recv_msg(sock)
                 past += token_block.shape[1]
                 with self.compute_lock:

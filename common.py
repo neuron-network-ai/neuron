@@ -36,6 +36,8 @@ import struct
 
 import torch
 
+import wire_codec
+
 # The model this node stack loads. Env-overridable so the whole stack (drivers, node_a/b/c,
 # selftests) can be pointed at another model without code changes — matches how the
 # coordinator's config.MODEL_ID works. Any Llama-family HF model runs through the same code.
@@ -258,10 +260,28 @@ def apply_lm_head(model, hidden):
 # --------------------------------------------------------------------------- #
 # Length-prefixed tensor framing over a raw TCP socket
 # --------------------------------------------------------------------------- #
-def send_msg(sock, obj):
-    buf = io.BytesIO()
-    torch.save(obj, buf)
-    data = buf.getvalue()
+# A peer may be anywhere in the fleet's upgrade cycle, so the outer framing (8-byte
+# big-endian length + payload) never changes and BOTH payload formats are accepted on read:
+#   - `wire_codec` frames (magic NRNW) -- pure JSON header + raw tensor bytes, and 2-4x
+#     smaller. What we send once the peer has said it understands them.
+#   - legacy `torch.save` pickles -- what every node spoke before Session 21.
+# `codec=None` means "send the legacy format", which is what the config handshake uses so an
+# un-upgraded peer can still read it. See wire_codec.negotiate.
+#
+# A cap on the declared length, because these sockets are reachable from the open internet
+# (relay public ports, Session 12): an unvalidated 8-byte length let a stray scanner make a
+# node allocate an arbitrary buffer. 512 MB is far above any real activation (a 8192-wide
+# prefill of 4k tokens in fp32 is 134 MB) and far below "kills a 1 GB VM".
+MAX_MSG_BYTES = 512 << 20
+
+
+def send_msg(sock, obj, codec=None):
+    if codec:
+        data = wire_codec.encode(obj, codec)
+    else:
+        buf = io.BytesIO()
+        torch.save(obj, buf)
+        data = buf.getvalue()
     sock.sendall(struct.pack(">Q", len(data)))
     sock.sendall(data)
 
@@ -279,5 +299,17 @@ def _recv_all(sock, n):
 
 def recv_msg(sock):
     (n,) = struct.unpack(">Q", _recv_all(sock, 8))
+    if n > MAX_MSG_BYTES:
+        raise ConnectionError(f"declared message size {n} exceeds {MAX_MSG_BYTES} -- refusing")
     data = _recv_all(sock, n)
-    return torch.load(io.BytesIO(data), weights_only=False)
+    if wire_codec.is_frame(data):
+        return wire_codec.decode(data)
+    # weights_only=True is the security fix, not a tidy-up: this used to be False, which
+    # hands the sender arbitrary code execution on this machine (pickle calls whatever
+    # __reduce__ says to call). Every node's port is reachable by whoever is next in the
+    # chain -- and since Session 12 that port is published on a public relay -- so on an
+    # open-join network of strangers this was an unauthenticated RCE in both directions.
+    # Verified against every message shape the pipeline actually sends: config, config-ack,
+    # act, act-reply and bye all carry only dict/str/int/float/bool/Tensor, all of which
+    # weights_only=True allows.
+    return torch.load(io.BytesIO(data), weights_only=True)

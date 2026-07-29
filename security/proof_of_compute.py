@@ -48,7 +48,14 @@ def make_middle_challenge(s1, s2, seed=0):
 
 def verify(output, expected, atol=0.05):
     """(passed, max_abs_err). The tolerance absorbs any cross-hardware fp jitter while
-    still rejecting garbage, which is off by many orders of magnitude."""
+    still rejecting garbage, which is off by many orders of magnitude.
+
+    DO NOT let the challenge path negotiate a lossy wire codec. The challenge functions
+    below deliberately send NO "wire" field, so the node answers in the legacy (lossless)
+    format -- see wire_codec.negotiate. A quantized reply would spend the atol budget on
+    transport noise instead of on hardware jitter: on a randn(1,1,H) challenge, i8h's ~0.3%
+    relative error lands right inside 0.05, so a cheating node would gain cover rather than
+    the check failing loudly. Bandwidth is irrelevant here anyway -- one tensor per attest."""
     if not torch.is_tensor(output) or output.shape != expected.shape:
         return False, float("inf")
     err = (output.float() - expected.float()).abs().max().item()

@@ -25,6 +25,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root
 import common                                    # noqa: E402
+import wire_codec                                # noqa: E402
 from slice_downloader import load_slice_model    # noqa: E402
 
 compute_lock = threading.Lock()
@@ -53,6 +54,7 @@ class NodeServer:
 
     def serve(self, conn, addr):
         cache, past, role, s1, s2, bconn = None, 0, None, None, None, None
+        codec = bcodec = None
         try:
             while True:
                 msg = common.recv_msg(conn)
@@ -61,18 +63,27 @@ class NodeServer:
                 if mtype == "config":
                     cache, past = common.new_cache(), 0
                     is_true_last = (self.hi == self.n - 1)
+                    # Negotiated per hop and per connection: the caller lists what it can
+                    # decode, we answer with our pick (or omit the field, which keeps an
+                    # un-upgraded caller on the legacy format). See wire_codec.
+                    codec = wire_codec.negotiate(msg.get("wire"))
+                    ack_wire = {"wire": codec} if codec else {}
                     if "host_b" in msg:                      # MIDDLE relay role (real pipeline traffic)
                         role, s1, s2 = "middle", msg["s1"], msg["s2"]
                         bconn = socket.create_connection((msg["host_b"], msg["port_b"]),
                                                          timeout=common.COLD_CONNECT_TIMEOUT_S)
-                        common.send_msg(bconn, {"type": "config", "s2": s2, "n": msg.get("n", self.n)})
+                        common.send_msg(bconn, {"type": "config", "s2": s2, "n": msg.get("n", self.n),
+                                                "wire": wire_codec.preference(self.model.config.hidden_size)})
                         back = common.recv_msg(bconn)
                         assert back.get("ok"), f"next hop refused: {back}"
+                        bcodec = wire_codec.negotiate([back["wire"]] if back.get("wire") else None)
                         bconn.settimeout(common.HOT_TIMEOUT_S)
-                        common.send_msg(conn, {"ok": True, "layers": self.n, "s1": s1, "s2": s2})
+                        common.send_msg(conn, {"ok": True, "layers": self.n, "s1": s1, "s2": s2,
+                                               **ack_wire})
                     elif is_true_last:                        # LAST stage role (real pipeline traffic)
                         role, s2 = "last", msg["s2"]
-                        common.send_msg(conn, {"ok": True, "layers": msg.get("n", self.n), "s2": s2})
+                        common.send_msg(conn, {"ok": True, "layers": msg.get("n", self.n), "s2": s2,
+                                               **ack_wire})
                     else:
                         # PROBE role (security/proof_of_compute.py): a config with no host_b,
                         # on a node whose own range does NOT reach the model's final layer, can
@@ -83,7 +94,8 @@ class NodeServer:
                         # caller's claimed s1/s2 -- this tests what we actually loaded, not
                         # what a challenger asserts.
                         role, s1, s2 = "probe", self.lo, self.hi
-                        common.send_msg(conn, {"ok": True, "layers": self.n, "s1": s1, "s2": s2})
+                        common.send_msg(conn, {"ok": True, "layers": self.n, "s1": s1, "s2": s2,
+                                               **ack_wire})
 
                 elif mtype == "act":
                     hidden = msg["hidden"]
@@ -94,24 +106,24 @@ class NodeServer:
                             h2 = common.mid_stage(self.model, s1, s2, hidden, cache, past)
                             c_ms = (time.time() - tc) * 1000
                         past += q
-                        common.send_msg(bconn, {"type": "act", "hidden": h2})
+                        common.send_msg(bconn, {"type": "act", "hidden": h2}, codec=bcodec)
                         resp = common.recv_msg(bconn)
                         common.send_msg(conn, {"hidden": resp["hidden"], "c_compute_ms": c_ms,
-                                               "b_compute_ms": resp["b_compute_ms"]})
+                                               "b_compute_ms": resp["b_compute_ms"]}, codec=codec)
                     elif role == "probe":
                         with compute_lock:
                             tc = time.time()
                             h2 = common.mid_stage(self.model, s1, s2, hidden, cache, past)
                             c_ms = (time.time() - tc) * 1000
                         past += q
-                        common.send_msg(conn, {"hidden": h2, "c_compute_ms": c_ms})
+                        common.send_msg(conn, {"hidden": h2, "c_compute_ms": c_ms}, codec=codec)
                     else:  # last
                         with compute_lock:
                             tb = time.time()
                             out = common.last_stage(self.model, s2, hidden, cache, past)
                             b_ms = (time.time() - tb) * 1000
                         past += q
-                        common.send_msg(conn, {"hidden": out, "b_compute_ms": b_ms})
+                        common.send_msg(conn, {"hidden": out, "b_compute_ms": b_ms}, codec=codec)
 
                 elif mtype == "bye":
                     if bconn:

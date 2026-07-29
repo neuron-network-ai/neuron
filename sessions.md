@@ -882,6 +882,89 @@ replica → founder verifies via proof-of-compute → earns under load. Combined
 
 ---
 
+## Session 21 (2026-07-29) — the wire: 4.3× smaller, and it stopped executing strangers' code
+
+**Goal:** `PETALS_NOTES.md` ranked "quantize the network path" first. Split it apart and do
+the half that was actually blocked on nothing: the activations crossing between nodes.
+
+**What was found before writing any code.**
+- `common.recv_msg` called `torch.load(..., weights_only=False)` on whatever arrived on the
+  socket. That is pickle: **any peer could execute code in the receiving process**, in both
+  directions, and since S12 node ports are published on a public relay so the sender need
+  not even be in the chain. Demonstrated with a crafted message. Nothing in `SECURITY.md` or
+  the S14 audit had ever named it. → [P19]
+- The fp32 wire cost **12,508 bytes per message**, 1,153 of it pickle framing, once per
+  token per hop. Never measured until now. → [P20]
+- **The notes' weight-size claim was wrong** and is corrected in `PETALS_NOTES.md`: HF ships
+  Qwen2.5 as BF16 and `slice_downloader` copies bytes verbatim, so the *download* was never
+  fp32. The fp32 is `load_slice_model` upcasting. Download 2.00 B/param, resident 4.00 —
+  a **RAM** problem (14 GB/node at 70B), not a bandwidth one, with a different fix.
+- [P9] pencilled in llama.cpp's RPC backend as the quantized+distributed pivot. Its own docs
+  say "fragile and insecure… **never run the RPC server on an open network**". Fine for a
+  trusted cluster, disqualified for open join. Worth knowing before building on it.
+
+**Built:** `wire_codec.py` — a length-prefixed **JSON header + raw tensor bytes** frame
+(nothing executable), with three codecs negotiated per hop in the config handshake.
+- `i8h` = **Hadamard rotation, then blockwise int8**. Real junction activations measured at
+  absmax 6620, std 42, **worst channel ≈ 750× the median** — so an absmax scale is set by
+  one channel and everything else collapses. That is [P9] again, on the wire. QuaRot's fix
+  applied at the *transport* layer: the rotation is orthogonal, so the sender rotates before
+  quantizing and the receiver rotates back — **no weight surgery, no calibration**, the model
+  never sees it. Same bytes as unrotated int8, ~7× less error.
+- Done as one matmul against a cached Hadamard matrix, not the textbook butterfly: 0.045 ms
+  vs 1.26 ms at H=8192. The butterfly cost a fifth of the wire time it was saving.
+- Scales travel fp32, not fp16: the rotation preserves block L2 norm, so a large block would
+  have overflowed an fp16 scale to inf and decoded as **silent zeros**. Costs 0.8%.
+- Negotiation degrades: a peer that offers nothing recognised stays on the legacy format, so
+  a half-upgraded fleet keeps working. Proof-of-compute deliberately offers nothing — a
+  lossy reply would spend its `atol` budget on transport noise instead of hardware jitter.
+
+**Measured** (`bench_wire.py`, codec at all three junctions so error compounds as on the wire;
+6 prompts × 48 tokens, greedy, vs the fp32 baseline):
+
+| codec | B/msg | vs before | identical | max Δlogit |
+|---|---|---|---|---|
+| `torch.save` fp32 (was) | 12508 | 1.00× | 6/6 | 0.0000 |
+| `f16` | 5723 | 2.19× | 6/6 | 0.0069 |
+| **`i8h`** | **2946** | **4.25×** | **6/6** | 0.2054 |
+
+Rejected, all at the same size as i8h: fp8 e4m3 → **NaN** (its max is 448; activations reach
+6620), int8 per-tensor → Δlogit 30.5, int4 → 4.5. **Petals' own scheme — blockwise int8, no
+rotation — diverged on 1 of 3 prompts.** Copying the paper's mechanism verbatim was not
+enough; that is the session's real finding.
+
+**Then the same benchmark on a second model disagreed.** Qwen2.5-0.5B (H=896): i8h scores
+**3/6**, f16 stays 6/6. The divergences are re-wordings, still correct, typically 100+
+characters in — drift, not collapse — but drift the bigger model doesn't show. So
+`preference()` offers i8h only at **H ≥ 1536**, f16 below. Small models are both the fragile
+ones and the cheap ones to ship uncompressed, so nothing is traded away. Two data points,
+not a curve. `NEURON_WIRE_CODEC` pins a codec (a LAN wants f16/f32: i8h's 0.54 ms of CPU
+buys 6.4 ms on a 10 Mbit/s home upload but only 0.06 ms on a fast link).
+
+**A false lead, recorded so it isn't re-derived.** An end-to-end socket run seemed to show
+i8h giving a factually worse 0.5B answer. It was the test rig: a stray `node_b.py` was still
+bound to the port and `SO_REUSEADDR` let a second bind alongside it. One listener → all four
+codecs agree. The size gate rests on the in-process benchmark, which has no sockets.
+
+**Verified:** `test_wire_codec.py` **27/27** (round-trips at 5 shapes × 3 codecs, the
+orthogonality and outlier-flattening properties, the fp16-scale overflow regression, a
+hostile pickle refused, an absurd length prefix refused, a legacy sender still readable),
+`test_relay_auth.py` 13/13 still green. End-to-end over **real sockets**, 3 processes: a
+driver offering `[i8h,f16,f32]` negotiates i8h (1138 B), `[f16,f32]` → f16 (1882 B),
+`[f32]` → f32 (3674 B), and a driver sending **no** `wire` field or an unknown codec falls
+back to legacy — all five return a correctly-shaped hidden.
+
+**What this implies at the size NEURON exists for.** 70B is H=8192 over ~20 stages: one
+decode token cost 0.69 MB across the chain, ≈0.55 s/token of pure serialisation on a
+10 Mbit/s home upload. At i8h it is 0.17 MB and ≈0.13 s. [P3] observed the network dominates
+per-token cost; this is one reason why.
+
+**Not deployed.** The Pavilion and OptiPlex still run the old build and will negotiate down
+to legacy until updated. Next from `PETALS_NOTES.md`: the weight/RAM half (gap 2), then
+junction caching (gap 3).
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load
