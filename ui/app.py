@@ -38,8 +38,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 
+import common
 from neuron_driver import DRIVER
 from api.openai_compat import router as openai_router, docs_html
+from engine import local_gguf
 from rag import retriever as rag
 from safety import moderation
 from ui import conversations
@@ -123,6 +125,10 @@ def network():
     return {
         "reachable": True,
         "coordinator": COORDINATOR,
+        # Whether this machine can answer on its own (engine/local_gguf.py). The page uses it
+        # to decide if an incomplete chain is actually a problem for THIS user: if we can serve
+        # locally, a short-staffed network is not a broken chat.
+        "local_capable": local_gguf.available(common.MODEL_ID),
         "online_nodes": net["online_nodes"],
         "total_nodes": net["total_nodes"],
         "layers_covered": net["total_layers_covered"],
@@ -177,13 +183,27 @@ def _drive(prompt: str, max_new: int, wallet_id: str, use_rag: bool = False,
         content, sources = rag.retrieve_and_augment(prompt)
         yield sse("sources", {"sources": sources, "used": bool(sources)})
     messages = prior_messages + [{"role": "user", "content": content}]
-    input_ids = DRIVER.encode_chat(messages)
+
+    # Tiered execution (see engine/local_gguf.py). If this machine can hold the serving model
+    # itself, run it here: measured 36 ms/token quantized vs 240 ms/token fp32 across the node
+    # pipeline, so a full answer takes ~10s instead of ~40 minutes -- and a 1.5B model split
+    # across three PCs was only ever buying a network hop and a bottleneck stage. The pipeline
+    # is for models this machine CANNOT hold, which is the case only it can serve. Falls back
+    # automatically, so an incomplete chain no longer means "responses will fail".
+    if local_gguf.available(common.MODEL_ID):
+        events = local_gguf.stream(messages, max_new, common.MODEL_ID,
+                                   coordinator=COORDINATOR, wallet_id=wallet_id)
+    else:
+        events = DRIVER.stream(DRIVER.encode_chat(messages), max_new, COORDINATOR,
+                               prompt, wallet_id)
+
     full_text = ""
-    for ev in DRIVER.stream(input_ids, max_new, COORDINATOR, prompt, wallet_id):
+    for ev in events:
         if ev["type"] == "meta":
             yield sse("meta", {"request_id": ev["request_id"], "nodes": ev["nodes"],
                                "node_ids": ev["node_ids"], "cost_nrn": ev["cost_nrn"],
-                               "conversation_id": conversation_id})
+                               "conversation_id": conversation_id,
+                               "local": ev.get("local", False)})
         elif ev["type"] == "token":
             yield sse("token", {"text": ev["text"]})
         elif ev["type"] == "done":

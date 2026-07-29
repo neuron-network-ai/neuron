@@ -55,6 +55,13 @@ def _parse_sse(text):
 def main():
     real_stream = neuron_driver.DRIVER.stream
     real_encode_chat = neuron_driver.DRIVER.encode_chat
+    # Pin execution to the NODE-NETWORK path. _drive picks the local engine whenever this
+    # machine can hold the serving model (engine/local_gguf.py), which would otherwise make
+    # this suite pass or fail depending on whether a GGUF happens to be in the HF cache. What
+    # is under test here is history assembly, which is engine-independent; engine SELECTION is
+    # covered by ui/test_engine_selection.py.
+    real_available = ui_app.local_gguf.available
+    ui_app.local_gguf.available = lambda model_id: False
     encode_calls = []
     neuron_driver.DRIVER.encode_chat = lambda messages: encode_calls.append(messages) or None
 
@@ -155,6 +162,7 @@ def main():
     finally:
         neuron_driver.DRIVER.stream = real_stream
         neuron_driver.DRIVER.encode_chat = real_encode_chat
+        ui_app.local_gguf.available = real_available
 
     print(f"\n{ok} passed, {fail} failed")
     return fail == 0

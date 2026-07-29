@@ -125,7 +125,7 @@
     <header>
       <button class="sidebtn" id="sidebtn" title="Toggle sidebar">☰</button>
       <div class="logo">NE<span>U</span>RON</div>
-      <div class="tag">distributed inference · no local model</div>
+      <div class="tag" id="tag">distributed inference</div>
       <div class="net">
         <span class="dot" id="netdot"></span>
         <span id="netlabel">checking network…</span>
@@ -137,8 +137,7 @@
 
     <main>
       <div class="thread" id="thread">
-        <div class="empty" id="empty">Ask anything. Your prompt is answered by a chain of
-          volunteer machines, each running a slice of the model.</div>
+        <div class="empty" id="empty">Ask anything.</div>
       </div>
     </main>
 
@@ -159,6 +158,8 @@ const $ = s => document.querySelector(s);
 const thread = $("#thread");
 let busy = false;
 let onlineNodes = 0;
+// set from /network: true when this machine can run the serving model itself
+let localCapable = false;
 let loggedIn = false;
 let currentConversationId = null;
 let currentController = null;   // AbortController for the in-flight stream
@@ -192,13 +193,26 @@ async function refreshNetwork(){
       return;
     }
     onlineNodes = n.online_nodes;
+    localCapable = !!n.local_capable;
+    $("#tag").textContent = localCapable
+      ? "running on this machine · network for bigger models"
+      : "distributed inference · answered by the node network";
+    const emptyEl = $("#empty");
+    if(emptyEl) emptyEl.textContent = localCapable
+      ? "Ask anything. Answers run on this machine; the network handles models it cannot hold."
+      : "Ask anything. Your prompt is answered by a chain of volunteer machines, each running a slice of the model.";
     dot.className = "dot " + (n.healthy ? "ok" : "bad");
     label.textContent = "Powered by " + n.online_nodes + " node" +
       (n.online_nodes===1?"":"s") + " worldwide";
     if(!n.healthy){
-      warn.className = "show";
-      warn.textContent = "Network degraded — only " + n.layers_covered +
-        "/28 model layers are online. Responses will fail until the chain is complete.";
+      // The banner used to say "Responses will fail". That is no longer true: when this
+      // machine can hold the serving model it answers locally (engine/local_gguf.py), so an
+      // incomplete chain only means the NETWORK is short of nodes, not that chat is broken.
+      warn.className = localCapable ? "" : "show";
+      warn.textContent = localCapable ? "" :
+        ("Network degraded — only " + n.layers_covered +
+         "/28 model layers are online, and this machine cannot run the model on its own yet. " +
+         "Responses will fail until the chain is complete.");
     } else {
       warn.className = ""; warn.textContent = "";
     }

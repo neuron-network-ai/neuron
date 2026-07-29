@@ -32,6 +32,11 @@ def _session_cookie(data):
 def main():
     calls = []
     real_stream = neuron_driver.DRIVER.stream
+    # Pin to the node-network path so "did the prompt reach the driver?" is a stable question:
+    # _drive otherwise runs locally whenever this machine can hold the model, and this suite is
+    # about the INPUT gate, which fires before either engine is chosen.
+    real_available = ui_app.local_gguf.available
+    ui_app.local_gguf.available = lambda model_id: False
     neuron_driver.DRIVER.stream = lambda *a, **k: calls.append("stream") or iter(())
     client = TestClient(app)   # no `with` -- avoids triggering lifespan's real model load
     client.cookies.set("session", _session_cookie({"wallet_id": "test-wallet"}))
@@ -69,6 +74,7 @@ def main():
             neuron_driver.DRIVER.encode_chat = real_encode_chat
     finally:
         neuron_driver.DRIVER.stream = real_stream
+        ui_app.local_gguf.available = real_available
 
     print(f"\n{ok} passed, {fail} failed")
     return fail == 0
