@@ -15,6 +15,64 @@ import random
 
 from coordinator import config, models
 
+# What we assume about a node that has never self-measured (`ms_per_layer` is NULL until the
+# node runs benchmark.py). Deliberately pessimistic-but-not-crippling: an unmeasured node
+# should still get traffic, just not be preferred over one known to be fast.
+DEFAULT_MS_PER_LAYER = 40.0
+
+
+def stage_ms(n):
+    """Expected time for this node to run its OWN segment once, in ms.
+
+    Petals scores a server by min(network, compute) throughput. We only have the compute half
+    -- `ms_per_layer`, self-measured by benchmark.py (Session 14) -- because nothing measures
+    per-node RTT yet. That makes this an underestimate of cost for a distant node, which is
+    the honest limitation to fix when node-to-node latency is actually measured. It is still
+    strictly better than the uniform assumption it replaces.
+    """
+    layers = max(int(n["layer_end"]) - int(n["layer_start"]) + 1, 1)
+    ms = n.get("ms_per_layer")
+    try:
+        ms = float(ms) if ms else DEFAULT_MS_PER_LAYER
+    except (TypeError, ValueError):
+        ms = DEFAULT_MS_PER_LAYER
+    return layers * max(ms, 1e-6)
+
+
+def throughput(n):
+    """Requests/sec this node can push through its own segment. Petals' `server throughput`."""
+    return 1000.0 / stage_ms(n)
+
+
+def segment_throughput(nodes):
+    """Petals' `block throughput`: the summed throughput of everyone serving this segment."""
+    return sum(throughput(n) for n in nodes)
+
+
+def fastest_pick(rng=random):
+    """Replica chooser weighted by measured throughput -- Petals mechanism 2, adapted.
+
+    The paper has each CLIENT ping servers and beam-search for the lowest-latency path. That
+    works there because routing is decentralised, so different clients naturally pick
+    different servers. NEURON routes centrally, so a straight argmin would send *every*
+    request to whichever node is fastest, serialise behind that node's `compute_lock`, and
+    undo [P16]'s whole point about spreading load. Weighted-random keeps both properties: a
+    node twice as fast gets twice the traffic, and a slow node still contributes instead of
+    being starved.
+
+    Note the segment cursor walk is greedy per segment, and for an additive path cost with
+    independent per-segment choices that IS the optimal path -- no beam needed at this shape.
+    """
+    def pick(replicas):
+        if len(replicas) == 1:
+            return replicas[0]
+        weights = [throughput(n) for n in replicas]
+        total = sum(weights)
+        if total <= 0:
+            return rng.choice(replicas)
+        return rng.choices(replicas, weights=weights, k=1)[0]
+    return pick
+
 
 def _walk(nodes, total, pick):
     """Cursor-walk covering 0..total-1 over an ALREADY eligible+online-filtered `nodes` list.
@@ -59,7 +117,7 @@ def build_chain(now=None, pick=None, total=None):
               coordinator passes the active serving model's layer count so routing tracks
               whichever model the network is serving).
     """
-    pick = pick or random.choice
+    pick = pick or fastest_pick()
     # Only nodes cleared for live traffic are routed: excludes flagged nodes (failed
     # proof-of-compute, Session 16) AND probationary nodes (open join, Session 12 — not
     # yet verified). `eligible` = trusted or PoC-passed, and not flagged.
@@ -107,18 +165,28 @@ def suggest_placement(now=None, total=None):
         start, end = missing[0]
         return {"layer_start": start, "layer_end": end, "role": "fill-gap",
                 "reason": f"chain is missing layers {start}-{end}"}
-    # Count how many eligible online nodes serve each exact segment, then advise the joiner to
-    # copy whichever segment in the serving chain is currently the scarcest.
+    # Petals mechanism 1: a joining server takes the interval whose current total THROUGHPUT
+    # is lowest -- i.e. it removes the actual bottleneck. Counting replicas (what this did
+    # before) treats one slow laptop as equal to one fast desktop, so a stage could look
+    # well-replicated while still being the slowest thing in the pipeline. With no
+    # ms_per_layer data anywhere this reduces to the old count-based behaviour, since every
+    # node then scores identically -- so an unmeasured network behaves exactly as before.
     nodes = [n for n in models.online_nodes(now) if n.get("eligible")]
-    replicas = collections.Counter((n["layer_start"], n["layer_end"]) for n in nodes)
+    by_seg = collections.defaultdict(list)
+    for n in nodes:
+        by_seg[(n["layer_start"], n["layer_end"])].append(n)
     idx, seg = min(enumerate(chain),
-                   key=lambda t: (replicas[(t[1]["layer_start"], t[1]["layer_end"])], t[0]))
-    count = replicas[(seg["layer_start"], seg["layer_end"])]
+                   key=lambda t: (segment_throughput(
+                       by_seg[(t[1]["layer_start"], t[1]["layer_end"])]), t[0]))
+    key = (seg["layer_start"], seg["layer_end"])
+    members = by_seg[key]
+    tput = segment_throughput(members)
     return {"layer_start": seg["layer_start"], "layer_end": seg["layer_end"],
             "role": "replica-balance",
             "reason": f"chain is complete; layers {seg['layer_start']}-{seg['layer_end']} are "
-                      f"the least-replicated stage ({count} node(s), stage {idx + 1} of "
-                      f"{len(chain)}) -- copying it adds real concurrency"}
+                      f"the lowest-throughput stage ({tput:.2f} req/s across {len(members)} "
+                      f"node(s), stage {idx + 1} of {len(chain)}) -- copying it removes the "
+                      f"current bottleneck"}
 
 
 def chain_public(chain):
