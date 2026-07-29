@@ -272,8 +272,37 @@ class Agent:
                              relay["host"], relay["public_port"])
                 return
             except requests.RequestException as e:
-                self.state.update(status="error", detail=f"coordinator unreachable: {e}")
-                log.warning("coordinator unreachable, retrying in %ds: %s", RETRY_SECONDS, e)
+                # A 409 from /node/register is NOT unreachability -- it means this node_id is
+                # already registered and our node_token no longer matches, because the
+                # coordinator mints a fresh one on every registration. It happens whenever a
+                # second copy of the agent registers the same node_id (a manual run alongside
+                # the installed tray app is the usual way), which silently invalidates the
+                # token the first copy is still holding in memory. Reporting that as
+                # "coordinator unreachable" sends everyone hunting a network fault that does
+                # not exist, so name it and say what actually fixes it.
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                if status == 409:
+                    detail = ("this node_id is registered with a different token — another "
+                              "copy of the agent probably re-registered it. Restart this agent "
+                              "to pick up the current token from config.json.")
+                elif status is not None:
+                    detail = f"coordinator refused the request (HTTP {status}): {e}"
+                else:
+                    detail = f"coordinator unreachable: {e}"
+                self.state.update(status="error", detail=detail)
+                log.warning("%s — retrying in %ds", detail, RETRY_SECONDS)
+                # Re-read config from disk before retrying: if another copy of the agent
+                # re-registered, it wrote the CURRENT token there, and this retry can recover
+                # on its own instead of looping on a stale in-memory value forever.
+                if status == 409:
+                    try:
+                        fresh = json.load(open(self.config_path))
+                        if fresh.get("node_token") and fresh["node_token"] != self.cfg.get("node_token"):
+                            self.cfg["node_token"] = fresh["node_token"]
+                            self.cfg["relay"] = fresh.get("relay", self.cfg.get("relay"))
+                            log.info("picked up a newer node_token from config.json — retrying")
+                    except (OSError, ValueError):
+                        pass
                 self._stop.wait(RETRY_SECONDS)
 
     # -- personal Chat UI (agent/local_chat.py) ------------------------------ #
