@@ -27,13 +27,12 @@ DEFAULT_PORT = 8080
 # config.json's "oauth" keys -> the env vars ui/oauth.py reads at import time. config.json is
 # the only place a packaged, console-less desktop install can supply these -- there's no shell
 # to set NEURON_GOOGLE_CLIENT_ID etc. before a double-clicked tray app starts.
+# An installed agent no longer holds any OAuth client secret: sign-in is delegated to the
+# coordinator (coordinator/auth.py, ui/oauth.py), because a secret shipped to every stranger's
+# PC is not a secret. What is left is this machine's OWN session signing key -- it only protects
+# this browser's local cookie, never anything network-wide.
 _OAUTH_ENV_MAP = {
-    "google_client_id": "NEURON_GOOGLE_CLIENT_ID",
-    "google_client_secret": "NEURON_GOOGLE_CLIENT_SECRET",
-    "github_client_id": "NEURON_GITHUB_CLIENT_ID",
-    "github_client_secret": "NEURON_GITHUB_CLIENT_SECRET",
     "session_secret": "NEURON_SESSION_SECRET",
-    "wallet_link_secret": "NEURON_WALLET_LINK_SECRET",
 }
 
 
@@ -85,6 +84,8 @@ def start(coordinator, model_id, slice_dir, port=DEFAULT_PORT, host="127.0.0.1",
             neuron_driver.DRIVER.load_from_slice(slice_dir)
 
         os.environ.setdefault("NEURON_COORDINATOR", coordinator)
+        # ui/oauth.py tells the coordinator which loopback port to hand the login back to.
+        os.environ.setdefault("NEURON_LOCAL_CHAT_PORT", str(port))
         # setdefault, not assignment: a real shell env var (dev testing) still wins over
         # whatever's saved in config.json.
         for cfg_key, env_name in _OAUTH_ENV_MAP.items():

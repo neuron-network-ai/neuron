@@ -18,8 +18,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from coordinator import (balancer, config, genesis, ledger, migration, model_registry,
-                         model_tiers, models, router)
+from coordinator import (auth, balancer, config, genesis, ledger, migration,
+                         model_registry, model_tiers, models, router)
 import relay_auth
 
 
@@ -230,6 +230,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="NEURON Coordinator", version="0.1", lifespan=lifespan)
+# Login for the whole network lives here, not on each agent (coordinator/auth.py).
+app.include_router(auth.router)
 
 
 # --- basic per-IP rate limit (Session 16 — rough DDoS guard) ---------------- #

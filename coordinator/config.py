@@ -124,3 +124,16 @@ MODERATION_BAN_THRESHOLD = int(os.environ.get("NEURON_MODERATION_BAN_THRESHOLD",
 # rows and moderation_events are NEVER pruned: bans depend on them and they grow slowly.
 # 0 disables pruning entirely.
 REQUEST_RETENTION_DAYS = int(os.environ.get("NEURON_REQUEST_RETENTION_DAYS", "90"))
+
+# Login (coordinator/auth.py). Configured ONCE here for the whole network rather than on every
+# installed agent: an OAuth client secret cannot live on a stranger's PC (it is extractable from
+# any shipped binary, and this repo is public), and asking each user to create a Google Cloud
+# project to send a chat message is not a product. The coordinator is a real server, so it can
+# actually keep a secret -- and it is already the only thing that can mint a wallet.
+GOOGLE_CLIENT_ID = os.environ.get("NEURON_GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.environ.get("NEURON_GOOGLE_CLIENT_SECRET")
+GITHUB_CLIENT_ID = os.environ.get("NEURON_GITHUB_CLIENT_ID")
+GITHUB_CLIENT_SECRET = os.environ.get("NEURON_GITHUB_CLIENT_SECRET")
+# Where providers send the user back. MUST match the redirect URI registered with Google/GitHub
+# exactly, so it has to be the coordinator's real public address, not a guess from the request.
+PUBLIC_BASE_URL = os.environ.get("NEURON_PUBLIC_BASE_URL", "http://150.230.22.250:8001")

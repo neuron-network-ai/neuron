@@ -454,7 +454,7 @@ def supply_snapshot():
            "invariant_ok": abs(total - 1_000_000_000) < 1e-6}
 
 
-def wallet_for_oauth(provider, external_id, email=None, email_verified=False):
+def wallet_for_oauth(provider, external_id, email=None, email_verified=None):
     """Look up (or create) the wallet_id for an OAuth identity. A brand-new wallet gets
     the faucet claimed automatically in the SAME call -- ships faucet+debit together, or the
     demo dies (per TOKENOMICS.md §11.6). Also stamps last_seen on every login (not just
@@ -465,9 +465,16 @@ def wallet_for_oauth(provider, external_id, email=None, email_verified=False):
             "SELECT wallet_id FROM oauth_identities WHERE provider=? AND external_id=?",
             (provider, external_id)).fetchone()
         if row:
+            # email_verified=None means "this caller has no fresh assertion from the provider"
+            # -- keep whatever the last real login recorded. Overwriting it unconditionally
+            # meant any plain lookup silently cleared the flag, so an operator reviewing an
+            # abusive identity would see "unverified" for a genuinely verified account.
             c.execute("UPDATE oauth_identities SET last_seen=?, email=COALESCE(?, email), "
-                     "email_verified=? WHERE provider=? AND external_id=?",
-                     (now, email, int(bool(email_verified)), provider, external_id))
+                     "email_verified=CASE WHEN ? IS NULL THEN email_verified ELSE ? END "
+                     "WHERE provider=? AND external_id=?",
+                     (now, email,
+                      None if email_verified is None else 1,
+                      int(bool(email_verified)), provider, external_id))
             return row["wallet_id"], False
         import secrets as _secrets
         wallet_id = "w_" + _secrets.token_hex(16)
