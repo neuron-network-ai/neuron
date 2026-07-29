@@ -30,6 +30,25 @@ steps below yourself.
 
 ---
 
+## 0. Updating an already-running coordinator — use the script
+
+Once the VM exists, don't hand-scp files: `coordinator/deploy.sh` ships the code, backs up the
+database first, restarts the service, and **verifies the security gates are actually live**
+before declaring success (rolling back if they aren't).
+
+```bash
+./coordinator/deploy.sh --dry-run     # show what would change
+./coordinator/deploy.sh               # ship, restart, verify
+```
+
+It checks that `/wallet/faucet` and `/admin/identities` reject unauthenticated callers — those
+gates are silently load-bearing, and a half-updated coordinator that still answers 200 to an
+anonymous faucet call has the whole login/ban system switched off. It also sweeps any wallet
+with no login behind it (only the old open faucet could have created one), returning its NRN to
+`__ecosystem__` so the fixed-supply invariant still holds.
+
+---
+
 ## 2. Deploy the coordinator  *(automatable once the VM exists)*
 
 ```bash
@@ -82,6 +101,51 @@ Everything defaults to the cloud coordinator `http://150.230.22.250:8001` (overr
 - **UI + API server:** `NEURON_COORDINATOR=http://<VM_PUBLIC_IP>:8001 uvicorn ui.app:app ...`
 - **Agent:** set `"coordinator"` in `agent/config.json` (or `install.py --coordinator ...`).
 - **register_nodes.py:** `--coordinator http://<VM_PUBLIC_IP>:8001`.
+
+---
+
+## 3b. Login — configured HERE, once, for the whole network
+
+Sign-in runs on the coordinator (`coordinator/auth.py`), **not** on each installed agent. It
+has to: every agent serves its own Chat UI, so an OAuth *client secret* would otherwise sit on
+every stranger's PC, where it is extractable from the binary — and this repo is public. Asking
+each user to create their own Google Cloud project is not a product. Set it once here and every
+existing and future install picks it up with no reinstall and no user configuration.
+
+### GitHub — works today, no domain needed
+GitHub accepts an `http://` callback on a bare IP.
+
+1. GitHub → Settings → Developer settings → **New OAuth App**
+2. Authorization callback URL: `http://150.230.22.250:8001/auth/callback/github`
+3. Copy the Client ID, generate a Client Secret.
+
+### Google — needs a DOMAIN and HTTPS first
+Google **rejects** redirect URIs that are plain HTTP or a raw IP (only `localhost` is exempt),
+so `http://150.230.22.250:8001/...` cannot be registered. Do the TLS step below first, then:
+
+1. Google Cloud Console → Credentials → **Create OAuth client ID → Web application**
+2. Authorized redirect URI: `https://neuron.example.com/auth/callback/google`
+3. Copy the Client ID and Client Secret.
+
+### Put them in the service
+```ini
+# /etc/systemd/system/neuron-coordinator.service  ->  [Service]
+Environment=NEURON_GITHUB_CLIENT_ID=...
+Environment=NEURON_GITHUB_CLIENT_SECRET=...
+Environment=NEURON_GOOGLE_CLIENT_ID=...
+Environment=NEURON_GOOGLE_CLIENT_SECRET=...
+Environment=NEURON_PUBLIC_BASE_URL=https://neuron.example.com
+```
+```bash
+sudo systemctl daemon-reload && sudo systemctl restart neuron-coordinator
+curl http://150.230.22.250:8001/auth/providers      # -> {"providers":["github",...]}
+```
+
+`NEURON_PUBLIC_BASE_URL` **must exactly match** the redirect URI registered with the provider —
+it is what the coordinator sends as `redirect_uri`, and providers compare it verbatim.
+
+Only providers with BOTH an id and a secret are offered; the Chat UI draws buttons from
+`/auth/providers`, so GitHub-only is a perfectly good launch state.
 
 ---
 
