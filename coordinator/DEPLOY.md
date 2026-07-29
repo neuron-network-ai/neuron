@@ -108,7 +108,7 @@ Everything defaults to the cloud coordinator `http://150.230.22.250:8001` (overr
 
 Sign-in runs on the coordinator (`coordinator/auth.py`), **not** on each installed agent. It
 has to: every agent serves its own Chat UI, so an OAuth *client secret* would otherwise sit on
-every stranger's PC, where it is extractable from the binary — and this repo is public. Asking
+every stranger's PC, where anyone holding the installer can extract it from the binary. Asking
 each user to create their own Google Cloud project is not a product. Set it once here and every
 existing and future install picks it up with no reinstall and no user configuration.
 

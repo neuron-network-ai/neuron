@@ -5,8 +5,8 @@ fine while the driver was one machine the founder ran. It stopped being fine the
 installed agent started serving its own Chat UI (agent/local_chat.py): an OAuth *client secret*
 would then have to exist on every stranger's PC. That leaves two impossible options --
 
-  * ship the secret inside the installer: it is extractable from any distributable binary, and
-    this repo is public, so anyone could impersonate the app to Google; or
+  * ship the secret inside the installer: anyone who receives the installer can extract it from
+    the binary and impersonate the app to Google; or
   * ask each user to create their own Google Cloud project: nobody will, and it is absurd to
     ask someone to do OAuth admin to send a chat message.
 

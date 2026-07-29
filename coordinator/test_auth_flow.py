@@ -1,8 +1,8 @@
 """coordinator/test_auth_flow.py — run: python -m coordinator.test_auth_flow
 
 Login is configured ONCE on the coordinator instead of on every installed agent. That is not a
-convenience: an OAuth client secret cannot live on a stranger's PC (it is extractable from any
-shipped binary, and this repo is public), and asking each user to create a Google Cloud project
+convenience: an OAuth client secret cannot live on a stranger's PC (anyone holding the installer
+can extract it from the binary), and asking each user to create a Google Cloud project
 before they can send a message is not a product.
 
 What must hold:

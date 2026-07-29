@@ -3,9 +3,9 @@
 This file used to run the OAuth dance itself, which required a Google/GitHub **client secret**
 in this process. That was workable while the driver was one machine the founder ran. It became
 unshippable once every installed agent started serving its own Chat UI (agent/local_chat.py):
-the secret would have to sit on every stranger's PC, where it is extractable from the binary --
-and this repo is public. The alternative, asking each user to create their own Google Cloud
-project before they can send a message, is not a product.
+the secret would have to sit on every stranger's PC, where anyone holding the installer can
+extract it from the binary. The alternative, asking each user to create their own Google
+Cloud project before they can send a message, is not a product.
 
 So the secret now lives on the coordinator (coordinator/auth.py), which is an actual server,
 is already trusted to route requests and hold the ledger, and is already the only thing that

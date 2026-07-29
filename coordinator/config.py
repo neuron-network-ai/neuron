@@ -126,8 +126,8 @@ MODERATION_BAN_THRESHOLD = int(os.environ.get("NEURON_MODERATION_BAN_THRESHOLD",
 REQUEST_RETENTION_DAYS = int(os.environ.get("NEURON_REQUEST_RETENTION_DAYS", "90"))
 
 # Login (coordinator/auth.py). Configured ONCE here for the whole network rather than on every
-# installed agent: an OAuth client secret cannot live on a stranger's PC (it is extractable from
-# any shipped binary, and this repo is public), and asking each user to create a Google Cloud
+# installed agent: an OAuth client secret cannot live on a stranger's PC (anyone holding the
+# installer can extract it from the binary), and asking each user to create a Google Cloud
 # project to send a chat message is not a product. The coordinator is a real server, so it can
 # actually keep a secret -- and it is already the only thing that can mint a wallet.
 GOOGLE_CLIENT_ID = os.environ.get("NEURON_GOOGLE_CLIENT_ID")
