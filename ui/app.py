@@ -247,9 +247,14 @@ def chat(body: ChatBody, request: Request):
         # so chatting requires being logged in. Fail here with a clear, actionable message
         # rather than letting an anonymous request die deep in the driver with a 422/402.
         def _login_required():
-            yield sse("error", {"detail": "Please log in (Google or GitHub) to chat -- NEURON "
-                                          "spends NRN from your wallet to pay the nodes that "
-                                          "serve you. New accounts get a free starter grant.",
+            # Wording matters here: this is the first thing a new user sees, and the old text
+            # ("NEURON spends NRN from your wallet to pay the nodes that serve you") is now
+            # wrong for the common case -- a machine that runs the model itself pays nobody.
+            # The honest reason is accountability: every request is tied to a real account so
+            # abuse can be acted on (SAFETY.md). Takes one click; nothing to install or set up.
+            yield sse("error", {"detail": "Sign in to start chatting. It takes one click, and "
+                                          "it's how NEURON keeps the network accountable — "
+                                          "answers on this machine are free.",
                                 "code": "login_required"})
         return StreamingResponse(_login_required(), media_type="text/event-stream")
     return StreamingResponse(

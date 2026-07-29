@@ -234,10 +234,10 @@ async function refreshAuth(){
       const providers = me.providers_configured || [];
       if(providers.length){
         auth.innerHTML = providers.map(p =>
-          "<a href='/auth/login/" + p + "'>Log in with " +
+          "<a href='/auth/login/" + p + "'>Sign in with " +
           p.charAt(0).toUpperCase()+p.slice(1) + "</a>").join(" · ");
       } else {
-        auth.innerHTML = "<span class='balance'>login not configured on this server</span>";
+        auth.innerHTML = "<span class='balance'>sign-in unavailable</span>";
       }
       renderSidebarLoggedOut();
       return;
