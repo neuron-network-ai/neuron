@@ -43,9 +43,31 @@ def resolve_url(model_id, filename, revision="main"):
     return f"{HF}/{model_id}/resolve/{revision}/{filename}"
 
 
-def fetch_header(model_id, revision="main"):
-    """Return (header_dict, data_start_offset, url). Fetches only ~header bytes."""
-    url = resolve_url(model_id, WEIGHTS_FILE, revision)
+def shard_files(model_id, revision="main"):
+    """Which safetensors file(s) hold this model's weights.
+
+    HuggingFace splits any checkpoint over ~5 GB into `model-0000k-of-0000N.safetensors` with
+    a `model.safetensors.index.json` mapping tensor -> file. This module originally assumed a
+    SINGLE `model.safetensors`, which is true of Qwen2.5-1.5B and false of every model big
+    enough to actually need a distributed pipeline: Qwen2.5-7B 404s on the single-file name.
+    So the byte-range slicing that makes the "1 MB agent" real did not work for any model
+    NEURON exists to serve. Found while sizing the 7B test.
+
+    Returns a list of filenames, single-element for an unsharded model.
+    """
+    idx = requests.get(resolve_url(model_id, "model.safetensors.index.json", revision),
+                       timeout=30)
+    if idx.status_code == 200:
+        weight_map = idx.json().get("weight_map", {})
+        # sorted() only for reproducible ordering; correctness comes from the map itself
+        return sorted(set(weight_map.values()))
+    return [WEIGHTS_FILE]
+
+
+def fetch_file_header(model_id, filename, revision="main"):
+    """Return (header_dict, data_start_offset, url) for ONE safetensors file, fetching only
+    its ~40 KB header rather than the whole multi-GB file."""
+    url = resolve_url(model_id, filename, revision)
     r = requests.get(url, headers={"Range": "bytes=0-7"}, timeout=30)
     r.raise_for_status()
     if r.status_code != 206:
@@ -56,6 +78,28 @@ def fetch_header(model_id, revision="main"):
     header = json.loads(r2.content)
     header.pop("__metadata__", None)
     return header, 8 + n, url
+
+
+def fetch_header(model_id, revision="main"):
+    """Whole-model view: (header_dict, data_start, url) merged across every shard.
+
+    Each tensor's meta gains `_file` and `_data_start` so a caller can still resolve it to a
+    byte range in the right shard. The returned `data_start`/`url` describe the FIRST shard
+    and are kept only for backwards compatibility with single-file callers -- anything
+    handling sharded models must use the per-tensor fields.
+    """
+    files = shard_files(model_id, revision)
+    merged, first_start, first_url = {}, None, None
+    for fn in files:
+        header, start, url = fetch_file_header(model_id, fn, revision)
+        if first_start is None:
+            first_start, first_url = start, url
+        for name, meta in header.items():
+            meta = dict(meta)
+            meta["_file"] = fn
+            meta["_data_start"] = start
+            merged[name] = meta
+    return merged, first_start, first_url
 
 
 def _layer_of(name):
@@ -71,7 +115,15 @@ def get_tensors_for_layers(header, layer_start, layer_end, is_first_node, is_las
         want = (
             (L is not None and layer_start <= L <= layer_end)
             or (name == "model.embed_tokens.weight" and is_first_node)  # tied lm_head lives here
-            or (name == "lm_head.weight" and is_last_node)              # only if an untied head exists
+            # lm_head belongs to the FIRST node, not the last: since Session 3 the driver
+            # runs the output head (common.apply_lm_head, load_model_shard(head=True)) and
+            # the last node returns only its normed hidden. This said is_last_node, which was
+            # invisible for every model served so far because Qwen2.5-1.5B has
+            # tie_word_embeddings=True -- lm_head IS embed_tokens, which the first node
+            # already gets. The first UNTIED model breaks it: Qwen2.5-7B ships a separate
+            # 545M-param lm_head, so the driver would hold an uninitialized meta tensor and
+            # every generation would fail. Caught while sizing the 7B test, not by any test.
+            or (name == "lm_head.weight" and is_first_node)
             or (name == "model.norm.weight" and is_last_node)
         )
         if want:
@@ -156,10 +208,17 @@ def download_slice(model_id, layer_start, layer_end, target_dir, is_first_node, 
     print(f"Total download: {sel_bytes/1e9:.2f} GB of {full_bytes/1e9:.2f} GB full model "
           f"({100*sel_bytes/full_bytes:.0f}%)")
 
-    abs_items = [(n, data_start + m["data_offsets"][0], data_start + m["data_offsets"][1])
-                 for n, m in keep.items()]
-    spans = _merge_spans(abs_items)
-    print(f"Fetching {len(spans)} contiguous byte-span(s):")
+    # Group by shard: a sharded model's tensors live in different files, so byte ranges are
+    # only meaningful within one file. Unsharded models fall out as a single group.
+    by_file = {}
+    for n, m in keep.items():
+        fn = m.get("_file", WEIGHTS_FILE)
+        start = m.get("_data_start", data_start)
+        by_file.setdefault(fn, []).append(
+            (n, start + m["data_offsets"][0], start + m["data_offsets"][1]))
+
+    total_spans = sum(len(_merge_spans(items)) for items in by_file.values())
+    print(f"Fetching {total_spans} contiguous byte-span(s) across {len(by_file)} file(s):")
 
     raw, got = {}, [0]
 
@@ -169,10 +228,12 @@ def download_slice(model_id, layer_start, layer_end, target_dir, is_first_node, 
         sys.stdout.write(f"\r  {got[0]/1e9:5.2f}/{sel_bytes/1e9:.2f} GB  ({pct:3.0f}%)")
         sys.stdout.flush()
 
-    for sb, se, members in spans:
-        chunk = _range_get(url, sb, se, progress=prog)
-        for name, b, e in members:
-            raw[name] = chunk[b - sb: e - sb]
+    for fn, items in by_file.items():
+        furl = resolve_url(model_id, fn, revision)
+        for sb, se, members in _merge_spans(items):
+            chunk = _range_get(furl, sb, se, progress=prog)
+            for name, b, e in members:
+                raw[name] = chunk[b - sb: e - sb]
     print()
 
     out_path = os.path.join(target_dir, WEIGHTS_FILE)
