@@ -32,16 +32,23 @@ import os
 #                  without an outage — the resilience floor for a production tier.
 # The numbers are illustrative starting points (env-overridable); tune them once real
 # per-model slice sizes are measured. What matters here is the SELECTION LOGIC.
+# GATED MODELS DO NOT WORK HERE. `slice_downloader` fetches byte ranges straight off
+# huggingface.co with no auth, so a repo behind a license click returns 401 and the node
+# fails at download with nothing useful to say. Verified 2026-07-30:
+#     meta-llama/Llama-3.1-8B-Instruct    -> 401  (gated)
+#     Qwen/Qwen2.5-7B-Instruct            -> 200
+# The 8b tier pointed at the Meta repo, so promoting to it would have broken every node on
+# the network. Any model added here must be publicly fetchable without a token.
 _DEFAULT_TIERS = [
     {"name": "1.5b", "model_id": "Qwen/Qwen2.5-1.5B-Instruct", "layers": 28,
      "min_nodes": 2,  "min_ram_gb": 6.0,   "min_replicas": 1,
      "description": "Qwen2.5-1.5B — the always-available floor."},
-    {"name": "8b",   "model_id": "meta-llama/Llama-3.1-8B-Instruct", "layers": 32,
-     "min_nodes": 6,  "min_ram_gb": 40.0,  "min_replicas": 2,
-     "description": "Llama-3.1-8B — unlocked by a mid-size network."},
-    {"name": "70b",  "model_id": "meta-llama/Llama-3.1-70B-Instruct", "layers": 80,
+    {"name": "7b",   "model_id": "Qwen/Qwen2.5-7B-Instruct", "layers": 28,
+     "min_nodes": 3,  "min_ram_gb": 20.0,  "min_replicas": 1,
+     "description": "Qwen2.5-7B — the first model no single volunteer machine can hold."},
+    {"name": "70b",  "model_id": "Qwen/Qwen2.5-72B-Instruct", "layers": 80,
      "min_nodes": 20, "min_ram_gb": 180.0, "min_replicas": 2,
-     "description": "Llama-3.1-70B (int4) — unlocked by a large network."},
+     "description": "Qwen2.5-72B — unlocked by a large network."},
 ]
 
 

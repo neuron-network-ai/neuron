@@ -226,10 +226,16 @@ def load_slice_model(target_dir):
     with init_empty_weights(include_buffers=False):
         model = AutoModelForCausalLM.from_config(config)
     model.eval()
-    sd = {k: v.to(torch.float32) for k, v in load_file(os.path.join(target_dir, WEIGHTS_FILE)).items()}
+    # Storage dtype, NOT compute dtype -- common.WEIGHT_DTYPE defaults to fp32 (unchanged
+    # behaviour) and can be set to fp16 to halve a node's resident RAM. cast_linears() then
+    # makes every GEMM run in fp32 regardless, because these CPUs have no half-precision
+    # GEMM ([P2]). This is what decides whether an 8B model fits on a 6 GB laptop.
+    import common
+    sd = {k: v.to(common.WEIGHT_DTYPE)
+          for k, v in load_file(os.path.join(target_dir, WEIGHTS_FILE)).items()}
     model.load_state_dict(sd, strict=False, assign=True)
     model.tie_weights()
-    return model
+    return common.cast_linears(model)
 
 
 # --------------------------------------------------------------------------- #

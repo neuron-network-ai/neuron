@@ -43,8 +43,23 @@ import wire_codec
 # coordinator's config.MODEL_ID works. Any Llama-family HF model runs through the same code.
 MODEL_ID = os.environ.get("NEURON_MODEL_ID", "Qwen/Qwen2.5-1.5B-Instruct")
 # Session 3 goal 2: bf16 halves RAM but these CPUs have no bf16 GEMM (no AVX512-BF16/
-# AMX), so it was several-x SLOWER in testing. fp32 stays the default on CPU.
+# AMX), so it was several-x SLOWER in testing. fp32 stays the COMPUTE dtype on CPU.
 DTYPE = torch.float32
+
+# ...but compute dtype and STORAGE dtype do not have to match, and conflating them is what
+# put the RAM wall where it is. HuggingFace ships these models as BF16 (2.00 bytes/param);
+# `load_slice_model` then upcasts to fp32, doubling resident memory to 4.00 bytes/param for
+# no quality gain — the extra bits are zeros. Measured consequence: Llama-3.1-8B needs 9.3 GB
+# per node on a 3-way split, against 6 GB free on the Pavilion and 5 GB on the OptiPlex, so
+# the model that proves NEURON's whole premise does not fit. At fp16 storage it is 4.7 GB and
+# it fits on all three.
+#
+# `fp16` keeps weights half-precision in RAM and casts each Linear's weight to fp32 at
+# forward time (see CastLinear). The cast is transient — one weight matrix at a time, and
+# amortised across a whole batch — so peak memory stays near the fp16 figure while every
+# GEMM still runs in fp32, which is the only dtype these CPUs are fast at.
+WEIGHT_DTYPE = {"fp32": torch.float32, "fp16": torch.float16,
+                "bf16": torch.bfloat16}[os.environ.get("NEURON_WEIGHT_DTYPE", "fp32").lower()]
 
 # Socket timeouts for the pipeline's raw TCP hops. COLD_CONNECT_TIMEOUT_S covers connect
 # + the config handshake, which blocks behind the peer's one-time model-shard load
@@ -137,11 +152,76 @@ def load_model_shard(lo, hi, embed=False, norm=False, head=False, model_id=MODEL
         with safe_open(fp, framework="pt") as f:
             for key in f.keys():
                 if want(key):
-                    sd[key] = f.get_tensor(key).to(DTYPE)
+                    sd[key] = f.get_tensor(key).to(WEIGHT_DTYPE)
     model.load_state_dict(sd, strict=False, assign=True)
     if head or embed:
         model.tie_weights()   # points lm_head at the (real) embedding weight
-    return tok, model, n
+    return tok, cast_linears(model), n
+
+
+class CastLinear(torch.nn.Module):
+    """An nn.Linear whose weight lives in half precision and is cast to fp32 per forward.
+
+    Why not just run the GEMM in fp16? Because [P2] measured bf16/fp16 compute at ~8x SLOWER
+    on these CPUs — they have no half-precision GEMM, so PyTorch emulates it. The trick is to
+    separate the two dtypes: pay 2 bytes/param in RAM, and still hand the CPU the fp32 matmul
+    it is fast at.
+
+    The fp32 copy is transient and covers ONE weight matrix at a time (the largest in an 8B
+    Llama layer is ~235 MB), so peak memory sits near the fp16 total rather than the fp32
+    one. It is also amortised across a batch: the cast happens once per forward regardless of
+    how many requests ride in it, so the wider the batch the less it costs per request —
+    which composes with batching.py rather than fighting it.
+    """
+
+    def __init__(self, linear):
+        super().__init__()
+        self.in_features = linear.in_features
+        self.out_features = linear.out_features
+        self.weight = torch.nn.Parameter(linear.weight.data, requires_grad=False)
+        b = getattr(linear, "bias", None)
+        self.bias = None if b is None else torch.nn.Parameter(b.data.float(), requires_grad=False)
+
+    def forward(self, x):
+        # x is cast too, not just the weight. The embedding table is stored half-precision
+        # as well, so the very first hidden state arriving from embed_tokens is fp16 and
+        # F.linear refuses mixed dtypes. Activations are tiny next to a weight matrix
+        # ([B, q, H] against [H, 4H]), so this cast is free -- and it makes the module
+        # correct on any input rather than only on the paths that happen to hand it fp32.
+        return torch.nn.functional.linear(x.float(), self.weight.float(), self.bias)
+
+    def extra_repr(self):
+        return (f"in_features={self.in_features}, out_features={self.out_features}, "
+                f"stored={self.weight.dtype}, compute=torch.float32")
+
+
+def cast_linears(model):
+    """Swap every nn.Linear for a CastLinear, in place. No-op when weights are already fp32.
+
+    Deliberately leaves embeddings, norms and rotary buffers alone: embeddings are a gather
+    (no GEMM, so no dtype problem) and norms are tiny. Only the big weight matrices matter
+    for RAM, and only they need the cast.
+    """
+    if WEIGHT_DTYPE is torch.float32:
+        return model
+    for mod in model.modules():
+        for name, child in list(mod.named_children()):
+            if isinstance(child, torch.nn.Linear):
+                setattr(mod, name, CastLinear(child))
+    return model
+
+
+def resident_bytes(model):
+    """Actual bytes of unique parameter storage — what a node really costs its owner in RAM.
+    Deduplicated by storage pointer so tied embed/lm_head weights are not double-counted."""
+    seen, total = set(), 0
+    for p in model.parameters():
+        s = p.untyped_storage()
+        if s.data_ptr() in seen:
+            continue
+        seen.add(s.data_ptr())
+        total += s.nbytes()
+    return total
 
 
 class SplitCache:
@@ -227,7 +307,10 @@ def _run_layers(model, layers, hidden, cache, past_len):
 @torch.no_grad()
 def first_stage(model, hi, token_ids, cache, past_len):
     """node_a: embed + layers[0:hi]  ->  hidden [1, q, H]."""
-    hidden = model.model.embed_tokens(token_ids)
+    # .to(DTYPE) so the hidden state is fp32 from the very first op even when the embedding
+    # table is stored half-precision. Everything downstream -- the K/V cache, the wire, the
+    # residual stream -- then stays fp32, and only the big weight matrices are half.
+    hidden = model.model.embed_tokens(token_ids).to(DTYPE)
     return _run_layers(model, list(model.model.layers)[0:hi], hidden, cache, past_len)
 
 

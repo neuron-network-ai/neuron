@@ -37,10 +37,34 @@ def _apportion(raw, total, min_each=1):
     return [min_each + floors[i] for i in range(n)]
 
 
-def solve(nodes, total_layers):
-    """nodes: list of {"node_id", "ms_per_layer", "head_ms"(optional)} in PIPELINE ORDER
-    (driver first). Returns a list of assignments with contiguous layer ranges and the
-    predicted per-stage time."""
+def max_layers_for(node, gb_per_layer, headroom=0.75):
+    """How many layers this node can actually HOLD, from its reported free RAM.
+
+    The balancer optimises for TIME and knew nothing about memory, which is fine until the
+    model stops fitting. Measured 2026-07-30: Llama-3.1-8B at fp32 is 0.87 GB/layer, so an
+    equal 3-way split assigns 9.3 GB to a machine with 5-6 GB free -- the balancer would
+    have proposed it and the node would have been OOM-killed. A pipeline stage that dies is
+    infinitely slower than a slow one, so memory is a HARD constraint and speed is the thing
+    to optimise inside it.
+
+    `headroom` leaves a quarter of free RAM alone: these are machines somebody is using, and
+    the resident figure excludes the KV cache, the transient fp32 cast in CastLinear, and
+    the process itself.
+    """
+    free = node.get("ram_free_gb")
+    if not free or not gb_per_layer:
+        return None                     # unknown -> no constraint, same as before
+    return max(int((float(free) * headroom) / gb_per_layer), 1)
+
+
+def solve(nodes, total_layers, gb_per_layer=None):
+    """nodes: list of {"node_id", "ms_per_layer", "head_ms"(optional), "ram_free_gb"(optional)}
+    in PIPELINE ORDER (driver first). Returns a list of assignments with contiguous layer
+    ranges and the predicted per-stage time.
+
+    `gb_per_layer` (when known) turns each node's free RAM into a hard cap on its layer
+    count -- see max_layers_for. Without it the behaviour is exactly as before.
+    """
     if not nodes:
         return []
     s = [max(float(n["ms_per_layer"]), 1e-6) for n in nodes]
@@ -49,6 +73,25 @@ def solve(nodes, total_layers):
     T = (total_layers + sum(H[i] * inv[i] for i in range(len(nodes)))) / sum(inv)
     raw = [max((T - H[i]) * inv[i], 0.0) for i in range(len(nodes))]
     ks = _apportion(raw, total_layers, min_each=1)
+
+    # Memory is a hard constraint; speed is optimised inside it. Shift layers off any node
+    # that cannot hold its time-optimal share onto nodes with room, cheapest-first. If the
+    # network genuinely cannot hold the model, `capacity_shortfall` says so rather than
+    # returning a plan that OOM-kills a volunteer's machine.
+    caps = [max_layers_for(n, gb_per_layer) for n in nodes]
+    if any(c is not None for c in caps):
+        caps = [c if c is not None else total_layers for c in caps]
+        for _ in range(total_layers):
+            over = [i for i in range(len(ks)) if ks[i] > caps[i]]
+            if not over:
+                break
+            room = [i for i in range(len(ks)) if ks[i] < caps[i]]
+            if not room:
+                break                      # nowhere left to put it -- reported below
+            src = max(over, key=lambda i: ks[i] - caps[i])
+            dst = min(room, key=lambda i: s[i])     # the fastest node with space
+            ks[src] -= 1
+            ks[dst] += 1
 
     out, start = [], 0
     for i, n in enumerate(nodes):

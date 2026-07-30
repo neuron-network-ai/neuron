@@ -38,7 +38,7 @@ def test_capacity_empty():
 
 
 # --------------------------------------------------------------------------- #
-# pure feasibility  (default tiers: 1.5b=2/6, 8b=6/40, 70b=20/180)
+# pure feasibility  (default tiers: 1.5b=2/6, 7b=3/20, 70b=20/180)
 # --------------------------------------------------------------------------- #
 def test_floor_when_tiny():
     cap = mt.network_capacity(nodes(2, ram=4))      # 2 nodes, 8 GB
@@ -52,8 +52,8 @@ def test_nothing_feasible_when_below_floor():
 
 
 def test_best_feasible_picks_biggest():
-    cap = mt.network_capacity(nodes(7, ram=8))      # 7 nodes, 56 GB -> 8b feasible
-    assert mt.best_feasible(cap)["name"] == "8b"
+    cap = mt.network_capacity(nodes(7, ram=8))      # 7 nodes, 56 GB -> 7b feasible
+    assert mt.best_feasible(cap)["name"] == "7b"
     cap2 = mt.network_capacity(nodes(24, ram=8))    # 24 nodes, 192 GB -> 70b feasible
     assert mt.best_feasible(cap2)["name"] == "70b"
 
@@ -61,7 +61,7 @@ def test_best_feasible_picks_biggest():
 def test_next_tier_gap():
     cap = mt.network_capacity(nodes(3, ram=8))      # 3 nodes, 24 GB, at floor (idx 0)
     gap = mt.next_tier_gap(cap, 0)
-    assert gap["name"] == "8b"
+    assert gap["name"] == "7b"
     assert gap["need_nodes"] == 3        # 6 - 3
     assert gap["need_ram_gb"] == 16.0    # 40 - 24
     assert mt.next_tier_gap(cap, len(mt.TIERS) - 1) is None   # top tier -> no gap
@@ -72,7 +72,7 @@ def test_next_tier_gap():
 # --------------------------------------------------------------------------- #
 def test_no_promote_without_margin():
     c = mt.TierController(start_index=0)
-    # exactly at the 8b minimum (6 nodes, 42 GB) but NOT +15% -> never promotes
+    # exactly at the 7b minimum (6 nodes, 42 GB) but NOT +15% -> never promotes
     pop = nodes(6, ram=7)                            # 6 nodes, 42 GB
     for t in range(0, 2000, 60):
         c.update(pop, now=t)
@@ -81,51 +81,51 @@ def test_no_promote_without_margin():
 
 def test_promote_requires_sustained_dwell():
     c = mt.TierController(start_index=0)
-    pop = nodes(8, ram=8)                            # 8 nodes, 64 GB -> 8b with margin
+    pop = nodes(8, ram=8)                            # 8 nodes, 64 GB -> 7b with margin
     assert c.update(pop, now=0)["name"] == "1.5b"    # candidate registered, not yet promoted
     assert c.update(pop, now=299)["name"] == "1.5b"  # still within dwell
-    assert c.update(pop, now=300)["name"] == "8b"    # dwell elapsed -> promoted
+    assert c.update(pop, now=300)["name"] == "7b"    # dwell elapsed -> promoted
 
 
 def test_promote_dwell_resets_if_capacity_drops():
     c = mt.TierController(start_index=0)
-    big = nodes(8, ram=8)                            # 8b-with-margin
+    big = nodes(8, ram=8)                            # 7b-with-margin
     small = nodes(2, ram=4)                          # floor only
-    c.update(big, now=0)                             # start dwell for 8b
+    c.update(big, now=0)                             # start dwell for 7b
     c.update(small, now=100)                         # capacity gone -> candidate cleared
     c.update(big, now=200)                           # dwell restarts here
     assert c.update(big, now=499)["name"] == "1.5b"  # only 299s sustained -> no promote
-    assert c.update(big, now=500)["name"] == "8b"    # 300s sustained -> promote
+    assert c.update(big, now=500)["name"] == "7b"    # 300s sustained -> promote
 
 
 # --------------------------------------------------------------------------- #
 # hysteresis: demotion needs a sustained grace period (no flapping)
 # --------------------------------------------------------------------------- #
-def _at_8b():
+def _at_7b():
     c = mt.TierController(start_index=0)
     big = nodes(8, ram=8)
     c.update(big, now=0)
     c.update(big, now=300)
-    assert c.active()["name"] == "8b"
+    assert c.active()["name"] == "7b"
     return c
 
 
 def test_brief_dip_does_not_demote():
-    c = _at_8b()
+    c = _at_7b()
     small = nodes(3, ram=8)                          # below 8b (needs 6 nodes)
     c.update(small, now=400)                         # infeasible starts at 400
     c.update(small, now=600)                         # 200s < grace -> hold
-    assert c.active()["name"] == "8b"
+    assert c.active()["name"] == "7b"
     c.update(nodes(8, ram=8), now=650)               # recovered before grace elapsed
-    assert c.active()["name"] == "8b"                # never demoted — no flap
+    assert c.active()["name"] == "7b"                # never demoted — no flap
 
 
 def test_sustained_loss_demotes():
-    c = _at_8b()
+    c = _at_7b()
     small = nodes(3, ram=8)                          # floor-feasible, 8b-infeasible
     c.update(small, now=400)                         # infeasible starts
     c.update(small, now=699)                         # 299s < grace
-    assert c.active()["name"] == "8b"
+    assert c.active()["name"] == "7b"
     c.update(small, now=700)                         # 300s >= grace -> demote
     assert c.active()["name"] == "1.5b"
 
@@ -136,7 +136,7 @@ def test_demote_targets_biggest_still_servable():
     mid = nodes(8, ram=8)                            # 8b-feasible, 70b-not
     c.update(mid, now=0)                             # infeasible(70b) starts
     c.update(mid, now=300)                           # grace elapsed -> demote
-    assert c.active()["name"] == "8b"
+    assert c.active()["name"] == "7b"
 
 
 # --------------------------------------------------------------------------- #
@@ -148,8 +148,8 @@ def test_snapshot_shape():
     assert snap["active_tier"] == "1.5b"
     assert snap["active_model"] == "Qwen/Qwen2.5-1.5B-Instruct"
     assert snap["capacity"]["nodes"] == 3
-    assert snap["next_tier"]["name"] == "8b"
-    assert [t["name"] for t in snap["tiers"]] == ["1.5b", "8b", "70b"]
+    assert snap["next_tier"]["name"] == "7b"
+    assert [t["name"] for t in snap["tiers"]] == ["1.5b", "7b", "70b"]
     assert snap["tiers"][0]["feasible"] is True
     assert snap["tiers"][1]["feasible"] is False
 

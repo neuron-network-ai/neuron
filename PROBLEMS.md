@@ -165,6 +165,31 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
   **Not yet deployed to the live nodes** (Pavilion/OptiPlex still run the old build; they
   will negotiate down to legacy until updated).
 
+### [P21] 🔴 Nothing restarts a node — the network dies on any reboot, and the fix already exists
+- **Symptom:** the Pavilion and OptiPlex run the agent as a bare foreground process. A reboot,
+  a crash, a closed SSH session or an OOM kill takes that node off the network permanently
+  until somebody SSHes in and starts it by hand. Hit repeatedly on 2026-07-30: `nohup … &`
+  over SSH does **not** survive the session ending (`setsid`, with a delay before the SSH
+  command returns, does) — and even then nothing brings it back after a reboot.
+- **Why it looked worse than it was:** a dead agent is invisible. The coordinator just shows
+  the node `offline`, identical to "the owner closed their laptop", so the network silently
+  runs degraded. Combined with [P4] this is the single most common way NEURON appears broken.
+- **The fix is already written and was simply never used here.** `agent/install.py --startup`
+  installs a real service on all three platforms — Windows registry Run key, `systemd --user`
+  on Linux, and a `launchd` LaunchAgent on macOS ([P15]) — and `agent/uninstall.py` mirrors
+  it. The packaged installer (`packaging/neuron.iss`) is the intended path. The two remote
+  machines bypassed all of it: they were set up by hand-copying a few files in an early
+  session, so they have no service, no auto-start and no restart-on-failure.
+- **What to do:** (a) run the installer path (or `install.py --startup`) on the Pavilion and
+  OptiPlex instead of launching the agent by hand; (b) make the systemd unit
+  `Restart=always` with a `RestartSec` backoff, matching what the coordinator's own unit
+  already does; (c) surface "node was auto-restarted N times" so a flapping machine is
+  visible rather than silently degrading the network.
+- **Ship this before handing anyone an installer.** A stranger will never SSH in to restart
+  anything — if the agent does not come back by itself, that machine leaves the network on
+  its first reboot and never returns, and the earn-rate they were promised quietly becomes
+  zero.
+
 ### [P3] 🟡 Network latency dominates per-token cost
 - **Symptom:** in the 8-request run, ~0.4 s **per token** was network. The Pavilion was on
   an Amsterdam **relay** (`relay "ams"`), not a direct link.
