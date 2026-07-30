@@ -67,3 +67,5 @@ dist/
 Thumbs.db
 .idea/
 .vscode/
+agent/config.node-*.json
+model_slice_*/

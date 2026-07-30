@@ -15,6 +15,7 @@ Turns this machine into a NEURON node automatically:
 Zero personal data leaves the machine: only node_id, layer range, core/RAM counts,
 and the Tailscale IP. ARM-compatible (pure Python + psutil + requests).
 """
+import argparse
 import json
 import logging
 import os
@@ -442,11 +443,51 @@ class Agent:
 
 
 def main():
-    ensure_config(CONFIG_PATH)
-    cfg = json.load(open(CONFIG_PATH))
+    ap = argparse.ArgumentParser(description="Run a NEURON node agent.")
+    # One machine could only ever run ONE agent, because the config path was a module
+    # constant. That is fine for a stranger donating one PC, and wrong for anyone holding the
+    # network up: with a 3-stage pipeline you need three online nodes, so losing one machine
+    # (a laptop that sleeps -- [P4]) took the whole network down even when the remaining
+    # machines had ample spare capacity. Each --config gets its own node_id, port and slice.
+    ap.add_argument("--config", default=CONFIG_PATH,
+                    help=f"config file to run from (default {CONFIG_PATH})")
+    ap.add_argument("--donation-mode", default=None,
+                    choices=sorted(resource_guard.DONATION_MODES),
+                    help="override donation_mode for this run. 'idle' (the default for a "
+                         "stranger's PC) stops serving the moment the owner touches the "
+                         "machine; use 'generous' or 'max' on a machine that is meant to "
+                         "hold the network up.")
+    ap.add_argument("--layers", default=None, metavar="START-END",
+                    help="serve this exact layer range instead of asking for a placement")
+    ap.add_argument("--port", type=int, default=None, help="node server port")
+    ap.add_argument("--node-id", default=None, help="register under this node id")
+    ap.add_argument("--no-local-chat", action="store_true",
+                    help="do not start this agent's own Chat UI (a second agent on the same "
+                         "machine must not fight the first one for the chat port)")
+    args = ap.parse_args()
+
+    path = ensure_config(args.config)
+    cfg = json.load(open(path))
+    dirty = False
+    if args.donation_mode:
+        cfg["donation_mode"], dirty = args.donation_mode, True
+    if args.layers:
+        lo, _, hi = args.layers.partition("-")
+        cfg["layer_start"], cfg["layer_end"], dirty = int(lo), int(hi), True
+    if args.port:
+        cfg["port"], dirty = args.port, True
+    if args.node_id:
+        cfg["node_id"], dirty = args.node_id, True
+    if args.no_local_chat:
+        cfg["local_chat"], dirty = False, True
+    if dirty:
+        with open(path, "w") as f:
+            json.dump(cfg, f, indent=2)
+
     _setup_logging(cfg.get("log_level", "INFO"))
-    log.info("NEURON agent starting | coordinator=%s", cfg["coordinator"])
-    agent = Agent()
+    log.info("NEURON agent starting | config=%s | coordinator=%s | mode=%s",
+             path, cfg["coordinator"], cfg.get("donation_mode"))
+    agent = Agent(config_path=path)
     try:
         agent.run()
     except KeyboardInterrupt:
