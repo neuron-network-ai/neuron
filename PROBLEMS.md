@@ -189,6 +189,20 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
   anything — if the agent does not come back by itself, that machine leaves the network on
   its first reboot and never returns, and the earn-rate they were promised quietly becomes
   zero.
+- **Worse than dying: a node can report itself healthy while serving nothing.** `agent.py`
+  starts `NodeServer.run()` in a daemon thread and never checks that it bound. Restart an
+  agent while the previous process still holds port 50999 and the bind raises inside that
+  thread, the thread dies silently, and the main loop carries on logging `heartbeat ok —
+  active` forever. Observed live on the Pavilion: the coordinator showed the network
+  `healthy: True, 28/28 layers` while the node refused every connection, so `/infer` handed
+  drivers a chain that could not run. **The heartbeat must assert the listener is actually
+  accepting**, not merely that the process is alive — otherwise "online" means nothing and
+  routing sends real requests into a black hole.
+- **Deploy note learned the hard way:** `nohup … &` over SSH dies with the session, and even
+  `setsid … &` needs the SSH command to stay alive a few seconds before returning or the
+  process never detaches. `pkill -f 'agent.agent'` also matches the `bash -c` running it and
+  kills its own shell — use the bracket form (`'[a]gent.agent'`), the same trick `sessions.md`
+  already documents for `[n]ode_b.py`.
 
 ### [P3] 🟡 Network latency dominates per-token cost
 - **Symptom:** in the 8-request run, ~0.4 s **per token** was network. The Pavilion was on

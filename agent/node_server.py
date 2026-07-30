@@ -66,21 +66,29 @@ class NodeServer:
             self._batchers = {}
         print(f"[node] slice ready in {time.time()-t0:.1f}s | serving layers {layer_start}-{layer_end}")
 
-    def _batcher(self, role, s1, s2):
+    def _batcher(self, role, lo, hi):
         """One MicroBatcher per (role, layer range). Keyed rather than global because a
         batch's slots must all run the SAME layers -- the range arrives in the caller's
-        config, so it is not safe to assume every connection asked for the same one."""
-        key = (role, s1, s2)
+        config, so it is not safe to assume every connection asked for the same one.
+
+        Named lo/hi, not s1/s2, deliberately. They were s1/s2, and the LAST role is called as
+        `_batcher("last", s2, self.n)` -- so the parameter named `s1` held the real s2 while
+        the closure used `s2`, which was self.n. `layers[self.n:]` is EMPTY, so the last node
+        ran zero layers and just normed whatever arrived. The chain still produced fluent-
+        looking tokens, which is why it took an end-to-end read of the actual text to catch:
+        "There noinspectionably..." instead of "The sky is blue because...".
+        """
+        key = (role, lo, hi)
         with self._batcher_lock:
             b = self._batchers.get(key)
             if b is None:
                 model = self.model
                 if role == "last":
                     def run(h, cache, lengths):
-                        return batching.last_stage_batched(model, s2, h, cache, lengths)
+                        return batching.last_stage_batched(model, lo, h, cache, lengths)
                 else:
                     def run(h, cache, lengths):
-                        return batching.mid_stage_batched(model, s1, s2, h, cache, lengths)
+                        return batching.mid_stage_batched(model, lo, hi, h, cache, lengths)
                 b = batching.MicroBatcher(run)
                 self._batchers[key] = b
             return b
