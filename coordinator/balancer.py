@@ -78,6 +78,16 @@ def equal_split(nodes, total_layers):
 def plan(nodes, total_layers):
     """Full comparison: the balanced assignment vs. the naive equal split, scored by
     predicted bottleneck (lower = faster)."""
+    # No node has self-measured yet -- the normal state of a freshly deployed network, since
+    # ms_per_layer stays NULL until benchmark.py runs. This used to fall through to the
+    # max() below, which raises on an empty sequence, so GET /network/plan answered 500
+    # instead of "no data yet" -- and its own guard for that case sat one line further down,
+    # unreachable. Found on the live coordinator with three brand-new agents online.
+    if not nodes:
+        return {"assignment": [], "balanced_bottleneck_ms": 0.0,
+                "equal_split_bottleneck_ms": 0.0, "speedup_vs_equal": 1.0,
+                "total_layers": total_layers,
+                "note": "no online eligible node has reported ms_per_layer yet"}
     balanced = solve(nodes, total_layers)
     # score the equal split using the REAL speeds so the comparison is apples-to-apples
     eq_layers = [a["layers"] for a in equal_split(nodes, total_layers)]

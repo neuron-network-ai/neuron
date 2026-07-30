@@ -156,6 +156,55 @@ class Agent:
         log.info("auto-placed on layers %d-%d (%s: %s)", p["layer_start"], p["layer_end"],
                  p.get("role"), p.get("reason"))
 
+    def measure_ms_per_layer(self, layer_start, layer_end, iters=6):
+        """Time one decode-shaped forward pass through THIS node's own layers, in ms/layer.
+
+        Without this the coordinator's auto-balancer ([P7], Session 14) can never fire:
+        `balancer.solve` needs each node's real speed, `models.register` has carried an
+        `ms_per_layer` column since S14, and nothing ever filled it -- so /network/plan had
+        no data and the whole subsystem sat dead while a slow laptop and a fast desktop were
+        handed identical layer counts. On this trio that mis-split costs ~1.8x.
+
+        Deliberately measures the same shape the pipeline actually runs (batch 1, one token),
+        after the slice is loaded and before serving real traffic, so it reflects this
+        machine on this model rather than a synthetic score.
+        """
+        import torch
+
+        import common
+        try:
+            model = self.server.model
+            h = model.config.hidden_size
+            n_layers = max(layer_end - layer_start + 1, 1)
+            layers = list(model.model.layers)[layer_start:layer_end + 1]
+            cache = common.new_cache()
+            x = torch.zeros(1, 1, h, dtype=common.DTYPE)
+            common._run_layers(model, layers, x, cache, 0)      # warm: first pass allocates
+            t0 = time.perf_counter()
+            for i in range(iters):
+                common._run_layers(model, layers, x, cache, 1 + i)
+            per_pass_ms = (time.perf_counter() - t0) / iters * 1000
+            return round(per_pass_ms / n_layers, 4)
+        except Exception as e:
+            log.warning("could not measure ms_per_layer: %s", e)
+            return None
+
+    def report_speed(self, info):
+        """Send this node's measured speed up so the balancer can use it. Re-registers,
+        because `models.register`'s upsert COALESCEs ms_per_layer -- registration is the
+        existing path for this field and needs no new endpoint."""
+        ms = self.measure_ms_per_layer(info["layer_start"], info["layer_end"])
+        if ms is None:
+            return
+        self.cfg["ms_per_layer"] = ms
+        self._save()
+        log.info("measured %.3f ms/layer over layers %d-%d", ms,
+                 info["layer_start"], info["layer_end"])
+        try:
+            self.register()
+        except Exception as e:
+            log.warning("could not report ms_per_layer: %s", e)
+
     def register(self):
         self.ensure_placement()
         ip = detect_tailscale_ip()
@@ -169,6 +218,12 @@ class Agent:
             "ram_gb": int(psutil.virtual_memory().total // 10**9),
             "behind_nat": self.cfg.get("behind_nat", False),
         }
+        # Feeds coordinator/balancer.py. None on the first registration (the slice is not
+        # loaded yet, so there is nothing to time); report_speed() re-registers with the real
+        # figure once the node server is up, and the upsert COALESCEs so a later None never
+        # erases it.
+        if self.cfg.get("ms_per_layer") is not None:
+            body["ms_per_layer"] = self.cfg["ms_per_layer"]
         # Open join (Session 12): register with NO secret by default — anyone can join.
         # Only send the header if the operator explicitly set one (that path marks the
         # node TRUSTED and is for the founder's own dev nodes, not strangers).
@@ -255,6 +310,7 @@ class Agent:
                                  args=("0.0.0.0", self.cfg.get("port", 50999)),
                                  daemon=True).start()
                 log.info("node server started on port %d", self.cfg.get("port", 50999))
+                self.report_speed(info)
                 # Session 12: if we're behind NAT the coordinator handed us relay params
                 # at registration — start the outbound tunnel so peers can reach us with
                 # NO inbound port. One-click NAT traversal; nothing for the user to do.
