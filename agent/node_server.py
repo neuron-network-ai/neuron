@@ -24,10 +24,17 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root
+import batching                                  # noqa: E402
 import common                                    # noqa: E402
 import wire_codec                                # noqa: E402
 from slice_downloader import load_slice_model    # noqa: E402
 
+# Held only for swapping the model pointer during a migration reload. It used to wrap every
+# forward pass too, which meant a machine served exactly ONE request at a time no matter how
+# many cores it had -- the single biggest reason a volunteer node was worth so much less than
+# its hardware suggested (TOKENOMICS.md §12.5). Concurrent compute is now handled by
+# batching.MicroBatcher, which serves a whole batch of requests in one forward pass instead
+# of serialising them.
 compute_lock = threading.Lock()
 
 
@@ -35,6 +42,8 @@ class NodeServer:
     def __init__(self, slice_dir, layer_start, layer_end, total_layers, paused_flag=None):
         self.lo = self.hi = self.n = None
         self.model = None
+        self._batchers = {}
+        self._batcher_lock = threading.Lock()
         self.paused = paused_flag if paused_flag is not None else threading.Event()  # set = paused
         self.reload(slice_dir, layer_start, layer_end, total_layers)
 
@@ -50,7 +59,31 @@ class NodeServer:
         with compute_lock:
             self.model = model
             self.lo, self.hi, self.n = layer_start, layer_end, total_layers
+            # Batchers close over the OLD model, so they must go with it. The next request
+            # rebuilds one against the new slice.
+            for b in getattr(self, "_batchers", {}).values():
+                b.stop()
+            self._batchers = {}
         print(f"[node] slice ready in {time.time()-t0:.1f}s | serving layers {layer_start}-{layer_end}")
+
+    def _batcher(self, role, s1, s2):
+        """One MicroBatcher per (role, layer range). Keyed rather than global because a
+        batch's slots must all run the SAME layers -- the range arrives in the caller's
+        config, so it is not safe to assume every connection asked for the same one."""
+        key = (role, s1, s2)
+        with self._batcher_lock:
+            b = self._batchers.get(key)
+            if b is None:
+                model = self.model
+                if role == "last":
+                    def run(h, cache, lengths):
+                        return batching.last_stage_batched(model, s2, h, cache, lengths)
+                else:
+                    def run(h, cache, lengths):
+                        return batching.mid_stage_batched(model, s1, s2, h, cache, lengths)
+                b = batching.MicroBatcher(run)
+                self._batchers[key] = b
+            return b
 
     def serve(self, conn, addr):
         cache, past, role, s1, s2, bconn = None, 0, None, None, None, None
@@ -100,28 +133,31 @@ class NodeServer:
                 elif mtype == "act":
                     hidden = msg["hidden"]
                     q = hidden.shape[1]
+                    # Submitting instead of locking is the whole change: concurrent requests
+                    # now ride the SAME forward pass rather than queueing for the machine.
+                    # The reported *_compute_ms therefore includes any time spent waiting to
+                    # fill a batch (capped at NEURON_BATCH_WINDOW_MS) -- it is what the hop
+                    # actually cost the caller, which is what the driver's net_ms accounting
+                    # and the coordinator's balancer both want.
                     if role == "middle":
-                        with compute_lock:
-                            tc = time.time()
-                            h2 = common.mid_stage(self.model, s1, s2, hidden, cache, past)
-                            c_ms = (time.time() - tc) * 1000
+                        tc = time.time()
+                        h2 = self._batcher("middle", s1, s2).submit(hidden, cache, past)
+                        c_ms = (time.time() - tc) * 1000
                         past += q
                         common.send_msg(bconn, {"type": "act", "hidden": h2}, codec=bcodec)
                         resp = common.recv_msg(bconn)
                         common.send_msg(conn, {"hidden": resp["hidden"], "c_compute_ms": c_ms,
                                                "b_compute_ms": resp["b_compute_ms"]}, codec=codec)
                     elif role == "probe":
-                        with compute_lock:
-                            tc = time.time()
-                            h2 = common.mid_stage(self.model, s1, s2, hidden, cache, past)
-                            c_ms = (time.time() - tc) * 1000
+                        tc = time.time()
+                        h2 = self._batcher("probe", s1, s2).submit(hidden, cache, past)
+                        c_ms = (time.time() - tc) * 1000
                         past += q
                         common.send_msg(conn, {"hidden": h2, "c_compute_ms": c_ms}, codec=codec)
                     else:  # last
-                        with compute_lock:
-                            tb = time.time()
-                            out = common.last_stage(self.model, s2, hidden, cache, past)
-                            b_ms = (time.time() - tb) * 1000
+                        tb = time.time()
+                        out = self._batcher("last", s2, self.n).submit(hidden, cache, past)
+                        b_ms = (time.time() - tb) * 1000
                         past += q
                         common.send_msg(conn, {"hidden": out, "b_compute_ms": b_ms}, codec=codec)
 
