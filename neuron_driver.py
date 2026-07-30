@@ -59,8 +59,15 @@ def log_chain_failure(node_ids, err):
 class _Driver:
     def __init__(self):
         self.model = self.tok = self.n = self.eos_id = None
-        self.compute_lock = threading.Lock()   # serialise node_a's own compute
+        # Kept for the load path only. It used to serialise this process's own forward pass,
+        # which made the DRIVER the bottleneck once agent/node_server.py started batching:
+        # measured 99% utilisation on the driver against 7-78% on the nodes. Concurrent
+        # compute now goes through the two batchers below.
+        self.compute_lock = threading.Lock()
         self._load_lock = threading.Lock()
+        self._batch_lock = threading.Lock()
+        self._stage_batcher = None    # embed + layers 0..S1-1
+        self._head_batcher = None     # the lm_head GEMM (the expensive one)
 
     @property
     def loaded(self) -> bool:
@@ -97,6 +104,20 @@ class _Driver:
         self.tok, self.model, self.n, self.eos_id = tok, model, n, tok.eos_token_id
         print(f"[driver] ready in {time.time() - t0:.1f}s | {source} | "
               f"layers={n} | owns 0..{S1 - 1}")
+
+    def _batchers(self):
+        """Two MicroBatchers shared by every concurrent request in this process, built once
+        the model exists. Separate because they sit on opposite sides of the network hop:
+        the stage batcher runs before the chain, the head batcher after it comes back."""
+        with self._batch_lock:
+            if self._stage_batcher is None:
+                model = self.model
+                self._stage_batcher = batching.MicroBatcher(
+                    lambda ids, cache, lengths: batching.first_stage_batched(
+                        model, S1, ids, cache, lengths))
+                self._head_batcher = batching.MicroBatcher(
+                    lambda h, _c, _l: batching.apply_lm_head_batched(model, h))
+            return self._stage_batcher, self._head_batcher
 
     # -- input helpers (caller picks chat-template vs raw text) --------------- #
     def encode_chat(self, messages):
@@ -222,10 +243,11 @@ class _Driver:
         # under OSError, not caught by it.
         DEAD_PEER = (ConnectionError, TimeoutError, EOFError, OSError)
 
+        stage_batcher, head_batcher = self._batchers()
+
         def step(token_block, tokens_now):
             nonlocal past
-            with self.compute_lock:
-                h1 = common.first_stage(model, S1, token_block, cache, past)
+            h1 = stage_batcher.submit(token_block, cache, past)
             past += token_block.shape[1]
             # Cached BEFORE the send, so a failure on this very hop is still recoverable --
             # the replay block includes the activation the dead node never answered.
@@ -238,8 +260,7 @@ class _Driver:
                         resp = common.recv_msg(sock)
                     else:
                         resp = _reroute(tokens_now, f"{last_err.__class__.__name__}: {last_err}")
-                    with self.compute_lock:
-                        return int(common.apply_lm_head(model, resp["hidden"]).argmax(-1))
+                    return int(head_batcher.submit(resp["hidden"], None, 0).argmax(-1))
                 except DEAD_PEER as e:
                     last_err = e
                     log_chain_failure(chain["node_ids"], e)

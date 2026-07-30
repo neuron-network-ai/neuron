@@ -30,6 +30,7 @@ import time
 import requests
 import torch
 
+import batching
 import common
 import wire_codec
 
@@ -40,7 +41,24 @@ PROMPTS = [
     "What is DNA",
 ]
 
-compute_lock = threading.Lock()   # serialise node_a's own compute across request threads
+# Kept for the model-load path. It used to serialise this process's own forward pass, which
+# made the DRIVER the bottleneck once the nodes started batching (measured: 99% driver vs
+# 7-78% nodes). Concurrent compute now goes through these two shared batchers -- built lazily
+# because they close over the loaded model.
+compute_lock = threading.Lock()
+_batchers = {}
+_batchers_lock = threading.Lock()
+
+
+def get_batchers(model, s1):
+    with _batchers_lock:
+        if not _batchers:
+            _batchers["stage"] = batching.MicroBatcher(
+                lambda ids, cache, lengths: batching.first_stage_batched(
+                    model, s1, ids, cache, lengths))
+            _batchers["head"] = batching.MicroBatcher(
+                lambda h, _c, _l: batching.apply_lm_head_batched(model, h))
+        return _batchers["stage"], _batchers["head"]
 
 
 class InsufficientFunds(Exception):
@@ -143,21 +161,21 @@ def _run(idx, prompt, model, tok, s1, s2, host_c, port_c, host_b, port_b,
     cache, past = common.new_cache(), 0
     a_ms = c_ms = b_ms = head_ms = net_ms = 0.0
 
+    stage_batcher, head_batcher = get_batchers(model, s1)
+
     def step(token_block):
         nonlocal a_ms, c_ms, b_ms, head_ms, net_ms, past
-        with compute_lock:
-            t = time.time()
-            h1 = common.first_stage(model, s1, token_block, cache, past)
-            a_ms += (time.time() - t) * 1000
+        t = time.time()
+        h1 = stage_batcher.submit(token_block, cache, past)
+        a_ms += (time.time() - t) * 1000
         t = time.time()
         common.send_msg(sock, {"type": "act", "hidden": h1}, codec=codec)
         resp = common.recv_msg(sock)
         rt = (time.time() - t) * 1000
         past += token_block.shape[1]
-        with compute_lock:
-            th = time.time()
-            tok_id = int(common.apply_lm_head(model, resp["hidden"]).argmax(-1))
-            head_ms += (time.time() - th) * 1000
+        th = time.time()
+        tok_id = int(head_batcher.submit(resp["hidden"], None, 0).argmax(-1))
+        head_ms += (time.time() - th) * 1000
         c_ms += resp["c_compute_ms"]
         b_ms += resp["b_compute_ms"]
         net_ms += max(rt - resp["c_compute_ms"] - resp["b_compute_ms"], 0.0)

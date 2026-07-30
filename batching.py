@@ -221,6 +221,30 @@ def mid_stage_batched(model, lo, hi, hidden, cache, lengths):
 
 
 @torch.no_grad()
+def first_stage_batched(model, hi, token_ids, cache, lengths):
+    """Batched equivalent of common.first_stage: embed + layers[0:hi].
+
+    Input is token IDs `[B, q]`, not hidden states -- this is the driver's own stage, which
+    starts from tokens. Embedding is a gather, so it batches for free.
+    """
+    hidden = model.model.embed_tokens(token_ids)
+    return run_layers_batched(model, list(model.model.layers)[0:hi], hidden, cache, lengths)
+
+
+@torch.no_grad()
+def apply_lm_head_batched(model, hidden):
+    """Batched next-token logits: `[B, q, H] -> [B, vocab]` (last position of each row).
+
+    Worth batching more than anything else in the pipeline. The head is a single
+    `[.., H] @ [H, 151936]` GEMM -- ~38 ms against ~9 ms for a whole transformer layer (S14
+    benchmark) -- and its cost is dominated by streaming that 151936-wide weight matrix out
+    of memory. Reading it once for eight requests instead of eight times is close to a pure
+    8x on the most expensive single operation the driver performs.
+    """
+    return model.lm_head(hidden)[:, -1, :]
+
+
+@torch.no_grad()
 def last_stage_batched(model, lo, hidden, cache, lengths):
     """Batched equivalent of common.last_stage (final layers + norm)."""
     hidden = run_layers_batched(model, list(model.model.layers)[lo:], hidden, cache, lengths)
@@ -324,12 +348,17 @@ class MicroBatcher:
 
     def _run(self, jobs):
         lengths = [j.length for j in jobs]
-        bcache = BatchedCache.from_single_caches([j.cache for j in jobs], lengths)
         hidden = torch.cat([j.hidden for j in jobs], dim=0)
-        out = self.run_batched(hidden, bcache, lengths)
-        # Hand each connection back its own advanced cache, unpadded.
-        for j, c in zip(jobs, bcache.split_to_single_caches()):
-            j.cache.k, j.cache.v = c.k, c.v
+        if jobs[0].cache is None:
+            # Stateless op (the lm_head): no K/V to fuse, so this is a pure widening of one
+            # GEMM -- the cheapest batching there is.
+            out = self.run_batched(hidden, None, lengths)
+        else:
+            bcache = BatchedCache.from_single_caches([j.cache for j in jobs], lengths)
+            out = self.run_batched(hidden, bcache, lengths)
+            # Hand each connection back its own advanced cache, unpadded.
+            for j, c in zip(jobs, bcache.split_to_single_caches()):
+                j.cache.k, j.cache.v = c.k, c.v
         self.stats["passes"] += 1
         self.stats["requests"] += len(jobs)
         self.stats["max_batch_seen"] = max(self.stats["max_batch_seen"], len(jobs))
