@@ -228,6 +228,11 @@ def main():
     ap.add_argument("--serial", action="store_true")
     ap.add_argument("--prompt", default=None)
     ap.add_argument("--copies", type=int, default=1, help="repeat the prompt set N times")
+    ap.add_argument("--engine", choices=["torch", "ns"], default="torch",
+                    help="'ns' runs this driver's Linears (and the lm_head) on the AVX2 int8 "
+                         "kernel via ns_engine. The head is the largest GEMM in the whole "
+                         "pipeline, so the driver is where it matters most. Needs "
+                         "NEURON_NS_LIB pointing at a built library.")
     ap.add_argument("--slice-dir", default=None,
                     help="load the driver shard from a byte-range slice (slice_downloader) "
                          "instead of the full HF cache. The driver is the only role that "
@@ -275,6 +280,18 @@ def main():
         n = AutoConfig.from_pretrained(args.slice_dir).num_hidden_layers
     else:
         tok, model, n = common.load_model_shard(0, args.s1, embed=True, head=True)
+
+    if args.engine == "ns":
+        import ns_engine
+        lib = ns_engine.load()
+        if lib is None:
+            print(f"[A] WARNING: no kernel at {ns_engine.DEFAULT_LIB} -- staying on PyTorch")
+        else:
+            # head=True: lm_head sits outside model.model.layers and is the biggest GEMM
+            # here, so skipping it would forfeit most of the driver-side win.
+            model, converted = ns_engine.convert(model, 0, args.s1 - 1, lib, head=True)
+            print(f"[A] engine=ns | {converted} Linear layers on the int8 kernel "
+                  f"(layers 0-{args.s1 - 1} + lm_head)")
     eos_id = tok.eos_token_id
     print(f"[A] ready in {time.time()-t0:.1f}s | {common.MODEL_ID} | layers={n} | "
           f"A owns 0..{args.s1-1} | route: {route}")

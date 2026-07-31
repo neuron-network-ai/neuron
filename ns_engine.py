@@ -136,11 +136,16 @@ class NSLinear(torch.nn.Module):
                                           None if self.bias is None else self.bias.float())
 
 
-def convert(model, layer_lo, layer_hi, lib=None):
+def convert(model, layer_lo, layer_hi, lib=None, head=False):
     """Swap every nn.Linear inside layers[layer_lo:layer_hi+1] for an NSLinear.
 
-    Scoped to the node's OWN layers on purpose -- embed and lm_head are not touched, and a
-    node that holds neither is unaffected by them.
+    Scoped to the node's OWN layers on purpose, so a node converts only what it serves.
+
+    `head=True` also converts `lm_head`, which lives OUTSIDE model.model.layers and would
+    otherwise be silently skipped -- easy to miss, and expensive to miss: it is by far the
+    largest GEMM in the pipeline (151936x1536 for Qwen2.5-1.5B) and the single biggest cost
+    on the driver. Measured on Windows/AVX2: 37.78 ms -> 16.09 ms, 2.35x, rel_err 0.013.
+    Only the driver holds it; every other node passes head=False.
     """
     lib = lib or load()
     if lib is None:
@@ -156,6 +161,9 @@ def convert(model, layer_lo, layer_hi, lib=None):
                 if isinstance(child, torch.nn.Linear):
                     setattr(mod, name, NSLinear(child, lib))
                     n += 1
+    if head and isinstance(getattr(model, "lm_head", None), torch.nn.Linear):
+        model.lm_head = NSLinear(model.lm_head, lib)
+        n += 1
     return model, n
 
 

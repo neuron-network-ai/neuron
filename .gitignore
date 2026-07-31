@@ -79,3 +79,7 @@ neuronscript*.o
 neuronscript*.obj
 neuronscript*.dll
 neuronscript*.so
+
+# built kernel artifacts
+ns.dll
+libns.so

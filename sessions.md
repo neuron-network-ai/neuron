@@ -1054,12 +1054,33 @@ same prompt, same 24 tokens, answer identical every time:
 signal rather than noise. Both nodes verified on the kernel via their `stats` message: 63
 Linears converted each, and the OptiPlex's 1449 calls = exactly 23 decode tokens × 63.
 
-Ceiling worth knowing: the driver machine is Windows with **no C compiler** (no gcc, clang,
-MSVC or VS; winget absent, Chocolatey present but the shell is not elevated), so at most 2 of
-3 nodes can run this today. WSL Ubuntu *is* installed but does not help — a Linux `.so`
-cannot be loaded by Windows Python, so the driver itself would have to move into WSL. If the
-driver is ever converted, note the kernel calls C11 `aligned_alloc`, which MinGW-w64 does not
-provide (Windows has `_aligned_malloc`), so a compatibility shim is needed first. And it does not compose with `NEURON_WEIGHT_DTYPE=fp16` — NSLinear
+**Then the driver too — 3 of 3.** MinGW 16.1.0 installed via Chocolatey (needed an elevated
+shell; `winget` is absent on this machine), kernel built as a self-contained Windows DLL with
+the `ns_win_compat.h` shim:
+
+| nodes on int8 | runs (tok/s) | mean | vs baseline |
+|---|---|---|---|
+| 0 of 3 (all PyTorch) | 1.75, 1.66 | **1.71** | — |
+| 2 of 3 (remotes only) | 1.98, 1.85, 1.97 | 1.93 | +13% |
+| **3 of 3 (+ driver)** | **2.78, 2.75, 2.73** | **2.75** | **+61%** |
+
+**The driver is where the win is**, and by a wide margin — converting it alone moved more
+than both remote nodes combined. Because it holds `lm_head`, the largest GEMM in the whole
+pipeline: 151936×1536, measured on Windows at **37.78 ms → 16.09 ms (2.35×)**. `convert()`
+walks `model.model.layers`, so `lm_head` sits outside it and had to be converted explicitly —
+easy to miss, and missing it would have forfeited most of the gain. Driver reports **71**
+Linears converted = 10 layers × 7 + the head. Answer identical to fp32 at both 24 and 40
+tokens.
+
+**Two build notes worth keeping:**
+- The kernel calls C11 `aligned_alloc`, which MinGW-w64 lacks. The shim maps it to plain
+  `malloc` rather than `_aligned_malloc`, because the sources release aligned AND ordinary
+  pointers through the same `free()` — redirecting `free()` globally would corrupt the heap.
+  Safe because every vector access is `_mm256_loadu_si256` (24 unaligned loads across the
+  three files, zero aligned ones), so the alignment was never load-bearing.
+- A plain MinGW `-shared` DLL will not load under ctypes: it pulls in `libgcc`/`libwinpthread`
+  which are not on the Python process's search path. Build with
+  `-static -static-libgcc` for a self-contained DLL. And it does not compose with `NEURON_WEIGHT_DTYPE=fp16` — NSLinear
 keeps the fp32 weight for prefill fallback, so it costs memory rather than saving it.
 
 ---
