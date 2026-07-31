@@ -991,15 +991,14 @@ are correct; only one is the relevant comparison.
 
 **Three findings that block the integration as originally scoped:**
 
-1. **The compiler and the kernel do not connect.** The Python compiler emits a sparse
-   coordinate format (one `(src:int32, dst:int32, weight:int8-padded-to-4)` triple per
-   nonzero weight). The C kernels consume a *dense* `int8_t W[od*id]`. Grepping all three C
-   sources for the compiler's format magic returns **zero** hits — nothing reads it.
-2. **That format is 2.7× LARGER than fp32 on real weights.** At the compiler's own default
-   sparsity threshold it keeps 89% of `gate_proj`'s weights → 12 bytes each → **147 MB vs
-   55 MB fp32, vs 13.8 MB for the dense int8 the kernel actually wants.** The format only
-   compresses above ~67% sparsity; transformer weights are dense. Raising the threshold to
-   keep 18% shrinks it to 30 MB but discards 82% of the model.
+1. **The compiler and the kernel do not connect.** The compiler's output encoding and the
+   kernel's expected input encoding are different things; grepping all three C sources for
+   the compiler's format magic returns **zero** hits — nothing reads it.
+2. **That encoding is 2.7× LARGER than fp32 on real weights.** At the compiler's own default
+   sparsity threshold it keeps 89% of `gate_proj`'s weights → **147 MB vs 55 MB fp32, vs
+   13.8 MB for the dense int8 the kernel actually wants.** It only compresses on sparse
+   matrices; transformer weights are dense. Raising the threshold to keep 18% shrinks it to
+   30 MB but discards 82% of the model.
 3. **The Windows driver machine has no C compiler at all** — no gcc, clang, MSVC or Visual
    Studio. The kernel builds and runs only on the two Linux nodes.
 
@@ -1025,9 +1024,26 @@ model answer *"I'm sorry, but I can't provide an answer"*, and the trade is bad.
 source's own closing verdict says the same thing: *the value is the distribution layer, not
 the kernel — use llama.cpp as the kernel.*
 
-`node_ns.py` was therefore **not written**: it cannot be built as specified (the compiler's
-output does not feed the runtime), and the version that could be built would be slower than
-the path already shipping.
+**BUILT AND MEASURED ANYWAY (founder's call, and the right one).** `node_ns.py` +
+`ns_engine.py`: a node server speaking the identical wire protocol, with every Linear in its
+own layers swapped for a ctypes call into the kernel (dense int8 packing — the compiler is
+not in the path, see above). Live A/B on the real 3-machine chain, same prompt, same 24
+tokens, only the middle node's engine changing:
+
+| middle node engine | throughput | answer |
+|---|---|---|
+| PyTorch fp32 | 1.57 tok/s | "…a phenomenon called Rayleigh…" |
+| **int8 AVX2** | **1.77 tok/s** | **identical** |
+
+**+12.7% end-to-end from converting one of three nodes**, answer unchanged. The node's own
+`stats` message confirms the kernel really ran rather than silently falling back: **63**
+Linear layers converted (9 layers × 7), **1449 kernel calls** = 23 decode tokens × 63, and
+**63 fallbacks** = exactly one prefill pass. Prefill deliberately stays on PyTorch — the
+kernel is mat-vec, so N scalar calls lose to one batched GEMM.
+
+Ceiling worth knowing: the driver machine is Windows with **no C compiler**, so at most 2 of
+3 nodes can ever run this. And it does not compose with `NEURON_WEIGHT_DTYPE=fp16` — NSLinear
+keeps the fp32 weight for prefill fallback, so it costs memory rather than saving it.
 
 ---
 
