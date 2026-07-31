@@ -1041,8 +1041,25 @@ Linear layers converted (9 layers × 7), **1449 kernel calls** = 23 decode token
 **63 fallbacks** = exactly one prefill pass. Prefill deliberately stays on PyTorch — the
 kernel is mat-vec, so N scalar calls lose to one batched GEMM.
 
-Ceiling worth knowing: the driver machine is Windows with **no C compiler**, so at most 2 of
-3 nodes can ever run this. And it does not compose with `NEURON_WEIGHT_DTYPE=fp16` — NSLinear
+**Then converted the OptiPlex too — 2 of 3 nodes on the kernel.** Three runs of each config,
+same prompt, same 24 tokens, answer identical every time:
+
+| nodes on int8 | runs (tok/s) | mean |
+|---|---|---|
+| 0 of 3 (all PyTorch) | 1.62, 1.57, 1.63 | **1.61** |
+| 1 of 3 (Pavilion) | 1.77 | 1.77 |
+| **2 of 3 (+ OptiPlex)** | 1.98, 1.85, 1.97 | **1.93** |
+
+**+20% end-to-end.** The ranges do not overlap (PyTorch max 1.63 < int8 min 1.85), so this is
+signal rather than noise. Both nodes verified on the kernel via their `stats` message: 63
+Linears converted each, and the OptiPlex's 1449 calls = exactly 23 decode tokens × 63.
+
+Ceiling worth knowing: the driver machine is Windows with **no C compiler** (no gcc, clang,
+MSVC or VS; winget absent, Chocolatey present but the shell is not elevated), so at most 2 of
+3 nodes can run this today. WSL Ubuntu *is* installed but does not help — a Linux `.so`
+cannot be loaded by Windows Python, so the driver itself would have to move into WSL. If the
+driver is ever converted, note the kernel calls C11 `aligned_alloc`, which MinGW-w64 does not
+provide (Windows has `_aligned_malloc`), so a compatibility shim is needed first. And it does not compose with `NEURON_WEIGHT_DTYPE=fp16` — NSLinear
 keeps the fp32 weight for prefill fallback, so it costs memory rather than saving it.
 
 ---
