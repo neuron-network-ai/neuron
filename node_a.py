@@ -228,6 +228,13 @@ def main():
     ap.add_argument("--serial", action="store_true")
     ap.add_argument("--prompt", default=None)
     ap.add_argument("--copies", type=int, default=1, help="repeat the prompt set N times")
+    ap.add_argument("--slice-dir", default=None,
+                    help="load the driver shard from a byte-range slice (slice_downloader) "
+                         "instead of the full HF cache. The driver is the only role that "
+                         "still pulled the WHOLE checkpoint -- fine at 1.5B (3 GB), absurd "
+                         "at 7B+ where snapshot_download fetches every shard (15 GB) to use "
+                         "a third of it. With --first, a slice carries embed + lm_head, "
+                         "which is exactly what this role needs.")
     ap.add_argument("--wallet-id", default=None,
                     help="wallet to charge (coordinator mode only). If omitted, a fresh "
                          "throwaway test wallet is auto-created and faucet-funded — "
@@ -259,7 +266,15 @@ def main():
 
     print(f"[A] loading my shard (embed + layers 0..{args.s1-1} + lm_head) ...")
     t0 = time.time()
-    tok, model, n = common.load_model_shard(0, args.s1, embed=True, head=True)
+    if args.slice_dir:
+        from transformers import AutoConfig, AutoTokenizer
+
+        import slice_downloader
+        model = slice_downloader.load_slice_model(args.slice_dir)
+        tok = AutoTokenizer.from_pretrained(args.slice_dir)
+        n = AutoConfig.from_pretrained(args.slice_dir).num_hidden_layers
+    else:
+        tok, model, n = common.load_model_shard(0, args.s1, embed=True, head=True)
     eos_id = tok.eos_token_id
     print(f"[A] ready in {time.time()-t0:.1f}s | {common.MODEL_ID} | layers={n} | "
           f"A owns 0..{args.s1-1} | route: {route}")

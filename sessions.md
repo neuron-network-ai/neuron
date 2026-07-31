@@ -965,6 +965,72 @@ junction caching (gap 3).
 
 ---
 
+## Session 22 (2026-07-31) — evaluated a hand-written AVX2 int8 kernel as the node engine
+
+**Goal:** replace PyTorch as the node-side inference engine with an experimental CPU-native
+int8 compiler + AVX2 kernel, and measure tok/s against the PyTorch baseline.
+
+*(Kernel sources are deliberately untracked — see `.gitignore`. Only the measurements and the
+decision are recorded here, since those are what future sessions need.)*
+
+**Measured, on the Pavilion (idle, gcc 13.3, AVX2, PyTorch single-thread), against REAL
+Qwen2.5-1.5B layer-10 weights — not random Gaussians:**
+
+| matrix | PyTorch fp32 | int8 AVX2 | speedup | rel err |
+|---|---|---|---|---|
+| `q_proj` 1536×1536 | 0.810 ms | 0.371 ms | 2.18× | 0.034 |
+| `o_proj` 1536×1536 | 0.819 ms | 0.372 ms | 2.20× | 0.041 |
+| `gate_proj` 8960×1536 | 3.532 ms | 2.321 ms | 1.52× | 0.058 |
+| `down_proj` 1536×8960 | 3.499 ms | 1.041 ms | 3.36× | 0.070 |
+| **GEMM total** | **8.660 ms** | **4.105 ms** | **2.11×** | |
+
+**The kernel is real. The headline number in its own harness is not.** That harness reports
+9–20× because it benchmarks against a naive C scalar triple loop. Against the baseline NEURON
+actually runs — PyTorch's BLAS GEMM — it is **2.11×** on a real layer's Linears. Both figures
+are correct; only one is the relevant comparison.
+
+**Three findings that block the integration as originally scoped:**
+
+1. **The compiler and the kernel do not connect.** The Python compiler emits a sparse
+   coordinate format (one `(src:int32, dst:int32, weight:int8-padded-to-4)` triple per
+   nonzero weight). The C kernels consume a *dense* `int8_t W[od*id]`. Grepping all three C
+   sources for the compiler's format magic returns **zero** hits — nothing reads it.
+2. **That format is 2.7× LARGER than fp32 on real weights.** At the compiler's own default
+   sparsity threshold it keeps 89% of `gate_proj`'s weights → 12 bytes each → **147 MB vs
+   55 MB fp32, vs 13.8 MB for the dense int8 the kernel actually wants.** The format only
+   compresses above ~67% sparsity; transformer weights are dense. Raising the threshold to
+   keep 18% shrinks it to 30 MB but discards 82% of the model.
+3. **The Windows driver machine has no C compiler at all** — no gcc, clang, MSVC or Visual
+   Studio. The kernel builds and runs only on the two Linux nodes.
+
+**What was built and kept:** the SIMD source compiles cleanly as a shared library
+(`-O3 -mavx2 -shared -fPIC`) exporting `matmul_i8_avx2` / `matmul_i8_avx2_4x`, and a ctypes
+harness drives it from Python against real safetensors weights. That is the viable
+integration path if this is picked up again — dense int8 packing + ctypes, *not* the sparse
+compiler.
+
+**Numerical limit worth recording:** the kernel accumulates `madd_epi16` into **int32**, so
+`sum(|w_i16 · x_i16|)` over `id` terms must stay below 2³¹. At `id`=1536 with int8 weights
+near ±127 that caps `|x_int16|` around 10⁴ — so `input_scale` cannot be the fixed 128 the
+source comment suggests, especially given NEURON's measured activation absmax of ~6620
+(`wire_codec.py`). The harness picks `input_scale` from the actual input range instead.
+
+**Decision: do NOT make this the node engine.** Not because it doesn't work — it does — but
+because `engine/local_gguf.py` already measured **6.7×** over fp32 with quality intact
+(Q4_K_M, 36 ms/token vs 240), which is ~3× better than this kernel's 2.11×, and that 2.11×
+covers only the Linear GEMMs — a decoder layer also runs RMSNorm, RoPE, softmax attention
+over the K/V cache and SwiGLU, none of which the kernel touches, so end-to-end would be
+strictly less. Add the 3.4–7.0% per-GEMM error against [P9], where naive int8 made this exact
+model answer *"I'm sorry, but I can't provide an answer"*, and the trade is bad. The kernel
+source's own closing verdict says the same thing: *the value is the distribution layer, not
+the kernel — use llama.cpp as the kernel.*
+
+`node_ns.py` was therefore **not written**: it cannot be built as specified (the compiler's
+output does not feed the runtime), and the version that could be built would be slower than
+the path already shipping.
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load

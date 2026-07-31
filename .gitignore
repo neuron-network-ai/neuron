@@ -69,3 +69,13 @@ Thumbs.db
 .vscode/
 agent/config.node-*.json
 model_slice_*/
+
+# NeuronScript — proprietary inference optimizations. Never commit.
+neuronscript.py
+neuronscript_simd.c
+neuronscript_tiler.c
+neuronscript_bitmask.c
+neuronscript*.o
+neuronscript*.obj
+neuronscript*.dll
+neuronscript*.so
