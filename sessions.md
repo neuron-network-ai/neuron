@@ -1683,6 +1683,27 @@ which works today, 72B needs ~20 nodes — which is exactly what `model_tiers.py
 Also worth recording: 72B Q4_K_M is ~47 GB and this machine has 45 GB free, so the single-machine
 comparison run that was possible for 70B in Session 25 is no longer possible here.
 
+### Deployed, and a bug the deploy surfaced
+
+Founder deployed `model_tiers.py` and `main.py` and restarted the coordinator. Live tiers are now
+`1.5b` / `7b` (Qwen2.5-7B, min_nodes 3) / `70b` (Qwen2.5-72B) — the gated Meta tier is gone.
+
+Restarting an agent against the new build exposed a separate bug, found by reading the agent's
+own log rather than by a test: a **verified** node was told
+
+    PROBATIONARY: serving challenges only — a verifier must confirm this node before it
+    receives live requests or earns NRN
+
+while sitting at `challenges_passed=2`, `standing=verified`, `eligible=True` — routing and
+earning the whole time. `/node/register` derived the reported standing from *"did this call carry
+the register secret"* instead of the node's actual state. It fires routinely (a relayed node
+re-registers on a ticket refresh, and on any restart that needs one), so **a stranger would be
+told on every restart that they had stopped earning** — and it would look like the auto-verifier
+had failed when it had not. Fixed to read standing back from the DB; the "you will not earn" note
+now only attaches when the node really is probationary. `coordinator/test_open_join.py` 26 (2 new),
+plus an end-to-end check on a temp DB: register → probationary, attest → verified, re-register →
+verified with no note. Deployed and confirmed present in the running file.
+
 ### Not done, and why
 "Each node runs full 7B locally, coordinator routes to a free node" changes what a node *is*:
 today a node handles opaque tensor slices and never sees text, and that property is the basis of
