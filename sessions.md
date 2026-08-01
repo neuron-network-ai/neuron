@@ -1085,6 +1085,542 @@ keeps the fp32 weight for prefill fallback, so it costs memory rather than savin
 
 ---
 
+## Session 23 (2026-07-31) — the rest of the NeuronScript stack, measured: tiler and predictor both rejected
+
+Goal: add `neuronscript_tiler.c` (the L3 tile scheduler) and `neuronscript_bitmask.c` (the
+row predictor) on top of the shipped SIMD kernel and measure each step. **Both were
+measured and both were rejected.** The SIMD kernel from Session 22 remains the only one in
+the path.
+
+### The three numbers
+
+Interleaved simd/tiler runs back to back (see the confound below), 3 runs each, same prompt
+("Why is the sky blue"), same 24 tokens, all 3 nodes on the int8 kernel:
+
+| config | runs (tok/s) | mean | vs SIMD | answer vs PyTorch |
+|---|---|---|---|---|
+| **a. SIMD only** | 2.37, 2.45, 2.15 | **2.32** | — | identical |
+| **b. SIMD + tiler** | 2.22, 2.41, 2.16 | **2.26** | **−2.6%** | identical |
+| **c. + predictor** | — | **crashes** | — | **FAILS** |
+
+(c) has no number because it never produced one: **exit `0xC0000374`, STATUS_HEAP_CORRUPTION.**
+
+### Why the tiler cannot help (structural, not tuning)
+
+`tile_rows_for(in_dim)` divides a compiled-in 16.5 MB budget by `in_dim`. Every Linear in a
+Qwen2.5-1.5B decoder layer is *smaller than one tile*:
+
+| linear | od × in | weight | n_tiles |
+|---|---|---|---|
+| q/o_proj | 1536×1536 | 2.4 MB | **1** |
+| gate/up_proj | 8960×1536 | 13.8 MB | **1** |
+| down_proj | 1536×8960 | 13.8 MB | **1** |
+| lm_head | 151936×1536 | 233 MB | 14 |
+
+`n_tiles = 1` means one tile = the whole matrix, i.e. the tiler's loop degenerates to
+exactly the SIMD kernel's loop plus ping/pong copies. Measured locally on real weights at
+batch=1: q_proj 0.197 vs 0.194 ms, gate_proj 1.231 vs 1.239, down_proj 0.899 vs 0.903,
+lm_head 19.73 vs 19.86 — identical within noise, every one.
+
+And the tiler's whole premise — amortise a tile load across a batch — is void at batch=1,
+which is what decode is. Its one real effect is on **prefill**, where it replaces PyTorch's
+blocked GEMM with a row-at-a-time kernel: **0.14×–0.56×, i.e. 2–7× slower** (batch=16:
+q_proj 2.60 ms vs torch 0.370, down_proj 11.99 vs 3.695). That is why "tiler on every
+forward pass" costs rather than pays — the end-to-end −2.6% is the prefill regression
+showing up: driver layer compute 1.87 s → 2.47 s (+32%), head 1.07 → 1.37 (+28%), every run,
+not noise.
+
+The tiler is not useless in principle — it would engage on a model whose layers exceed
+16.5 MB (70B: 8192×8192 = 67 MB → 4 tiles). It does nothing at 1.5B.
+
+**One thing the tiler does do better:** per-row dequant scales instead of the mat-vec path's
+one scale per tensor — lm_head rel_err 0.0109 vs 0.0297. Accuracy, not speed. Worth
+harvesting into the SIMD path on its own.
+
+### Why the predictor fails the quality gate
+
+`exec_tile_masked` (neuronscript_bitmask.c:210) **zeroes every row it does not predict**.
+That is not a rounding error, it is a deleted logit. On lm_head it forced 56,888 of 151,936
+logits to exactly 0.0 while computing 62.6% of rows.
+
+lm_head is also the *only* matrix the predictor can ever touch here — everything else has
+n_tiles=1, so `full_system` always takes its `ti==0` full-compute branch and the predictor
+never engages. So it can only act at exactly the place where argmax *is* the generated token.
+Measured against PyTorch on real hidden states, **7/9 tokens** (simd and tiler both 9/9):
+
+```
+  ' sky'        -> '.sky'     WRONG
+  ' phenomenon' -> '现象'      WRONG
+```
+
+It *is* faster on lm_head (11.5 ms vs 19.9, 1.72×) — by not computing 37% of the answer.
+
+**And it corrupts the heap.** `RowMask` is `uint64_t bits[1024]` = 65,536 rows, but
+`mask_set(m, row)` indexes `bits[row>>6]` with absolute row numbers. lm_head has **151,936**
+rows → word index up to 2374 → a ~10.8 KB out-of-bounds write past the struct. Crash
+confirmed end-to-end (`0xC0000374`). The unit test only survived it because a smaller heap
+happened to absorb the overwrite. Any output ≥ 65,536 rows triggers this — every vocabulary
+projection of every model we care about.
+
+### The measurement trap that nearly produced a fake +73%
+
+The first SIMD set measured **1.21 / 1.23 / 1.47 tok/s**; the first tiler set measured
+**2.24 / 2.27 / 2.22**. Reported naively that is "+73% from the tiler". It is entirely
+Wi-Fi: net time 4.8 s → 1.0 s between the two sets, while node compute was unchanged
+(node_c 3.5 s in both). **Interleaving the configs run-by-run** collapsed the difference to
+−2.6%. Never measure two engine configs in separate blocks on this network.
+
+Root cause: node_c (Pavilion) is on Wi-Fi at **−73 dBm, Link Quality 37/70**, with Tailscale
+ping swinging **44–148 ms** to a peer on its own LAN (node_b, wired, is 8 ms). It is also
+running the founder's IRIS stack — `iris_voice.py` + `iris_widget.py` at ~52% CPU each on 4
+cores, bursty (load 3.14 → 0.73 within minutes). Both left running: they were also up during
+Session 22's 2.75 tok/s, so killing them would have made the comparison *less* comparable.
+
+**Session 22's 2.75 tok/s did not reproduce today — best single run was 2.45.** Same code,
+same nodes, same kernel. The delta is the Pavilion's link, not the engine.
+
+**The real bottleneck is now the network, not the kernel.** In the worst runs the three
+machines were 15%/14%/11% utilised — idle ~85% of the time waiting on the wire. Optimising
+GEMMs further is optimising the 20–30% that is compute. Put node_c on Ethernet (`enp2s0` is
+DOWN) before any further engine work; that is worth more than any kernel change measured
+here.
+
+### State
+
+`ns_engine.py` already carries the full three-mode adapter (`NEURON_NS_MODE=simd|tiler|hybrid`,
+`_TiledWeight`, `load_tiler`/`load_bitmask`, `tile_report`) and `node_a.py` gained
+`--dump-json`. **The shipped default stays `simd`** — the other two modes are reachable only
+by env var, and on this evidence should stay that way. `ns_tiler.dll` / `ns_bitmask.dll`
+built locally (MinGW 16.1.0, `-static -static-libgcc`, `-include ns_win_compat.h`); the
+remote nodes were never switched off `simd`, so the live network is untouched.
+
+Note the founder's brief named `tiler_only_run()`; the actual exports are `tiler_run()`
+(neuronscript_tiler.c) and `tiler_only()` (neuronscript_bitmask.c) — the adapter binds
+`tiler_run`.
+
+---
+
+## Session 24 (2026-07-31) — the cube diagonal predictor: built, measured, rejected at Test 3
+
+**Goal:** build `neuronscript_cube.c` — estimate which output rows matter by reading the main
+diagonal of four 64×64 corner windows (256 values = 0.002% of the matrix), skip the rows below
+0.3× the mean diagonal magnitude, run the rest on the AVX2 4-row kernel. Target: ≥20% of
+`down_proj` rows skipped with tokens unchanged.
+
+*(Kernel source deliberately untracked, added to `.gitignore` before anything else was written,
+along with the `cube_check.py` / `cube_corr_audit.py` harnesses. Only measurements here.)*
+
+**Tests 1 and 2 pass. Test 3 fails, and the stop rule applies — Tests 4 and 5 were not run.**
+
+### Test 1 — build (Pavilion, gcc 13.3) ✅
+Clean with the specified command, and still clean under `-Wall -Wextra`. The session-23 heap
+corruption is fixed and regression-tested in the binary: `RowMask` is `calloc((od+63)/64, 8)`
+sized from the real `out_dim`, every set/get is range-checked, and a mask at od=**151936**
+(lm_head, the shape that crashed) allocates 2374 words and rejects out-of-range indices.
+
+### Test 2 — synthetic weights ✅ (but the predictor never engaged)
+Max abs error vs fp32: down_proj 4.12% of output std, gate_proj 3.83%, q_proj 3.35% — all under
+the 5% bar. **Rows skipped: 0.0%.** The error measured is therefore pure int8 quantisation, not
+prediction error: random Gaussian weights have no diagonal structure by construction, the
+measured correlation was 0.007, and the >0.4 correlation gate correctly refused to enable the
+predictor. A pass, but not evidence for anything.
+
+### Test 3 — real Qwen2.5-1.5B weights ❌
+
+| matrix (layer 10) | corr (all rows) | enabled | rows skipped | oracle-skippable |
+|---|---|---|---|---|
+| `down_proj` 1536×8960 | **−0.0152** | no | **0.0%** | **0.0%** |
+| `gate_proj` 8960×1536 | −0.0129 | no | 0.0% | 0.0% |
+| `up_proj` 8960×1536 | +0.0176 | no | 0.0% | 0.0% |
+
+**Two independent failures, either one fatal.**
+
+**(a) The 0.509 correlation is a sample-size artifact.** `diagonal_check.py` hardcodes
+`n_samples = 20`. Porting its correlation math verbatim and varying only that count, on the
+same layer-10 weights:
+
+| matrix | n=20 | n=50 | n=100 | n=400 | n=1536 (all rows) |
+|---|---|---|---|---|---|
+| down_proj | **+0.5095** | +0.2640 | +0.3291 | +0.1804 | **+0.1605** |
+| gate_proj | +0.2477 | +0.0499 | +0.1481 | +0.1930 | +0.1880 |
+| up_proj | +0.4192 | +0.1024 | +0.0738 | +0.1323 | +0.1456 |
+
+The n=20 column reproduces the briefed 0.248 / 0.509 / 0.419 almost exactly, so the port is
+faithful — those numbers are real, they are just twenty points. Measured against every row they
+decay to 0.15–0.19, below the 0.4 bar. And 0.16 is the *generous* variant, which reads a window
+at every position along the diagonal; the algorithm as specified interpolates four corners, and
+that estimate scores **−0.015**, because it is nearly flat: its row estimates span only
+1.12× min-to-max while the true row magnitudes span 9.47×.
+
+**The corner-to-center 0.8% prediction is the same illusion.** down_proj's 64-long diagonals:
+TL 0.0186, TR 0.0243, BL 0.0200, BR 0.0182, CENTER 0.0190 — and eight windows sampled at
+**random**, off any diagonal, land in 0.0179–0.0233, the same band, around a whole-matrix mean
+of 0.0210. Corners predict the centre because every 64-element window of this matrix has
+roughly the same mean |w|. A random window predicts it equally well. That is homogeneity, and
+homogeneity is precisely what leaves nothing to skip.
+
+**(b) The 0.3× rule cannot skip a row of down_proj at any layer — even with perfect knowledge.**
+This one does not depend on the estimator at all. Per-row mean |W| across all 28 down_proj:
+
+| | min/mean ratio | rows below 0.3× mean | rows below 0.6× mean |
+|---|---|---|---|
+| best case for skipping (layer 25) | 0.218 | **0.7%** | 3.0% |
+| worst (layer 27) | 0.817 | 0.0% | 0.0% |
+| **24 of 28 layers** | ≥ 0.308 | **0.0%** | 0–5.3% |
+
+A row can only be cut when its magnitude falls under 0.3× the mean; the weakest row in the
+weakest layer sits at 0.218× and the other 27 layers never get near it. So an **oracle** holding
+the true row magnitudes skips **0.0%** on 24 of 28 layers and at most **0.7%** anywhere. The 20%
+target is unreachable by construction, and doubling the cut to 0.6× still tops out at 5.5%.
+
+The premise inverted a statistic: "real spike fraction only 0.6% of rows" measured rows *above*
+1.5× the mean. It says nothing about a tail *below* 0.3× — and that tail is empty. Trained
+transformer weight rows are tightly clustered; the sparsity that makes MLP rows skippable is in
+the **activations**, which are input-dependent, not in the weights. This predictor is a function
+of the weights alone, so its active-row set is fixed at load time and identical for every token.
+
+### Why Tests 4 and 5 were not run
+The stop rule, and they would measure nothing. The correlation gate holds the predictor off
+permanently on every real matrix, so `NSLinear` would run today's int8 path plus mask
+indirection: `selftest_shard.py` would pass and tok/s would come back at or slightly below the
+2.32 baseline, and neither number would be about the cube idea.
+
+### What is worth keeping
+- **The RowMask fix and its regression test** — session 23's `STATUS_HEAP_CORRUPTION` is a live
+  bug in `neuronscript_bitmask.c` for any output ≥ 65,536 rows. The pattern here is the fix.
+- **The two gates did their job.** The correlation gate refused three matrices on their own
+  measured structure rather than on an inherited claim, and the quality gate (double-compute,
+  disable on max abs err > 0.05) never had to fire because nothing got past the first gate.
+  Cheap, and the reason nothing wrong ever reached the model.
+- **Per-row dequant scales** are implemented here in the mat-vec path — the accuracy win session
+  23 flagged as worth harvesting (lm_head rel_err 0.0109 vs 0.0297). Independent of the
+  predictor and still worth folding into `ns_engine.pack`.
+- **Method note:** measure a correlation on every row before believing it. n=20 over-reported by
+  3.2× here, and 20 points was enough to make a structural claim look STRONG.
+
+Session 23's conclusion is unchanged and still the priority: the bottleneck is the Pavilion's
+Wi-Fi (−73 dBm, nodes 11–15% utilised), not the GEMMs. Ethernet before any further engine work.
+
+---
+
+## Session 25 (2026-08-01) — Llama 3.3 70B on one machine: the llama.cpp number, and why the NeuronScript comparison could not be run
+
+**Goal:** the decisive NeuronScript-vs-llama.cpp test at 70B. **Steps 1-2 ran. Steps 3-5 are
+not executable on this hardware** — the reasons are arithmetic and were confirmed before the
+download started, not discovered after.
+
+### Step 2 — llama.cpp baseline, measured
+
+`bartowski/Llama-3.3-70B-Instruct-GGUF` Q4_K_M, **42,520,398,816 bytes (42.5 GB)**, single file
+(not split). Windows driver PC, 63.3 GB RAM, 15 threads, n_ctx 2048, raw completion (matching
+`llama-cli -p`, no chat template), prompt `"Why is the sky blue"`, `-n 100`, temperature 0.
+Driven through `llama_cpp` 0.3.34 — there is no `llama-cli.exe` on this machine, same engine.
+
+| run | load | wall | tok/s | ms/token |
+|---|---|---|---|---|
+| 1 (cold) | 118.0 s | 278.10 s | 0.360 | 2781 |
+| 2 (warm) | 75.6 s | 159.40 s | **0.627** | 1594 |
+| 3 (warm) | 91.2 s | 165.13 s | **0.606** | 1651 |
+
+**Steady state ≈ 0.62 tok/s.** The cold run is 1.7× slower purely from paging 42.5 GB into
+52.8 GB of free RAM; anyone quoting a single cold 70B number is quoting their disk. Output was
+**byte-identical across all three runs** (greedy), and factually correct: *"a phenomenon called
+Rayleigh scattering, which is the scattering of light by small particles or molecules in the
+atmosphere."* Raw completion continues the prompt as an article rather than answering directly
+— faithful to `-p`, not the shape to ship.
+
+**What this means for the roadmap.** 70B *does* run on one commodity machine — barely, with
+10 GB of headroom. But a 100-token answer takes **161 s**, against TOKENOMICS §11.6's "<30 s
+answers" gate: **5.4× too slow**. And per [P8] a serial pipeline does not improve single-stream
+latency, so splitting this across the trio would not fix it either — distribution buys
+*capacity* and *throughput*, never single-answer speed. The honest read: 70B is reachable on
+this hardware and unusable at it. Compare `engine/local_gguf.py`'s 1.5B Q4_K_M at 36 ms/token —
+**44× faster per token** at 1/47th the parameters.
+
+### Steps 3-5 — not executable, confirmed by measurement
+
+**(a) Nothing consumes the compiler's output.** Grepping every kernel source for the NSProgram
+magic `NS03`: `neuronscript_simd.c` 0, `neuronscript_tiler.c` 0, `neuronscript_bitmask.c` 0,
+`neuronscript_cube.c` 0. There is no fourth component to build into `libns.dll`. This restates
+Session 22's finding; it has not changed.
+
+**(b) The format is 2.67× larger than fp32.** Measured on a real `gate_proj` (8960×1536) at
+`NSCompiler`'s own default `sparsity_threshold=0.005`: **89.0%** of weights survive, and
+`NSProgram` stores 12 bytes each (`int32 src`, `int32 dst`, `int8` padded to 4).
+
+| Llama 3.3 70B (70.6B params) | size |
+|---|---|
+| Q4_K_M GGUF (what ran) | 42.5 GB |
+| dense int8 (what the kernel wants) | 70.6 GB |
+| fp32 | 282.4 GB |
+| **NSProgram** | **754.2 GB** |
+| **RAM available** | **63.3 GB** |
+
+**(c) The compiler cannot ingest it anyway.** `NSCompiler.compile()` takes
+`List[List[float]]` and appends Python ints per surviving weight — 62.8 billion of them, in an
+interpreted loop — and it takes fp32 input, so a Q4_K_M GGUF would first have to be
+dequantized to 282 GB. Even bypassing the compiler entirely for the dense int8 path the kernel
+actually uses, 70.6 GB exceeds RAM, and `NSLinear` additionally retains the fp32 weight for
+prefill fallback.
+
+Extra disk does not move any of these; (a) is a code fact and (b)/(c) are RAM.
+
+### State
+`bench_70b.py` holds the harness. The GGUF stays at `C:\Users\optin\models\llama70b\`
+(42.5 GB) — it is the only artifact here worth keeping, and it makes the tier ladder's "does
+not fit / barely fits" branch testable for real instead of hypothetically.
+
+---
+
+## Session 26 (2026-08-01) — the three things standing between here and one stranger joining
+
+**Goal:** [P21] auto-restart, [P10] stranger NAT traversal, and `engine/local_gguf.py` as the
+driver's default engine. Nothing else. The measure is one outside person able to join.
+
+### FIX 1 — [P21] a node that survives a reboot
+
+Both remote nodes now run the agent as a `systemd --user` service with **`Restart=always` /
+`RestartSec=10`**, installed by `agent/install.py --startup`.
+
+**The documented command did not exist, and the undocumented one was destructive.**
+`install.py` had `--no-startup`, not `--startup`, so `PROBLEMS.md`'s own prescription failed on
+argparse. Running plain `install.py` instead would have been worse: `write_config()` wrote
+DEFAULT_CONFIG *over* the existing file, discarding `node_id`, `node_token`, the layer range the
+machine was serving and its `register_secret`, and re-pinning both nodes to layers 10-18. The
+fix for [P21] would have de-identified the live network. `write_config()` now merges, and
+`--startup` is a non-interactive repair path for a machine that is already a working node.
+
+**A unit file was never going to be enough — and this is the part worth remembering.** A
+`systemd --user` service does **not** start at boot unless the user has *lingering* enabled.
+Without it the unit is bound to a login session: `WantedBy=default.target` fires when somebody
+logs in and never after an unattended reboot, while `systemctl --user is-enabled` cheerfully
+reports `enabled` the whole time. Both machines had `Linger=no`. The installer now enables it
+(unprivileged first, then `sudo -n`; both machines accepted the unprivileged call) and falls
+back to **cron** where neither is permitted — `@reboot` plus a two-minute keepalive
+(`agent/neuron-keepalive.sh`), which needs no privileges at all and is therefore the path a
+stranger's laptop will actually take. `uninstall.py` removes both, or an uninstalled agent
+would be resurrected every two minutes by a cron job nobody remembered.
+
+**The listener check caught a live failure the moment it shipped.** [P21]'s second half —
+"a node can report itself healthy while serving nothing" — is now enforced: `NodeServer.run()`
+records a failed bind instead of dying silently in its daemon thread, `setup()` waits for the
+listener before advertising, and `heartbeat_loop()` refuses to ping while it is down. First run
+on both machines: **`OSError: [Errno 98] Address already in use`** — each still had a
+hand-started `node_ns.py` from Session 23 holding port 50999, 17h 57m old. Before this change
+the agent would have logged `heartbeat ok — active` indefinitely against a node that never
+bound, which is exactly the Pavilion symptom [P21] describes. Stale processes stopped; the
+service owns the port now.
+
+**Verified:** `systemctl --user kill -s SIGKILL neuron-agent` on the OptiPlex → back online in
+the coordinator's `/node/list` in **20 s**, no intervention. Linger is `yes` on both machines,
+units `enabled`. **A real power cycle was NOT performed** — see "left for the founder" below.
+
+### FIX 2 — [P10] a node reachable by a stranger, proven with Tailscale stopped
+
+The relay has existed since Session 12 and **no real request had ever used it.** Both remote
+configs said `behind_nat: false`, so the coordinator stored their **Tailscale** addresses and
+`router.chain_public` handed those to every peer. Any stranger placed anywhere but the final
+segment must dial the next hop, and `100.114.189.46` is not routable for anyone outside the
+founder's tailnet. The mechanism was built, deployed, and bypassed.
+
+- `agent.use_relay()` defaults `behind_nat` to **True** (it was `.get("behind_nat", False)`,
+  contradicting `DEFAULT_CONFIG`'s `true` for any config that merely omitted the key);
+  `--relay/--no-relay` overrides. `setup()` now re-registers when a node is in relay mode but
+  holds no endpoint, not only when its ticket is stale — otherwise a node switched to relay
+  mode after first registration advertises its old direct address forever, since `register()`
+  is skipped once credentials exist. Asking for a relay and getting none is now a warning
+  naming the address peers were given instead of passing silently.
+- Both live nodes re-registered onto relay endpoints: **`150.230.22.250:9002`** (OptiPlex) and
+  **`:9003`** (Pavilion).
+
+**Two bugs found only by actually running the stranger path, either one fatal:**
+
+1. **`agent/__init__.py` did not exist.** `INSTALL.md` step 4 is `python agent/agent.py`, and
+   that dies with `ImportError: cannot import name 'local_chat' from partially initialized
+   module 'agent'`. Python puts `<repo>/agent` on `sys.path` ahead of anything the script adds,
+   and a regular module named `agent` beats a namespace-package directory of the same name — so
+   agent.py imported itself. **Both live nodes had an `__init__.py` created by hand during
+   setup**, which is why eleven sessions never saw it; every stranger would have hit it on the
+   first command in the install guide.
+2. **Proof-of-compute could not promote a node on any segment except the last.**
+   `node_server.py`'s probe role set `s2 = self.hi` — the inclusive last layer — where `s2` is a
+   Python slice bound (`layers[s1:s2]`). It ran one layer too few and advertised a range
+   `proof_of_compute.attest_middle` rejects outright. Auto-placement puts a joining node
+   wherever the coverage GAP is, which here was 0-9, so the realistic case was the broken one.
+
+**The test, run with `tailscale down` on this machine** (both remotes confirmed unreachable at
+their `100.x` addresses first, coordinator still reachable):
+
+| step | result |
+|---|---|
+| fresh copy of the repo, no config, `install.py` | registered as `stranger-test-win`, **probationary** |
+| auto-placement | layers **0-9** (`fill-gap`), no layer numbers chosen by hand |
+| slice download | 1.40 GB, byte-range, ~6 min |
+| listener + tunnel | bound :50999, relay endpoint **`150.230.22.250:9004`** |
+| `/node/list` | **online**, off-tailnet |
+| proof-of-compute over the relay | **passed, max_err 0.0**, 280 ms round trip → **verified** |
+| network | **28/28 layers, `healthy: true`, 3 eligible nodes** |
+
+And a real inference over the relay with Tailscale still down — driver → Pavilion `:9003` →
+OptiPlex `:9002`, every hop over the public internet:
+
+```
+'Why is the sky blue' -> "The sky appears blue because of a phenomenon called Rayleigh..."
+24 tokens, 45.5 s, 0.53 tok/s
+node_a 4.6 s (10%) | node_c 3.7 s (8%) | node_b 2.8 s (6%) | net 33.6 s (74%)
+```
+
+**Correct, and slow in exactly the way [P3]/[P20] predict.** 74% of wall time is the wire, and a
+relayed hop crosses the Amsterdam VM twice, so this is the honest cost of universal
+reachability. Direct Tailscale was faster and worked for nobody outside the tailnet. The
+S21 wire codec (4.25× smaller activations) is still not deployed to these nodes and is the
+obvious next lever on that 33.6 s.
+
+### FIX 3 — `local_gguf` as the driver's default engine
+
+`node_a.py --engine` gains `auto` (**the new default**) and `gguf`; `auto` runs the model
+locally through llama.cpp Q4_K_M whenever the machine can hold it, and falls back to the fp32
+node pipeline when it cannot. This is the same tiering `ui/app.py` and `api/openai_compat.py`
+already applied — node_a was the one driver entry point still defaulting to fp32.
+
+| | tok/s | note |
+|---|---|---|
+| single prompt, cold process | 14.75 | includes the ~1.5 s model load |
+| single prompt, engine-reported | **27.9** | steady state, matches the briefed 28 |
+| 4 prompts, wall clock | **25.29** | load amortized |
+| the fp32 chain it replaces (relay) | 0.53 | above |
+
+Shard load dropped ~40 s → ~1.5 s, and the answer is the correct Rayleigh one.
+
+**On "confirm NRN credited correctly": the local engine credits 0 NRN, deliberately, and that
+is not a gap to close.** No `/infer` call is made because no other machine ran anything —
+crediting the network for local compute would mint NRN for work no node did ([P12]'s open hole)
+and would be farmable by anyone with a laptop, since local execution is verified by nothing.
+The report line says so explicitly rather than leaving a zero to be discovered.
+
+### Left for the founder (both need a human, neither is a code gap)
+
+- ~~A real power cycle.~~ **DONE — the founder rebooted the Pavilion and it passed cleanly.**
+  Booted 14:03:14; `neuron-agent` active at **14:03:27 — 13 s after boot**, with nobody logged
+  in and no SSH; listening on :50999 and heartbeating; back in the coordinator's `/node/list`
+  well inside the 2-minute bar. That is the whole of [P21] closed: linger is what made the
+  user-level unit start with no login, which is the case a reboot actually tests.
+  (Note for future sessions: **the Pavilion cannot be rebooted remotely** — no passwordless
+  sudo, and polkit refuses `systemctl reboot` from an SSH session with `Call to Reboot failed:
+  Interactive authentication required`. It needs someone at the machine.)
+- **A coordinator-billed inference.** `/infer` requires an OAuth-linked wallet since [P17]
+  closed the open faucet, and `node_a.py`'s auto-faucet path can no longer self-fund. Running
+  the billed request — and therefore confirming NRN lands on all three nodes — needs a
+  `wallet_id` from a real Google/GitHub login, or the operator key.
+
+### State
+
+`stranger-test-win` is still running from `C:\Users\optin\neuron-stranger` and is currently the
+only thing covering layers 0-9; stopping it drops the network to 18/28. Both remote agents are
+service-managed and will come back on their own. `.venv` note for future sessions: the local
+engine needs `C:\Users\optin\neuron\.venv\Scripts\python.exe` — the system `py -3.11` has no
+`llama_cpp` and silently reports `local engine unavailable`.
+
+---
+
+## Session 27 (2026-08-01) — the auto-verifier, and what still blocks a real stranger
+
+### TASK 1 — auto-verifier ✅
+
+`verify_service.py`. Sweeps every 60 s, challenges every probationary+online node with
+proof-of-compute, attests the result, logs to `verify_service.log`. Running now, and installed
+to auto-start (`HKCU\...\Run : NEURONVerifier`, via `agent/install.py --with-verifier`).
+
+**Proven, not asserted:** a node registered with no secret (exactly what a stranger does) joined
+`probationary` and was promoted with no human involved —
+
+```
+verify-service-test VERIFIED — layers 0-9, max_err 0.00e+00, 254ms → standing now 'verified'
+```
+
+Three deliberate departures from the brief's sketch, each with a reason:
+- **A timeout is not a failure.** The sketch attests `passed: result` on every outcome. A failed
+  attestation is permanent and `REPUTATION_THRESHOLD` 0.6 means a few of them exclude a machine
+  from the network for good — so an unreachable node (mid-restart, cold shard, relay hiccup)
+  records *nothing*. Passing is attested instantly; condemnation waits for 3 consecutive wrong
+  answers. This fired for real during testing and correctly stayed silent.
+- **It is not in the default `--startup`.** The verifier needs the operator's
+  `NEURON_REGISTER_SECRET` (node addresses are private, `/attest` is secret-gated) and PyTorch.
+  Every stranger runs `--startup`; bundling it would ship a permanently-failing service to every
+  donor and imply they should hold the registration secret. Hence `--with-verifier`.
+- **Challenges are cached per layer range.** Building one loads that range with torch; a 60 s
+  loop would otherwise reload the same shard every minute forever.
+
+Two bugs found while wiring the auto-start, both of the same shape — *trusting PATH*:
+`shutil.which("pythonw")` resolved to a bare Python 3.14 with no PyTorch, so the Run key would
+have died on import at every boot; and the service read its secret only from the environment,
+which auto-start does not provide, so it would have started and immediately exited. It now takes
+`pythonw` from beside the chosen interpreter and falls back to `.env.coordinator`. Both verified
+by reading the registry back and by running with `env -u NEURON_REGISTER_SECRET`.
+
+### TASK 2 — first stranger: prepared, NOT achieved
+
+`STRANGER_INSTALL.md` written — 5 steps, plain English, honest about NRN having no cash value.
+`RELEASE_NOTES_v0.1.0.md` written. `INSTALL.md` rewritten and pointed at the correct repo.
+
+**Three steps cannot be done from here and are not done:**
+1. **Making the repo public** needs a GitHub login this environment does not have (`gh` is not
+   installed). The pre-publication audit *is* done and it is safe: no secret appears in any
+   commit, no API keys, and all three coordinator secrets are overridden by real values on the
+   VM, so the dev defaults in `config.py` are inert. What does go public: 19 Tailscale IPs and
+   6 `ssh user@host` lines across `PROBLEMS.md` / `ROADMAP.md` / `sessions.md`.
+2. **Sending the guide to a person** is not something to do on the founder's behalf.
+3. **Steps 4-6 (their node_id, time-to-first-NRN, issues hit)** describe observations of a real
+   person. There is nothing to record until one exists, and inventing them would defeat the
+   entire point of the milestone.
+
+### TASK 3 (added mid-session) — the silent relay-tunnel death, fixed ✅
+
+Root-caused to a number rather than a hunch: `SO_KEEPALIVE` was on, but with the **OS default
+idle timer — 7,200,000 ms on Windows**, confirmed absent from the registry, i.e. 2 hours. The
+tunnel's control socket is idle by design (it waits for the relay to push `new_conn`), so when
+the relay's end went away the socket stayed ESTABLISHED and blocked in `recv` for exactly that
+long. The ~2 h dead window was the keepalive timer.
+
+Fixed in two layers: keepalive at 60 s/10 s (`SIO_KEEPALIVE_VALS` on Windows, `TCP_KEEPIDLE`
+and friends elsewhere) so the existing reconnect loop actually fires; and
+`agent.relay_reachable()`, which every 4th heartbeat dials the node's **own public endpoint**
+and completes a real handshake — a TCP connect proves nothing, because the relay accepts on the
+public port whether or not it can still reach the node. On failure the tunnel is restarted and
+**the heartbeat is withheld**, so the coordinator routes around the node instead of into it.
+
+`agent/test_relay_liveness.py` 5/5 (the load-bearing case is an endpoint that accepts and never
+speaks). Deployed to all three nodes: every public endpoint answers in 0.03-0.10 s, **zero false
+alarms across 4+ probe cycles**. Full write-up in `PROBLEMS.md` [P22].
+
+### The finding that prompted it
+
+**A relay tunnel dies silently while the node keeps reporting `active`.** Measured: after ~2 h
+the Windows node's relay port accepted TCP and then never spoke (20 s timeout), while both Linux
+nodes answered the same handshake in 0.10 s. Restarting the agent fixed it instantly.
+
+This is [P21]'s "online means nothing" in a second place. Session 26 made the heartbeat assert
+the *local listener* binds; nothing asserts the *tunnel* is alive. So the node stays `online` and
+`verified` in `/node/list`, routing sends it real requests, and it serves none of them — and the
+auto-verifier cannot promote a node in that state either. Every stranger is relayed, and the
+machine it was reproduced on is Windows, which is what most of them will run.
+
+**Fixed — see TASK 3 above.** The shape: the heartbeat dials the node's own public relay endpoint
+periodically and restart `tunnel_client` when the handshake fails, the same way `setup()` now
+refuses to advertise a listener that did not bind.
+
+### Also fixed this session (found by forcing the network path)
+- `neuron_driver.py` used `batching.MicroBatcher` and **never imported `batching`** — every
+  distributed generation through the Chat UI *and* the OpenAI API died on `NameError` at the
+  first token. Invisible because `local_gguf` short-circuits the network path on any machine that
+  can hold the model, and because the tests stub the driver instead of running a generation.
+- `ui/app.py` reached for the driver's tokenizer without loading it when startup had skipped the
+  load — reachable without the new flag, on any install that is capable-but-not-yet-downloaded.
+- New `NEURON_FORCE_NETWORK=1` makes the distributed path testable from the UI at all; without
+  it, no machine that can run locally will ever exercise the chain.
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load

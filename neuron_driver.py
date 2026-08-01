@@ -28,11 +28,19 @@ import time
 
 import torch
 
+import batching  # MicroBatcher — used by _batchers(); missing until 2026-08-01, see below
 import common
 import junction_cache
 import wire_codec
 import node_a  # coord_get_chain / coord_complete (its main() is __main__-guarded)
 from safety import moderation
+
+# `batching` was used in _batchers() and never imported, so EVERY distributed generation
+# through this driver -- the Chat UI and the OpenAI-compatible API both -- died on
+# `NameError: name 'batching' is not defined` the moment it reached the first token. It
+# survived undetected because engine/local_gguf.py short-circuits the network path on any
+# machine that can hold the model, which is every machine this has run on, and because the
+# tests that cover this module stub the driver out rather than executing a real generation.
 
 log = logging.getLogger("neuron.driver")
 

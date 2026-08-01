@@ -26,6 +26,8 @@ IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 LAUNCHD_LABEL = "com.neuron.agent"
 LAUNCHD_PLIST_PATH = os.path.expanduser(f"~/Library/LaunchAgents/{LAUNCHD_LABEL}.plist")
+KEEPALIVE_PATH = os.path.join(HERE, "neuron-keepalive.sh")
+CRON_TAG = "# NEURON-AGENT"
 
 
 def _total_earned(cfg):
@@ -93,6 +95,22 @@ def _remove_startup():
             os.remove(dst)
             subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
             print("  removed systemd user service")
+        _remove_cron_fallback()
+
+
+def _remove_cron_fallback():
+    """Drop the crontab lines + keepalive script install.py adds on Linux when linger is
+    unavailable. Missing this would leave a cron job resurrecting an uninstalled agent
+    every two minutes — the uninstall would appear to work and silently not."""
+    out = subprocess.run(["crontab", "-l"], capture_output=True, text=True, check=False)
+    if out.returncode == 0 and CRON_TAG in out.stdout:
+        kept = [ln for ln in out.stdout.splitlines() if CRON_TAG not in ln]
+        subprocess.run(["crontab", "-"], input="\n".join(kept).strip() + "\n",
+                       capture_output=True, text=True, check=False)
+        print("  removed cron auto-start entries")
+    if os.path.exists(KEEPALIVE_PATH):
+        os.remove(KEEPALIVE_PATH)
+        print("  removed keepalive script")
 
 
 def main():

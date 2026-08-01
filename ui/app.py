@@ -51,6 +51,8 @@ COORDINATOR = os.environ.get("NEURON_COORDINATOR", "https://neuronnet.duckdns.or
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 log = logging.getLogger("neuron.ui")
 SESSION_SECRET = os.environ.get("NEURON_SESSION_SECRET", "neuron-session-dev-secret")
+# Force every request through the node chain instead of the local engine (see _drive).
+FORCE_NETWORK = os.environ.get("NEURON_FORCE_NETWORK") == "1"
 # Real multi-turn chat resends prior turns every request -- cap how many so a long-running
 # conversation can't silently grow past the model's context length. Cheap safeguard, not full
 # truncation logic (a future upgrade could summarize instead of just dropping the oldest).
@@ -199,10 +201,25 @@ def _drive(prompt: str, max_new: int, wallet_id: str, use_rag: bool = False,
     # across three PCs was only ever buying a network hop and a bottleneck stage. The pipeline
     # is for models this machine CANNOT hold, which is the case only it can serve. Falls back
     # automatically, so an incomplete chain no longer means "responses will fail".
-    if local_gguf.available(common.MODEL_ID):
+    # NEURON_FORCE_NETWORK=1 sends the request over the node chain even when this machine
+    # could answer locally. Without it the distributed path is UNTESTABLE from the UI on any
+    # machine capable of local execution -- which is every dev machine -- so verifying that a
+    # chain routes, serves and settles NRN meant hand-running node_a.py with a wallet id
+    # copied out of a browser session. Off by default; local-first is still the right tiering.
+    if local_gguf.available(common.MODEL_ID) and not FORCE_NETWORK:
         events = local_gguf.stream(messages, max_new, common.MODEL_ID,
                                    coordinator=COORDINATOR, wallet_id=wallet_id)
     else:
+        # Load the driver shard on demand. lifespan() skips it whenever the local engine
+        # *could* serve, and its comment claimed "_drive calls DRIVER.stream(), which loads on
+        # demand" -- but nothing loaded anything: encode_chat() runs BEFORE stream() and dereferences
+        # self.tok, so taking this branch on a machine that skipped the startup load died with
+        # `AttributeError: 'NoneType' object has no attribute 'apply_chat_template'`, surfacing
+        # in the browser as a bare "connection lost: network error". Reachable without
+        # NEURON_FORCE_NETWORK too: startup skips on can_serve() but this branch is chosen on
+        # available(), which is can_serve() AND the weights already being on disk -- so any
+        # install between "capable" and "downloaded" hit it.
+        DRIVER.ensure_loaded()
         events = DRIVER.stream(DRIVER.encode_chat(messages), max_new, COORDINATOR,
                                prompt, wallet_id)
 

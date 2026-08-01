@@ -49,6 +49,33 @@ def recv_json(sock):
     return json.loads(b.decode()) if b else None
 
 
+def set_keepalive(sock, idle_s=60, interval_s=10, probes=5):
+    """Turn on TCP keepalive AND make it fire in ~a minute rather than the OS default.
+
+    SO_KEEPALIVE alone is close to useless here: Windows defaults to a 2-hour idle timer
+    (and Linux to 2h 11m). The control connection is idle by design — it just waits for the
+    relay to push `new_conn` — so when the relay's end goes away, this socket stays
+    ESTABLISHED and blocked in recv() until that timer expires. Measured live: a node kept
+    reporting `heartbeat ok — active` for ~2 hours while its relay port accepted TCP and
+    answered nothing, because the tunnel was waiting on a connection that no longer existed
+    at the other end. Detection has to be minutes, not hours.
+    """
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except OSError:
+        return
+    try:
+        if hasattr(socket, "SIO_KEEPALIVE_VALS"):                      # Windows
+            sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, idle_s * 1000, interval_s * 1000))
+        else:                                                          # Linux / macOS
+            for opt, val in (("TCP_KEEPIDLE", idle_s), ("TCP_KEEPINTVL", interval_s),
+                             ("TCP_KEEPCNT", probes)):
+                if hasattr(socket, opt):
+                    sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, opt), val)
+    except OSError:
+        pass          # keepalive is still on at the OS default; better than nothing
+
+
 def splice(a, b):
     def pump(src, dst):
         try:
@@ -110,10 +137,7 @@ def run_tunnel(node_id, public_port, relay_host, control_port=8010, data_port=80
             # recv() raises timeout every 15s and the tunnel churns (reconnect loop). Enable
             # TCP keepalive so a genuinely idle NAT mapping isn't silently dropped either.
             ctrl.settimeout(None)
-            try:
-                ctrl.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            except OSError:
-                pass
+            set_keepalive(ctrl)
             send_json(ctrl, {"node_id": node_id, "public_port": public_port, "ticket": ticket})
             print("[tunnel] registered; waiting for connections")
             while stop is None or not stop.is_set():

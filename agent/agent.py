@@ -50,6 +50,15 @@ LOG_PATH = os.path.join(HERE, "agent.log")
 RETRY_SECONDS = 60
 PING_SECONDS = 30
 MIGRATION_POLL_SECONDS = 20
+# How long to wait for the node server to actually bind before treating setup as failed.
+# A bind either works immediately or fails immediately; the only slow case is a previous
+# copy of the agent still holding the port on its way out.
+BIND_TIMEOUT_S = 20
+# How often to prove this node is reachable at its PUBLIC relay endpoint, and how long to wait
+# for that proof. Every fourth heartbeat (~2 min) rather than every one: it opens a real
+# connection through the relay and back into our own server, so it is not free.
+RELAY_PROBE_EVERY = 4
+RELAY_PROBE_TIMEOUT_S = 20
 
 # Written on first run if no config exists (so a freshly-installed app just works): open join,
 # auto-placement, green idle donation, relay on. Matches agent/config.json.
@@ -136,6 +145,7 @@ class Agent:
         self.user_paused = threading.Event()   # set by the tray's Pause button
         self.relay = self.cfg.get("relay")     # relay params if this node is behind NAT
         self.server = None                     # the running NodeServer (migration reload target)
+        self._tunnel_stop = None               # per-tunnel stop flag, so it can be restarted alone
         self.local_chat_server = None          # set once start_local_chat() finishes (tray readiness check)
 
     # -- config persistence -------------------------------------------------- #
@@ -205,6 +215,18 @@ class Agent:
         except Exception as e:
             log.warning("could not report ms_per_layer: %s", e)
 
+    def use_relay(self):
+        """Should peers reach this node through the public relay rather than directly?
+
+        Defaults to TRUE ([P10]). A direct address only works between machines on the same
+        tailnet or LAN — which is every developer's setup and no stranger's. A home machine
+        behind NAT cannot accept an inbound connection at all, and a Tailscale 100.x address
+        handed to somebody outside the tailnet is not merely slow, it is unroutable. The
+        relay costs one extra hop and makes the address universally valid, so it is the
+        right default and `behind_nat: false` is the exception a LAN cluster opts into.
+        """
+        return bool(self.cfg.get("behind_nat", True))
+
     def register(self):
         self.ensure_placement()
         ip = detect_tailscale_ip()
@@ -216,7 +238,10 @@ class Agent:
             "layer_end": self.cfg["layer_end"],
             "cores": os.cpu_count(),
             "ram_gb": int(psutil.virtual_memory().total // 10**9),
-            "behind_nat": self.cfg.get("behind_nat", False),
+            # When true the coordinator ignores the address above and stores this node at a
+            # relay endpoint instead, so every peer that asks for a chain is handed a public
+            # host:port. That is the whole of "a stranger can be in the pipeline".
+            "behind_nat": self.use_relay(),
         }
         # Feeds coordinator/balancer.py. None on the first registration (the slice is not
         # loaded yet, so there is nothing to time); report_speed() re-registers with the real
@@ -248,6 +273,14 @@ class Agent:
         self.relay = data.get("relay")          # set when behind_nat -> auto-tunnel
         if self.relay:
             self.cfg["relay"] = self.relay
+        elif body["behind_nat"]:
+            # We asked to be relayed and were not given an endpoint, which means the
+            # coordinator has RELAY_ENABLED off or its port pool is exhausted. Peers now hold
+            # whatever local address we sent, so anyone off this LAN/tailnet silently cannot
+            # reach us -- exactly the failure [P10] exists to prevent. Say so.
+            log.warning("requested a relay endpoint but the coordinator returned none — this "
+                        "node is only reachable at %s:%d, so peers outside this network "
+                        "will NOT be able to connect", ip, body["port"])
         self._save()
         standing = data.get("standing", "trusted")
         log.info("registered as %s [%s], assigned layers %s (%d cores, %d GB, %s)",
@@ -294,9 +327,13 @@ class Agent:
                 # would carry that gap forever: register() is normally skipped once
                 # credentials exist, so a missing ticket could never self-heal, and the
                 # tunnel would churn forever against the relay's "bad/missing ticket" check.
-                stale_relay = self.cfg.get("behind_nat") and self.cfg.get("relay") \
-                    and not self.cfg["relay"].get("ticket")
-                if not self.cfg.get("node_id") or not self.cfg.get("node_token") or stale_relay:
+                # Also covers a node that was registered with a DIRECT address and has since
+                # been switched to relay mode (behind_nat flipped on): without a re-register
+                # the coordinator would keep handing peers the old Tailscale/LAN address
+                # forever, since register() is normally skipped once credentials exist.
+                needs_relay = self.use_relay() and (
+                    not self.cfg.get("relay") or not self.cfg["relay"].get("ticket"))
+                if not self.cfg.get("node_id") or not self.cfg.get("node_token") or needs_relay:
                     self.register()
                 info = self.slice_info()
                 self.state.update(node_id=self.cfg["node_id"],
@@ -304,29 +341,37 @@ class Agent:
                 self.cfg["model_id"] = info["model_id"]      # what we're actually serving now
                 self._save()
                 slice_dir = self.ensure_slice(info)
-                self.server = NodeServer(slice_dir, info["layer_start"], info["layer_end"],
-                                         info.get("total_layers", 28))
-                threading.Thread(target=self.server.run,
-                                 args=("0.0.0.0", self.cfg.get("port", 50999)),
+                port = self.cfg.get("port", 50999)
+                if self.server is None:
+                    self.server = NodeServer(slice_dir, info["layer_start"], info["layer_end"],
+                                             info.get("total_layers", 28))
+                threading.Thread(target=self.server.run, args=("0.0.0.0", port),
                                  daemon=True).start()
-                log.info("node server started on port %d", self.cfg.get("port", 50999))
+                # Do not proceed until the listener is genuinely accepting. run() reports a
+                # failed bind rather than raising (it is a daemon thread, where an exception
+                # vanishes), and an agent that heartbeats without checking advertises a node
+                # that refuses every connection -- [P21]. Retrying the whole setup is the
+                # right response: the usual cause is a previous copy still holding the port,
+                # which resolves on its own within a minute.
+                deadline = time.time() + BIND_TIMEOUT_S
+                while (time.time() < deadline and not self.server.listening.is_set()
+                       and self.server.bind_error is None):
+                    time.sleep(0.2)
+                if not self.server.listening.is_set():
+                    detail = ("node server is not accepting connections on port "
+                              f"{port}: {self.server.bind_error or 'timed out'}")
+                    self.state.update(status="error", detail=detail)
+                    log.error("%s — retrying in %ds", detail, RETRY_SECONDS)
+                    self._stop.wait(RETRY_SECONDS)
+                    continue
+                log.info("node server listening on port %d", port)
                 self.report_speed(info)
                 # Session 12: if we're behind NAT the coordinator handed us relay params
                 # at registration — start the outbound tunnel so peers can reach us with
                 # NO inbound port. One-click NAT traversal; nothing for the user to do.
                 relay = self.relay or self.cfg.get("relay")
                 if relay:
-                    import tunnel_client
-                    threading.Thread(
-                        target=tunnel_client.run_tunnel,
-                        kwargs=dict(node_id=self.cfg["node_id"], public_port=relay["public_port"],
-                                    relay_host=relay["host"], control_port=relay["control_port"],
-                                    data_port=relay["data_port"], local_host="127.0.0.1",
-                                    local_port=self.cfg.get("port", 50999), stop=self._stop,
-                                    ticket=relay.get("ticket")),
-                        daemon=True).start()
-                    log.info("relay tunnel started — reachable via %s:%d (NAT-friendly)",
-                             relay["host"], relay["public_port"])
+                    self.start_tunnel(relay)
                 return
             except requests.RequestException as e:
                 # A 409 from /node/register is NOT unreachability -- it means this node_id is
@@ -362,6 +407,64 @@ class Agent:
                         pass
                 self._stop.wait(RETRY_SECONDS)
 
+    # -- relay tunnel: start, prove, restart --------------------------------- #
+    def start_tunnel(self, relay):
+        """(Re)start the outbound relay tunnel. Its own stop flag, separate from the agent's,
+        so a dead tunnel can be replaced without taking the whole agent down."""
+        import tunnel_client
+        if self._tunnel_stop is not None:
+            self._tunnel_stop.set()            # tell the old one to stop looping
+        self._tunnel_stop = threading.Event()
+        threading.Thread(
+            target=tunnel_client.run_tunnel,
+            kwargs=dict(node_id=self.cfg["node_id"], public_port=relay["public_port"],
+                        relay_host=relay["host"], control_port=relay["control_port"],
+                        data_port=relay["data_port"], local_host="127.0.0.1",
+                        local_port=self.cfg.get("port", 50999), stop=self._tunnel_stop,
+                        ticket=relay.get("ticket")),
+            daemon=True).start()
+        log.info("relay tunnel started — reachable via %s:%d (NAT-friendly)",
+                 relay["host"], relay["public_port"])
+
+    def relay_reachable(self):
+        """Dial our OWN public relay endpoint and complete a real handshake.
+
+        A plain TCP connect proves nothing: the relay accepts on the public port whether or not
+        it can still reach this node, so a dead tunnel looks identical to a healthy one from
+        outside. Only bytes coming back through relay -> tunnel -> our node server prove the
+        whole path. This is the same reasoning as the listener check in setup(): a node that
+        cannot be reached must not advertise itself, or routing feeds it real requests and they
+        vanish.
+        """
+        relay = self.relay or self.cfg.get("relay")
+        if not relay or self.server is None:
+            return True                        # not relayed / not serving yet: nothing to prove
+        import common
+        lo, hi, n = self.server.lo, self.server.hi, self.server.n
+        # Same config shapes the real pipeline and proof-of-compute use, so we exercise the
+        # node exactly as a peer would rather than through some test-only path.
+        msg = ({"type": "config", "s2": lo, "n": n} if hi == n - 1
+               else {"type": "config", "s1": lo, "s2": hi + 1})
+        s = None
+        try:
+            s = socket.create_connection((relay["host"], relay["public_port"]),
+                                         timeout=RELAY_PROBE_TIMEOUT_S)
+            s.settimeout(RELAY_PROBE_TIMEOUT_S)
+            common.send_msg(s, msg)
+            ack = common.recv_msg(s)
+            common.send_msg(s, {"type": "bye"})
+            return bool(ack.get("ok"))
+        except Exception as e:
+            log.warning("relay endpoint %s:%d did not answer (%s: %s)",
+                        relay["host"], relay["public_port"], e.__class__.__name__, e)
+            return False
+        finally:
+            if s is not None:
+                try:
+                    s.close()
+                except OSError:
+                    pass
+
     # -- personal Chat UI (agent/local_chat.py) ------------------------------ #
     def start_local_chat(self):
         """Best-effort: a broken/slow local Chat UI must never stop this machine from
@@ -379,8 +482,36 @@ class Agent:
             oauth_cfg=self.cfg.get("oauth"))
 
     def heartbeat_loop(self):
+        beat = 0
         while not self._stop.is_set():
+            beat += 1
             reasons = ["paused by user"] if self.user_paused.is_set() else self.guard.reasons_to_pause()
+            # Prove the PUBLIC path, not just the local one. The tunnel can die silently while
+            # this process is perfectly healthy (the control socket stays ESTABLISHED and blocked
+            # in recv until the OS keepalive gives up — 2 hours on Windows), and a relayed node
+            # is the only kind a stranger can run. If it is dead, restart it and skip this
+            # heartbeat so the coordinator stops routing to a black hole in the meantime.
+            relay = self.relay or self.cfg.get("relay")
+            if relay and self.server is not None and beat % RELAY_PROBE_EVERY == 0 \
+                    and not reasons and not self.relay_reachable():
+                log.error("relay tunnel is not carrying traffic — restarting it and holding "
+                          "off the heartbeat until it answers")
+                self.state.update(status="error", detail="relay tunnel unreachable — restarting")
+                try:
+                    self.start_tunnel(relay)
+                except Exception as e:
+                    log.warning("could not restart the relay tunnel: %s", e)
+                self._stop.wait(PING_SECONDS)
+                continue
+            # "Online" has to mean "serving", or routing sends real requests into a black
+            # hole ([P21]). A dead listener is not a pause: stop pinging so the coordinator
+            # marks this node offline and routes around it.
+            if self.server is not None and not self.server.listening.is_set():
+                detail = f"node server not listening ({self.server.bind_error or 'stopped'})"
+                self.state.update(status="error", detail=detail)
+                log.error("%s — not advertising availability", detail)
+                self._stop.wait(PING_SECONDS)
+                continue
             try:
                 if reasons:
                     self.state.update(status="idle", detail="; ".join(reasons))
@@ -517,6 +648,12 @@ def main():
                     help="serve this exact layer range instead of asking for a placement")
     ap.add_argument("--port", type=int, default=None, help="node server port")
     ap.add_argument("--node-id", default=None, help="register under this node id")
+    ap.add_argument("--relay", dest="relay", action="store_true", default=None,
+                    help="be reachable through the public relay (the default): peers get a "
+                         "public endpoint instead of a LAN/Tailscale address")
+    ap.add_argument("--no-relay", dest="relay", action="store_false",
+                    help="advertise this machine's own address instead — only correct when "
+                         "every peer is on the same LAN or tailnet")
     ap.add_argument("--no-local-chat", action="store_true",
                     help="do not start this agent's own Chat UI (a second agent on the same "
                          "machine must not fight the first one for the chat port)")
@@ -534,6 +671,8 @@ def main():
         cfg["port"], dirty = args.port, True
     if args.node_id:
         cfg["node_id"], dirty = args.node_id, True
+    if args.relay is not None:
+        cfg["behind_nat"], dirty = args.relay, True
     if args.no_local_chat:
         cfg["local_chat"], dirty = False, True
     if dirty:

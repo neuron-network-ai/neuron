@@ -45,6 +45,14 @@ class NodeServer:
         self._batchers = {}
         self._batcher_lock = threading.Lock()
         self.paused = paused_flag if paused_flag is not None else threading.Event()  # set = paused
+        # Whether this server is actually ACCEPTING connections. agent.py runs run() in a
+        # daemon thread, so a failed bind used to kill that thread silently while the agent
+        # kept heartbeating "active" forever -- the coordinator then advertised a healthy
+        # 28/28 network and routed real requests into a node refusing every connection
+        # ([P21], observed live on the Pavilion). Nothing may advertise availability without
+        # checking this first.
+        self.listening = threading.Event()
+        self.bind_error = None
         self.reload(slice_dir, layer_start, layer_end, total_layers)
 
     def reload(self, slice_dir, layer_start, layer_end, total_layers):
@@ -134,7 +142,13 @@ class NodeServer:
                         # meta device, uninitialized). Uses OUR OWN self.lo/self.hi, never the
                         # caller's claimed s1/s2 -- this tests what we actually loaded, not
                         # what a challenger asserts.
-                        role, s1, s2 = "probe", self.lo, self.hi
+                        # self.hi is the INCLUSIVE last layer this node owns, but s2 is used
+                        # as a Python slice bound (`layers[s1:s2]`, see common.mid_stage), so
+                        # it has to be hi+1. Passing hi ran one layer too few and advertised a
+                        # range the verifier rejects -- which meant proof-of-compute could
+                        # never promote a probationary node on any segment except the last,
+                        # and auto-placement puts a joining stranger wherever the GAP is.
+                        role, s1, s2 = "probe", self.lo, self.hi + 1
                         common.send_msg(conn, {"ok": True, "layers": self.n, "s1": s1, "s2": s2,
                                                **ack_wire})
 
@@ -183,12 +197,27 @@ class NodeServer:
     def run(self, host, port):
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind((host, port))
-        srv.listen(16)
+        try:
+            srv.bind((host, port))
+            srv.listen(16)
+        except OSError as e:
+            # Reported, not raised: this usually runs in a daemon thread, where an exception
+            # is swallowed and the caller never learns the node is deaf. The agent polls
+            # bind_error/listening and refuses to advertise this node until it clears.
+            self.bind_error = f"{e.__class__.__name__}: {e}"
+            print(f"[node] FAILED to bind {host}:{port} — {self.bind_error}")
+            srv.close()
+            return
+        self.bind_error = None
+        self.listening.set()
         print(f"[node] listening on {host}:{port}  (Ctrl-C to stop)")
-        while True:
-            conn, addr = srv.accept()
-            threading.Thread(target=self._handle, args=(conn, addr), daemon=True).start()
+        try:
+            while True:
+                conn, addr = srv.accept()
+                threading.Thread(target=self._handle, args=(conn, addr), daemon=True).start()
+        finally:
+            self.listening.clear()
+            srv.close()
 
     def _handle(self, conn, addr):
         try:

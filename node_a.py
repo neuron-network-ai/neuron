@@ -121,6 +121,50 @@ def coord_complete(base, request_id, tokens, duration_ms, node_ids, complete_tok
         return None
 
 
+def run_local(idx, prompt, max_new, results, model_id, coordinator=None, wallet_id=None):
+    """Run the WHOLE model here, quantized, via engine/local_gguf.py (llama.cpp Q4_K_M).
+
+    This is the default engine for the driver now. The measured case for it is not subtle --
+    36 ms/token against 240 ms/token for the fp32 PyTorch pipeline, with the answer intact --
+    and it is the same tiering ui/app.py and api/openai_compat.py already apply: a model this
+    machine can hold is a model there is no reason to split across three PCs. NEURON's reason
+    to exist is the other case, a model too big for the machine in front of you, and that
+    still goes over the chain (`--engine torch`).
+
+    No /infer call and cost_nrn 0.0, deliberately: nobody else's hardware ran this, so there
+    is nothing to settle and nobody to pay. Crediting the network for local compute would mint
+    NRN for work no node did -- exactly the open [P12] hole -- and it would be farmable by
+    anyone with a laptop, since local execution is verified by nothing.
+    """
+    from engine import local_gguf
+    t_start, text, tokens, request_id, error, steady = time.time(), "", 0, None, None, None
+    for ev in local_gguf.stream([{"role": "user", "content": prompt}], max_new, model_id,
+                                coordinator=coordinator, wallet_id=wallet_id):
+        kind = ev["type"]
+        if kind == "meta":
+            request_id = ev["request_id"]
+        elif kind == "token":
+            text += ev["text"]
+        elif kind == "done":
+            text, tokens = ev["text"], ev["completion_tokens"]
+            # The engine's own rate, measured after the model is resident. The wall-clock
+            # figure below includes the one-off ~1.5 s load, which matters to the first user
+            # of a cold process and to nobody afterwards -- so report both rather than
+            # picking whichever is flattering.
+            steady = ev["tok_per_s"]
+        elif kind == "error":
+            error = ev["detail"]
+    latency = time.time() - t_start
+    if error:
+        print(f"[A] request {idx} FAILED: {error}")
+    # All compute happened on this machine, so it books entirely against node_a; the two
+    # remote stages are genuinely idle on this path, which is the point.
+    results[idx] = {"prompt": prompt, "text": text, "tokens": tokens, "latency": latency,
+                    "a_ms": latency * 1000, "c_ms": 0.0, "b_ms": 0.0, "head_ms": 0.0,
+                    "net_ms": 0.0, "request_id": request_id, "error": error,
+                    "tok_per_s": steady}
+
+
 def run_request(idx, prompt, model, tok, cfg, eos_id, results, coordinator=None, wallet_id=None):
     s1, s2, host_c, port_c, host_b, port_b, max_new = cfg
     request_id, node_ids, complete_token = None, None, None
@@ -228,11 +272,17 @@ def main():
     ap.add_argument("--serial", action="store_true")
     ap.add_argument("--prompt", default=None)
     ap.add_argument("--copies", type=int, default=1, help="repeat the prompt set N times")
-    ap.add_argument("--engine", choices=["torch", "ns"], default="torch",
-                    help="'ns' runs this driver's Linears (and the lm_head) on the AVX2 int8 "
-                         "kernel via ns_engine. The head is the largest GEMM in the whole "
-                         "pipeline, so the driver is where it matters most. Needs "
-                         "NEURON_NS_LIB pointing at a built library.")
+    ap.add_argument("--dump-json", default=None,
+                    help="write throughput and the FULL answer text to this file. The console "
+                         "line truncates at 60 chars, which is no use for checking an engine "
+                         "against the PyTorch baseline token for token.")
+    ap.add_argument("--engine", choices=["auto", "gguf", "torch", "ns"], default="auto",
+                    help="'auto' (default) runs the model locally via llama.cpp Q4_K_M "
+                         "(engine/local_gguf.py, ~36 ms/token) whenever this machine can "
+                         "hold it, and falls back to the fp32 node pipeline when it cannot. "
+                         "'gguf' forces local, 'torch' forces the distributed fp32 pipeline, "
+                         "'ns' runs this driver's Linears + lm_head on the AVX2 int8 kernel "
+                         "via ns_engine (needs NEURON_NS_LIB).")
     ap.add_argument("--slice-dir", default=None,
                     help="load the driver shard from a byte-range slice (slice_downloader) "
                          "instead of the full HF cache. The driver is the only role that "
@@ -246,7 +296,17 @@ def main():
                          "convenient for benchmarking/testing, not for a real user.")
     args = ap.parse_args()
 
-    if not args.coordinator and not (args.host_c and args.host_b):
+    # Resolve 'auto' before the argument check: the local engine needs neither a coordinator
+    # nor peer addresses, so requiring them would be wrong.
+    engine = args.engine
+    if engine == "auto":
+        from engine import local_gguf
+        engine = "gguf" if local_gguf.can_serve(common.MODEL_ID) else "torch"
+        print(f"[A] engine=auto -> {engine}"
+              + ("" if engine == "gguf" else
+                 " (this machine cannot hold a quantized copy, or llama_cpp is missing)"))
+
+    if engine != "gguf" and not args.coordinator and not (args.host_c and args.host_b):
         ap.error("provide --coordinator URL, or both --host-c and --host-b")
 
     prompts = ([args.prompt] if args.prompt else PROMPTS) * args.copies
@@ -256,7 +316,7 @@ def main():
             f"direct c={args.host_c} b={args.host_b}"
 
     wallet_id = args.wallet_id
-    if coordinator and not wallet_id:
+    if coordinator and not wallet_id and engine != "gguf":
         import uuid as _uuid
         wallet_id = f"node_a-cli-{_uuid.uuid4().hex[:12]}"
         try:
@@ -268,6 +328,25 @@ def main():
         except requests.RequestException as e:
             print(f"[A] warn: could not faucet-fund the auto wallet ({e}); "
                   f"/infer will likely 402 unless '{wallet_id}' already has a balance")
+
+    if engine == "gguf":
+        # Nothing to shard-load: llama.cpp holds the whole quantized model, which is also why
+        # this path starts in seconds instead of the ~40 s the fp32 driver shard costs.
+        from engine import local_gguf
+        print(f"[A] engine=gguf | {common.MODEL_ID} Q4_K_M locally via llama.cpp "
+              f"| the node chain is NOT used, so this request costs 0 NRN")
+        if local_gguf.ensure_weights(common.MODEL_ID) is None:
+            ap.error("local engine selected but the quantized weights could not be fetched; "
+                     "re-run with --engine torch to use the node pipeline")
+        results = [None] * len(prompts)
+        batch_t0 = time.time()
+        # Always serial: one llama.cpp context is not re-entrant, and concurrency is the
+        # network path's job -- here the whole model is on one machine anyway.
+        for i, p in enumerate(prompts):
+            run_local(i, p, args.max_new_tokens, results, common.MODEL_ID,
+                      coordinator=coordinator, wallet_id=wallet_id)
+        _report(results, prompts, time.time() - batch_t0, "LOCAL", args.dump_json)
+        return
 
     print(f"[A] loading my shard (embed + layers 0..{args.s1-1} + lm_head) ...")
     t0 = time.time()
@@ -281,7 +360,7 @@ def main():
     else:
         tok, model, n = common.load_model_shard(0, args.s1, embed=True, head=True)
 
-    if args.engine == "ns":
+    if engine == "ns":
         import ns_engine
         lib = ns_engine.load()
         if lib is None:
@@ -320,8 +399,12 @@ def main():
         for t in threads:
             t.join()
     batch_wall = time.time() - batch_t0
+    _report(results, prompts, batch_wall, mode, args.dump_json)
 
-    # ---- report ------------------------------------------------------------- #
+
+def _report(results, prompts, batch_wall, mode, dump_json=None):
+    """Per-request + aggregate report. Shared by the distributed and local engines so both
+    print the same throughput number, which is the whole point of being able to compare them."""
     print("[A] ===== PER-REQUEST =====")
     for r in results:
         if r.get("error"):
@@ -330,7 +413,9 @@ def main():
         snip = r["text"].replace("\n", " ")
         snip = snip[:60] + "..." if len(snip) > 60 else snip
         rid = f" req={r['request_id'][:8]}" if r.get("request_id") else ""
-        print(f"    [{r['tokens']:>3} tok, {r['latency']:5.1f}s]{rid}  {r['prompt']!r}: {snip}")
+        rate = f" {r['tok_per_s']:.1f} tok/s" if r.get("tok_per_s") else ""
+        print(f"    [{r['tokens']:>3} tok, {r['latency']:5.1f}s{rate}]{rid}  "
+              f"{r['prompt']!r}: {snip}")
 
     total_tokens = sum(r["tokens"] for r in results)
     sum_a = sum(r["a_ms"] for r in results) / 1000
@@ -350,7 +435,21 @@ def main():
     print(f"    node_a (A + head)     : {node_a_busy:5.1f}s  = {100*node_a_busy/batch_wall:.0f}%")
     print(f"    node_c (middle layers): {sum_c:5.1f}s  = {100*sum_c/batch_wall:.0f}%")
     print(f"    node_b (layers + norm): {sum_b:5.1f}s  = {100*sum_b/batch_wall:.0f}%")
-    print(f"    -> all three high = 3 machines working at once (3-stage pipeline)")
+    if mode == "LOCAL":
+        print(f"    -> local engine: this machine did all of it; no node was paid (0 NRN)")
+    else:
+        print(f"    -> all three high = 3 machines working at once (3-stage pipeline)")
+    if dump_json:
+        import json
+        with open(args.dump_json, "w", encoding="utf-8") as fh:
+            json.dump({"throughput": total_tokens / batch_wall,
+                       "batch_wall": batch_wall,
+                       "total_tokens": total_tokens,
+                       "results": [{k: r.get(k) for k in ("prompt", "text", "tokens",
+                                                          "latency", "error")}
+                                   for r in results]}, fh, indent=1)
+        print(f"[A] wrote {args.dump_json}")
+
     print(f"\n[A] fully-serial would take ~{serial_pred:.1f}s "
           f"(A {sum_a:.1f} + C {sum_c:.1f} + B {sum_b:.1f} + head {sum_head:.1f} "
           f"+ net {sum_net:.1f}); actual {batch_wall:.1f}s -> {serial_pred/batch_wall:.2f}x overlap")

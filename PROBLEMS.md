@@ -165,7 +165,51 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
   **Not yet deployed to the live nodes** (Pavilion/OptiPlex still run the old build; they
   will negotiate down to legacy until updated).
 
-### [P21] 🔴 Nothing restarts a node — the network dies on any reboot, and the fix already exists
+### [P21] 🟢 Nothing restarts a node — fixed and installed on both remote nodes (2026-08-01)
+- **Fixed by:** `agent/install.py --startup` on the Pavilion and the OptiPlex. Both now run the
+  agent as a `systemd --user` service with **`Restart=always` / `RestartSec=10`** (was
+  `Restart=on-failure`, which leaves a node dead after any clean-looking exit).
+- **The flag in this file's "what to do" did not exist.** `install.py` had `--no-startup`, not
+  `--startup`, so the documented command failed with an argparse error — and running plain
+  `install.py` instead would have been worse: `write_config()` wrote DEFAULT_CONFIG straight
+  over the existing file, discarding `node_id`, `node_token`, the layer range the machine was
+  actually serving and its `register_secret`, and re-pinning every node to layers 10-18. The
+  documented repair for [P21] would have de-identified both live nodes. `write_config()` now
+  merges and `--startup` exists as a non-interactive repair path for an already-working node.
+- **A unit file alone was never going to be enough.** A `systemd --user` service does **not**
+  start at boot unless the user has *lingering* enabled — without it the unit is bound to a
+  login session, so `WantedBy=default.target` fires when somebody logs in and never after an
+  unattended reboot, while looking correctly installed and `enabled` the whole time. Both
+  machines had `Linger=no`. The installer now enables it (unprivileged first, then `sudo -n`)
+  and, when neither is permitted — a machine with no sudo, i.e. exactly a stranger's laptop —
+  falls back to **cron**, which needs no privileges: an `@reboot` line plus a two-minute
+  keepalive (`agent/neuron-keepalive.sh`) that restarts the agent if it is not running. That
+  fallback also bounds a crash at two minutes instead of "until somebody notices".
+  `agent/uninstall.py` removes both, or an uninstalled agent would be resurrected every two
+  minutes by a cron job nobody remembered.
+- **The keepalive greps with the `[a]gent[.]py` bracket trick and lives in its own FILE** for
+  the reason `sessions.md` already documents one level up: inline in the crontab, the guard's
+  own command line contains the string it greps for, so it matches itself, concludes the agent
+  is already running, and never starts anything.
+- **"Online" now has to mean "serving".** `NodeServer.run()` reports a failed bind
+  (`self.listening` / `self.bind_error`) instead of dying silently in its daemon thread;
+  `agent.setup()` waits for the listener before advertising and retries the whole setup
+  otherwise, and `heartbeat_loop()` refuses to ping while the listener is down, so the
+  coordinator marks the node offline and routes around it. **This caught a live instance the
+  moment it shipped:** both remote machines still had hand-started `node_ns.py` servers from
+  Session 23 squatting port 50999 (17h 57m uptime), so the agent's bind failed — before this
+  change it would have gone on logging `heartbeat ok — active` forever against a node that
+  never bound. The stale processes were stopped; the agents own the port now.
+- **VERIFIED BY A REAL REBOOT (2026-08-01).** The Pavilion was power-cycled: booted 14:03:14,
+  `neuron-agent` active at **14:03:27 — 13 s after boot**, nobody logged in, no SSH, listening
+  on :50999 and back in `/node/list` far inside the 2-minute bar. Linger is the part that
+  earned its keep — a user-level unit starting with no login is exactly what a reboot tests,
+  and it is what was missing. A `SIGKILL` of the agent on the OptiPlex separately recovered in
+  **20 s**, covering the crash case. (The Pavilion cannot be rebooted remotely: no passwordless
+  sudo, and polkit refuses `systemctl reboot` over SSH — it needs someone at the machine.)
+- **Original entry, kept for the record:**
+
+### [P21-orig] 🔴 Nothing restarts a node — the network dies on any reboot, and the fix already exists
 - **Symptom:** the Pavilion and OptiPlex run the agent as a bare foreground process. A reboot,
   a crash, a closed SSH session or an OOM kill takes that node off the network permanently
   until somebody SSHes in and starts it by hand. Hit repeatedly on 2026-07-30: `nohup … &`
@@ -203,6 +247,40 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
   process never detaches. `pkill -f 'agent.agent'` also matches the `bash -c` running it and
   kills its own shell — use the bracket form (`'[a]gent.agent'`), the same trick `sessions.md`
   already documents for `[n]ode_b.py`.
+
+### [P22] 🟢 A relay tunnel died silently while the node reported healthy — fixed (2026-08-01)
+- **Symptom:** after ~2 hours the Windows node's public relay port accepted TCP and then
+  answered nothing (20 s timeout), while both Linux nodes completed the same handshake in
+  0.10 s. The agent logged `heartbeat ok — active` throughout, so `/node/list` showed the node
+  **online and verified**, routing sent it real requests, and it served none of them. Restarting
+  the agent fixed it instantly.
+- **Root cause, measured not guessed:** `tunnel_client.run_tunnel` holds an outbound control
+  connection and blocks in `recv_json` waiting for the relay to push `new_conn`. That socket is
+  idle by design. When the relay's end goes away the socket stays ESTABLISHED until TCP
+  keepalive gives up — and `SO_KEEPALIVE` alone uses the OS default idle timer, which on this
+  machine is the Windows default **7,200,000 ms = 2 hours** (confirmed: no `KeepAliveTime`
+  override in the registry). The observed ~2 h dead window is that timer, exactly.
+- **Why it mattered more than it looks:** every stranger is relayed (`behind_nat` is the
+  default since [P10]), and it reproduced on Windows, which is what most of them will run. It is
+  [P21]'s "online means nothing" in a second place — Session 26 made the heartbeat assert the
+  *local listener* had bound, and nothing asserted the *tunnel* still carried traffic.
+- **Fixed, two layers:**
+  1. `tunnel_client.set_keepalive()` — keepalive at **60 s idle / 10 s interval** via
+     `SIO_KEEPALIVE_VALS` on Windows and `TCP_KEEPIDLE`/`INTVL`/`CNT` elsewhere. Detection drops
+     from hours to about a minute, and the existing reconnect loop then does its job.
+  2. `agent.relay_reachable()` — every 4th heartbeat the agent dials **its own public relay
+     endpoint** and completes a real config handshake. A plain TCP connect proves nothing here:
+     the relay accepts on the public port whether or not it can still reach the node, so a dead
+     tunnel is indistinguishable from a healthy one until bytes come back. On failure the agent
+     restarts the tunnel (its own stop flag, separate from the agent's) and **withholds the
+     heartbeat**, so the coordinator marks it offline and routes around it instead of feeding a
+     black hole.
+- **Tests:** `agent/test_relay_liveness.py` — 5/5. The load-bearing case is a fake endpoint that
+  *accepts and never speaks*, which a connect-only check would wrongly pass; plus a healthy
+  handshake, a non-relayed node (no false alarm), and the assertion that a dead tunnel restarts
+  the tunnel and sends no heartbeat.
+- **Verified live:** deployed to all three nodes; all three public endpoints answer in
+  0.03-0.10 s, and **zero false alarms** across 4+ probe cycles on every node.
 
 ### [P3] 🟡 Network latency dominates per-token cost
 - **Symptom:** in the 8-request run, ~0.4 s **per token** was network. The Pavilion was on
@@ -327,6 +405,40 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
   **What's genuinely left for a first stranger:** an actual outside person installs the agent
   (package + install guide + 4th-node placement), and `/complete` still needs auth ([P12]).
   Beyond ~100 relayed nodes: `SCALING.md`.
+- **2026-08-01 — the relay is now the DEFAULT for every node, and the live nodes were moved
+  onto it.** The machinery from 2026-07-24 was all present and none of it was in use: both
+  remote nodes had `behind_nat: false` in their configs, so the coordinator stored their
+  **Tailscale** addresses and `router.chain_public` handed those out to every peer that asked
+  for a chain. A stranger placed anywhere except the final segment must dial the next hop, and
+  `100.114.189.46` is not a routable address for anyone outside the founder's tailnet — so the
+  relay existed, ran, and was bypassed by every real request. Changes:
+  - `agent.use_relay()` defaults `behind_nat` to **True** (it was `.get("behind_nat", False)`,
+    which contradicted `DEFAULT_CONFIG`'s `true` for any config that simply omitted the key),
+    with `--relay/--no-relay` to override. `--no-relay` is now the exception a LAN cluster opts
+    into, rather than the accidental default.
+  - `setup()` re-registers when a node is in relay mode but holds no relay endpoint, not just
+    when its ticket is stale. Without that, a node switched to relay mode after its first
+    registration would keep advertising its old direct address forever, since `register()` is
+    skipped once credentials exist.
+  - Registering with `behind_nat` and getting **no** relay block back is now logged as a
+    warning naming the address peers were given instead. It used to pass silently, which is
+    the exact failure this entry exists to prevent.
+  - Both live nodes re-registered onto relay endpoints (`150.230.22.250:9002` / `:9003`) and
+    both were confirmed reachable on those ports from a machine with Tailscale **stopped**.
+- **2026-08-01 — two bugs found by actually running the stranger path, either one fatal:**
+  1. **`agent/__init__.py` did not exist**, so INSTALL.md's step 4 (`python agent/agent.py`)
+     died on `ImportError: cannot import name 'local_chat' from partially initialized module
+     'agent'`. Python puts `<repo>/agent` on `sys.path` ahead of anything the script adds, and
+     a regular module named `agent` beats a namespace-package directory of the same name, so
+     agent.py imported *itself*. Both live nodes had an `__init__.py` created by hand during
+     setup, which is why this was invisible for eleven sessions — every stranger would have hit
+     it on the first command in the install guide.
+  2. **Proof-of-compute could not promote a node on any segment except the last.**
+     `node_server.py`'s probe role set `s2 = self.hi` (the inclusive last layer) where `s2` is
+     used as a Python slice bound (`layers[s1:s2]`), so it ran one layer too few and advertised
+     a range `security/proof_of_compute.attest_middle` rejects outright. Auto-placement puts a
+     joining stranger wherever the coverage GAP is — which was layers 0-9 here — so the
+     realistic case was the broken one. Fixed to `self.hi + 1`.
 
 ### [P11] 🟡 Public-launch hygiene (before the repo goes public)
 - Hardcoded private Tailscale/LAN IPs across README/ROADMAP/agent/coordinator — genericize to
