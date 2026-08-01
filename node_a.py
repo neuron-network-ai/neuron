@@ -302,6 +302,8 @@ def main():
     if engine == "auto":
         from engine import local_gguf
         engine = "gguf" if local_gguf.can_serve(common.MODEL_ID) else "torch"
+        if engine == "gguf":
+            local_model = local_gguf.best_local_model(common.MODEL_ID) or common.MODEL_ID
         print(f"[A] engine=auto -> {engine}"
               + ("" if engine == "gguf" else
                  " (this machine cannot hold a quantized copy, or llama_cpp is missing)"))
@@ -333,9 +335,13 @@ def main():
         # Nothing to shard-load: llama.cpp holds the whole quantized model, which is also why
         # this path starts in seconds instead of the ~40 s the fp32 driver shard costs.
         from engine import local_gguf
-        print(f"[A] engine=gguf | {common.MODEL_ID} Q4_K_M locally via llama.cpp "
+        # Biggest model this machine can hold, not whatever the network settled on. Explicit
+        # --engine gguf skips the auto branch above, so resolve it here too.
+        model_id = locals().get("local_model") or \
+            local_gguf.best_local_model(common.MODEL_ID, require_cached=False) or common.MODEL_ID
+        print(f"[A] engine=gguf | {model_id} Q4_K_M locally via llama.cpp "
               f"| the node chain is NOT used, so this request costs 0 NRN")
-        if local_gguf.ensure_weights(common.MODEL_ID) is None:
+        if local_gguf.ensure_weights(model_id) is None:
             ap.error("local engine selected but the quantized weights could not be fetched; "
                      "re-run with --engine torch to use the node pipeline")
         results = [None] * len(prompts)
@@ -343,7 +349,7 @@ def main():
         # Always serial: one llama.cpp context is not re-entrant, and concurrency is the
         # network path's job -- here the whole model is on one machine anyway.
         for i, p in enumerate(prompts):
-            run_local(i, p, args.max_new_tokens, results, common.MODEL_ID,
+            run_local(i, p, args.max_new_tokens, results, model_id,
                       coordinator=coordinator, wallet_id=wallet_id)
         _report(results, prompts, time.time() - batch_t0, "LOCAL", args.dump_json)
         return

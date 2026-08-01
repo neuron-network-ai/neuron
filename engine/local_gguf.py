@@ -42,6 +42,11 @@ GGUF_MODELS = {
                                    "qwen2.5-1.5b-instruct-q4_k_m.gguf", 1.2),
     "Qwen/Qwen2.5-0.5B-Instruct": ("Qwen/Qwen2.5-0.5B-Instruct-GGUF",
                                    "qwen2.5-0.5b-instruct-q4_k_m.gguf", 0.5),
+    # 7B is the tier ladder's next step. Its GGUF is SPLIT across two files upstream, unlike
+    # the single-file smaller ones, so the filename below is part 1 of 2 -- llama.cpp follows
+    # the split automatically once both parts are in the same cache directory.
+    "Qwen/Qwen2.5-7B-Instruct": ("Qwen/Qwen2.5-7B-Instruct-GGUF",
+                                 "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf", 4.7),
 }
 
 # Keep well clear of the RAM ceiling: the agent is also holding its own compute slice for the
@@ -72,6 +77,48 @@ def can_serve(model_id, ram_gb=None):
         except Exception:
             return False
     return ram_gb >= need_gb * RAM_HEADROOM_FACTOR
+
+
+def best_local_model(preferred=None, require_cached=True):
+    """The LARGEST model this machine can actually run itself, not just the network's model.
+
+    The tier ladder picks what the *network* serves, which is bounded by its weakest members;
+    a 16-core desktop with 64 GB was being handed 1.5B answers because that is all a 4-core
+    laptop elsewhere can hold a slice of. Locally there is no such constraint — quality is
+    free here, so take it. Measured on this machine, Q4_K_M: 1.5B = 27.9 tok/s, 7B = 7.8 tok/s.
+    Both are comfortably readable, and 7B is a different class of answer.
+
+    `require_cached` is what keeps a first run fast: it only returns weights already on disk,
+    so the machine answers on whatever it has now and upgrades once the bigger download lands
+    (started in the background by prefetch_best()). Set NEURON_LOCAL_MODEL to pin one.
+    """
+    pinned = os.environ.get("NEURON_LOCAL_MODEL")
+    if pinned:
+        return pinned if can_serve(pinned) else None
+    # largest first, by the RAM figure in GGUF_MODELS
+    for mid in sorted(GGUF_MODELS, key=lambda m: GGUF_MODELS[m][2], reverse=True):
+        if not can_serve(mid):
+            continue
+        if require_cached and not available(mid):
+            continue
+        return mid
+    if preferred and can_serve(preferred) and (not require_cached or available(preferred)):
+        return preferred
+    return None
+
+
+def prefetch_best():
+    """Fetch the biggest model this machine could run, if it isn't already here.
+
+    Called in the background at startup: without it `best_local_model()` can never move up a
+    tier, because it only ever returns weights that are already cached. Returns the model_id
+    it fetched, or None.
+    """
+    target = best_local_model(require_cached=False)
+    if not target or available(target):
+        return None
+    log.info("fetching a larger local model in the background: %s", target)
+    return target if ensure_weights(target) else None
 
 
 def available(model_id):

@@ -1621,6 +1621,79 @@ refuses to advertise a listener that did not bind.
 
 ---
 
+## Session 28 (2026-08-01) — 7B measured and made the local default; the 72B arithmetic
+
+### 7B: measured, and it meets the target
+
+`Qwen2.5-7B-Instruct` Q4_K_M (4.68 GB, split across two GGUF files upstream — llama.cpp follows
+the split once both parts are in one cache dir). Windows driver, 16 cores, 15 threads:
+
+| run | tokens | tok/s |
+|---|---|---|
+| 1 (cold) | 26 | 6.08 |
+| 2 | 60 | **7.85** |
+| 3 | 60 | **7.77** |
+
+Model load 5.3 s. **~7.8 tok/s warm, against the brief's "8+" target.** For scale, 1.5B on the
+same box is 27.9 tok/s.
+
+**A prediction of mine that the measurement corrected.** Extrapolating linearly from the two
+known points (1.5B = 36 ms/token, 70B = 1594 ms/token — 46.7× params for 44.3× time) predicted
+182 ms/token = 5.5 tok/s for 7B, and I said to plan for ~5. Measured 7.8. The 70B run was
+memory-bandwidth-bound at 42.5 GB, so it drags a linear fit upward; 7B is not. Extrapolating
+across a 46× range hid a regime change.
+
+**Wired as the local default** — `local_gguf.best_local_model()` picks the LARGEST model this
+machine can hold rather than mirroring the network's serving model, which is capped by the
+network's weakest member (a 64 GB desktop was answering with 1.5B because a 4-core laptop
+elsewhere sets the tier). `prefetch_best()` pulls a bigger model in the background at startup, and
+selection only ever returns already-cached weights, so a first run answers immediately and
+upgrades when the download lands. `NEURON_LOCAL_MODEL` pins one. Live in `ui/app.py` and
+`node_a.py --engine auto`.
+
+### The landmine in the deployed tier ladder
+
+The **live** coordinator's middle tier is `meta-llama/Llama-3.1-8B-Instruct`, promoting at
+**6 nodes**. That repo is **gated** — `slice_downloader` fetches byte ranges with no auth and
+gets 401. So the plan "get more strangers to join" would, at 6 nodes, auto-promote the entire
+network to a model every node fails to download. The local repo already fixed this (Qwen 7B,
+publicly fetchable, min_nodes 3) and it was never deployed.
+
+Checked before touching anything: at today's 3 nodes nothing migrates (`PROMOTE_MARGIN` 0.15
+needs 3×1.15 = 3.45 nodes), so deploying the fix is inert now and correct later. **The deploy
+itself was blocked** by this environment's guard on restarting the production coordinator —
+command left for the founder.
+
+### 72B at 6 nodes is off by ~4×
+
+Per-node RAM for Qwen2.5-72B (72.7B params), by weight dtype:
+
+| weights | total | **6 nodes** | 10 | 20 | 40 |
+|---|---|---|---|---|---|
+| fp32 (what the pipeline loads today) | 291 GB | **48.5** | 29.1 | 14.5 | 7.3 |
+| fp16 (`NEURON_WEIGHT_DTYPE=fp16`) | 145 GB | **24.2** | 14.5 | 7.3 | 3.6 |
+| int8 | 73 GB | 12.1 | 7.3 | 3.6 | 1.8 |
+| int4 (**not implemented**) | 36 GB | **6.1** | 3.6 | 1.8 | 0.9 |
+
+Nodes today are 68 / 16 / 12 GB; a volunteer laptop is 8-16 GB. So 6×72B needs **int4 weights in
+the pipeline**, which is the still-open "quantize the weights" gap in `PETALS_NOTES.md`. At fp16,
+which works today, 72B needs ~20 nodes — which is exactly what `model_tiers.py` already says.
+`model_tiers.py` is not wrong; the 6-node figure is.
+
+Also worth recording: 72B Q4_K_M is ~47 GB and this machine has 45 GB free, so the single-machine
+comparison run that was possible for 70B in Session 25 is no longer possible here.
+
+### Not done, and why
+"Each node runs full 7B locally, coordinator routes to a free node" changes what a node *is*:
+today a node handles opaque tensor slices and never sees text, and that property is the basis of
+`SAFETY.md`, `SECURITY.md` and the node-operator story in `INSTALL.md`/`STRANGER_INSTALL.md`
+("your node only ever processes opaque numeric tensors, never readable prompts or answers").
+Full-model-per-node means volunteers' machines receive readable prompts and produce readable
+answers, in their own jurisdictions. That is a product and legal decision, not a refactor, so it
+was raised rather than quietly built.
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load

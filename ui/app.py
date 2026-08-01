@@ -27,6 +27,7 @@ Env overrides:
 import json
 import logging
 import os
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -69,6 +70,10 @@ async def lifespan(app: FastAPI):
     if local_gguf.can_serve(common.MODEL_ID):
         log.info("local engine can serve %s — skipping the pipeline-driver shard load",
                  common.MODEL_ID)
+        # Pull a bigger model in the background if this machine can hold one. Deliberately a
+        # thread: it is a multi-GB download and must never delay the server coming up, and
+        # best_local_model() keeps answering with whatever is already cached until it lands.
+        threading.Thread(target=local_gguf.prefetch_best, daemon=True).start()
     else:
         DRIVER.ensure_loaded()
     print(f"[ui] ready | coordinator={COORDINATOR} | chat at / , OpenAI API at /v1")
@@ -206,8 +211,12 @@ def _drive(prompt: str, max_new: int, wallet_id: str, use_rag: bool = False,
     # machine capable of local execution -- which is every dev machine -- so verifying that a
     # chain routes, serves and settles NRN meant hand-running node_a.py with a wallet id
     # copied out of a browser session. Off by default; local-first is still the right tiering.
-    if local_gguf.available(common.MODEL_ID) and not FORCE_NETWORK:
-        events = local_gguf.stream(messages, max_new, common.MODEL_ID,
+    # Serve the biggest model THIS machine can hold, which is usually larger than the one the
+    # network serves (that is capped by its weakest member). Falls back to the network's model,
+    # then to the chain.
+    local_model = None if FORCE_NETWORK else local_gguf.best_local_model(common.MODEL_ID)
+    if local_model:
+        events = local_gguf.stream(messages, max_new, local_model,
                                    coordinator=COORDINATOR, wallet_id=wallet_id)
     else:
         # Load the driver shard on demand. lifespan() skips it whenever the local engine
