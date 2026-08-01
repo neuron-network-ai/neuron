@@ -509,12 +509,18 @@ function renderSources(body, d){
 
 function finishBot(body, meta, d, rawText){
   body.innerHTML = renderMarkdown(rawText);
-  const n = (meta && meta.nodes) || onlineNodes;
+  // meta.nodes is 0 for a locally-served answer, and 0 is falsy in JS -- this used to fall
+  // through to the NETWORK-wide online count and report "3 nodes" for a request no node
+  // touched. Next to "Cost: 0.0000 NRN" that reads as three volunteers having served it for
+  // free. Say plainly where the answer came from instead.
+  const localRun = !!(meta && meta.local);
+  const n = (meta && typeof meta.nodes === "number") ? meta.nodes : onlineNodes;
   const cost = (d.cost_nrn!==undefined && d.cost_nrn!==null) ? d.cost_nrn.toFixed(4) : "?";
   const m = document.createElement("div");
   m.className = "meta";
   m.innerHTML =
-    "<span>⛓ " + n + " nodes</span>" +
+    (localRun ? "<span>⛓ this machine</span>"
+              : "<span>⛓ " + n + " nodes</span>") +
     "<span>◈ Cost: " + cost + " NRN</span>" +
     "<span>" + d.tokens + " tokens · " + d.tok_per_s + " tok/s</span>";
   body.parentElement.appendChild(m);
