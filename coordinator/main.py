@@ -307,13 +307,23 @@ def register(body: RegisterBody, x_register_secret: str = Header(default=None),
     models.register_node(body.node_id, tailscale_ip, port, body.layer_start,
                          body.layer_end, body.cores, body.ram_gb, token,
                          ms_per_layer=body.ms_per_layer, head_ms=body.head_ms, trusted=trusted)
+    # Report the node's REAL standing, read back from the DB, not a binary guess from whether
+    # this call carried the secret. A node that passed proof-of-compute is `verified`, and
+    # `challenges_passed` survives re-registration — but this response used to say
+    # "probationary" to anyone who re-registered without the secret, which every relayed node
+    # does on a ticket refresh or a restart. The agent then logged "PROBATIONARY: ... will not
+    # earn NRN" at a node that was verified, eligible and earning. For a stranger, being told
+    # on every restart that they are not earning is the kind of thing that gets an agent
+    # uninstalled.
+    fresh = models.get_node(body.node_id) or {}
+    standing = fresh.get("standing") or ("trusted" if trusted else "probationary")
     resp = {
         "status": "registered",
-        "standing": "trusted" if trusted else "probationary",
+        "standing": standing,
         "assigned_layers": [body.layer_start, body.layer_end],
         "node_token": token,
     }
-    if not trusted:
+    if standing == "probationary":
         resp["note"] = ("probationary — you are registered but will not receive live "
                         "requests or earn NRN until a verifier confirms your node with a "
                         "proof-of-compute challenge")

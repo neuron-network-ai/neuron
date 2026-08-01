@@ -140,6 +140,13 @@ def main():
     r_owner = register(body("stranger-v", 0, 5), x_register_secret=None,
                        x_node_token=v["node_token"])
     check("re-register with own token succeeds", r_owner["status"] == "registered")
+    # The response must report the node's REAL standing, not re-derive it from "did this call
+    # carry the secret". stranger-v is verified; telling it "probationary — you will not earn
+    # NRN" on every restart (which a relayed node does routinely) is a lie that would push a
+    # stranger to uninstall.
+    check("re-registering a VERIFIED node still reports verified",
+          r_owner["standing"] == "verified")
+    check("...and carries no 'you will not earn' note", "note" not in r_owner)
 
     # 9) a behind-NAT registration is handed a relay ticket the relay can verify offline
     r_nat = register(body("stranger-nat", 0, 5, behind_nat=True), x_register_secret=None)
