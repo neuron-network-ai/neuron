@@ -21,8 +21,8 @@ from coordinator import reconcile_stranded_escrow as rec     # noqa: E402
 
 ok = fail = 0
 
-WALLET = "w_d35c84ddd33ea857d74c29db22cd76a9"
-OTHER = "node_a-cli-ee8b499f40a0"
+WALLET = "w_0000000000000000000000000000dead"
+OTHER = "node_a-cli-bbbbbbbbbbbb"
 # Shaped like the live ledger, with 0.056001 stranded in escrow. Sums to exactly 1e9.
 LEDGER = [
     ("__emission_pool__", 600_000_099.609073, "bucket"),
@@ -36,7 +36,7 @@ LEDGER = [
     ("__coordinator__",             2.8678,   "node"),
     (WALLET,                       24.295,    "wallet"),
     (OTHER,                        24.971,    "wallet"),
-    ("w_ef7ca46713e2bc4d0d627b69fe4aa660", 25.0, "wallet"),
+    ("w_0000000000000000000000000000beef", 25.0, "wallet"),
 ]
 HOLDS = [
     ("h1", OTHER,  0.029, "settled"),
@@ -121,7 +121,7 @@ def main():
     check("the payer was credited exactly the stranded amount",
           abs(b[WALLET] - (24.295 + 0.056001)) < 1e-9, f"{b[WALLET]}")
     check("no other wallet was touched",
-          (b[OTHER], b["w_ef7ca46713e2bc4d0d627b69fe4aa660"]) == (24.971, 25.0))
+          (b[OTHER], b["w_0000000000000000000000000000beef"]) == (24.971, 25.0))
     check("no node or bucket was touched",
           (b["node_a"], b["__ecosystem__"], b["__emission_pool__"])
           == (9.011876, 149_999_800.0, 600_000_099.609073))

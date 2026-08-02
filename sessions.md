@@ -2273,7 +2273,7 @@ Attribution is by weight of evidence, and the script **prints the evidence inste
 it** — per-request payout records were never stored, so which settlement stranded which fraction
 cannot be recovered. It infers the payer from settled hold volume rather than hardcoding a
 wallet id, which on the live snapshot picks out `w_d35c84dd…` at **98.3%** of settled volume
-(`node_a-cli-ee8b499f40a0` holds the other 1.7%). `--to` overrides.
+(a CLI test wallet holds the other 1.7%). `--to` overrides.
 
 Two refusals that matter more than the happy path:
 - **escrow holding *less* than its live holds is refused, not patched.** That is a different and

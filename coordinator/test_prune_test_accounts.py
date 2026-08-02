@@ -40,10 +40,10 @@ LEDGER = [
     ("attacker-demo-2",            25.0,      "wallet"),
     ("probe-only",                 25.0,      "wallet"),
     ("live-verify-wallet",         25.0,      "wallet"),
-    ("node_a-cli-e79214baa6df",    25.0,      "wallet"),
-    ("node_a-cli-ee8b499f40a0",    24.971,    "wallet"),
-    ("w_d35c84ddd33ea857d74c29db22cd76a9", 24.295, "wallet"),
-    ("w_ef7ca46713e2bc4d0d627b69fe4aa660", 25.0,   "wallet"),
+    ("node_a-cli-aaaaaaaaaaaa",    25.0,      "wallet"),
+    ("node_a-cli-bbbbbbbbbbbb",    24.971,    "wallet"),
+    ("w_0000000000000000000000000000dead", 24.295, "wallet"),
+    ("w_0000000000000000000000000000beef", 25.0,   "wallet"),
     ("agent-optinovate",            2.025002, "node"),   # dev install of the packaged agent
     ("stranger-test-win",           0.208607, "node"),   # rehearsal of the stranger join path
     ("node-b-optiplex",             0.187746, "node"),   # the OptiPlex under an earlier id
@@ -52,8 +52,8 @@ LEDGER = [
     ("w_spent_out",                 0.0,      "wallet"),  # prune target, already empty
 ]
 PRUNED = ["attacker-demo-1", "attacker-demo-2", "probe-only", "live-verify-wallet",
-          "node_a-cli-e79214baa6df", "node_a-cli-ee8b499f40a0",
-          "w_d35c84ddd33ea857d74c29db22cd76a9", "w_ef7ca46713e2bc4d0d627b69fe4aa660",
+          "node_a-cli-aaaaaaaaaaaa", "node_a-cli-bbbbbbbbbbbb",
+          "w_0000000000000000000000000000dead", "w_0000000000000000000000000000beef",
           "stranger-test-win", "agent-optinovate"]
 KEPT = ["node_a", "node_b", "node_c", "__coordinator__",
         "node-b-optiplex", "node-c-pavilion"]
@@ -133,7 +133,7 @@ def main():
           "w_spent_out" not in {t["account_id"] for t in log["transfers"]}
           and log["totals"]["already_empty"] == 1)
     check("prefix rules match both families",
-          {"node_a-cli-e79214baa6df", "w_d35c84ddd33ea857d74c29db22cd76a9"}
+          {"node_a-cli-aaaaaaaaaaaa", "w_0000000000000000000000000000dead"}
           <= {t["account_id"] for t in log["transfers"]})
     check("node_a is NOT caught by the node_a-cli- prefix",
           "node_a" not in {t["account_id"] for t in log["transfers"]})
