@@ -2613,6 +2613,48 @@ which does not bring it closer, since the decision is still NEURON Chain at 50+ 
 
 ---
 
+## Session 39 (2026-08-03) — the whitepaper, written only from what was measured
+
+No code. `whitepaper.md` in the repo root, ~2,900 words, built strictly from `ROADMAP.md`,
+this file, `NEURON_COMPLETE_PROJECT.md`, `PROBLEMS.md`, `SCALING.md`, `SECURITY.md`,
+`SAFETY.md` and `blockchain/MIGRATION_PLAN.md`. Twelve sections: abstract, problem, solution,
+architecture, measured results, security model, NRN economics, decentralisation roadmap,
+comparison to Bittensor/Gensyn/io.net/Petals, the environmental argument, limitations,
+conclusion. The README's ASCII architecture diagram is carried in verbatim. Nothing from
+`blockchain/` or `neuronscript_*` is committed — `MIGRATION_PLAN.md` was read as a source for
+the token decisions and stays gitignored where it is.
+
+### Numbers used, and the ones deliberately left out
+Every figure traces to a session: 3.2 tok/s single node (S3, 3.18 in the [P2] spike) → 4.61 on
+two (S4) → 6.16 at 3.82× overlap on three (S5); wire codec 12,508 → 2,946 B/msg = 4.25× with
+6/6 outputs identical (S21); auto-verification 254 ms (S27); reboot-to-serving 13 s (S26);
+bit-exact split (S1/S5); slice download 1.40/0.84/0.84 GB vs 3.09 (S8); 22 s clean onboarding
+(S29); local engine 27.9 tok/s at 1.5B and 7.8 at 7B (S26/S28); 70B at 0.62 tok/s on one
+machine (S25); the relayed run at 0.53 tok/s with 33.6 s of its 45.5 s on the wire (S26); the
+post-cleanup ledger to six decimals (S38).
+
+Left out on purpose: NeuronScript's +61% and the per-row-scaling accuracy win. Both are real
+and measured (S22/S23), but the kernel sources are gitignored and the paper describing them is
+supposed to precede their publication — a whitepaper is exactly the wrong place to describe
+them first. The comparison table's competitor column is the project's own reading of those four
+projects, not a measurement, and the text says so.
+
+### Two claims in the brief that the sources did not support as written
+- **"Halving every 2 years"** is in `ROADMAP.md` and in `NEURON_COMPLETE_PROJECT.md`, and
+  `grep -r halv coordinator/` returns **nothing** — the ledger settles a flat 1.0 NRN per
+  request. Written as *designed but not implemented*, because "halving every two years" in a
+  whitepaper reads as a live emission schedule.
+- **"2–5% typical CPU usage"** is `ROADMAP.md`'s framing of the opportunity, not something
+  measured here, and the *default* guard yields above a **15%** ceiling rather than capping at
+  2%. Both figures are stated for what they are.
+
+Also stated rather than smoothed over: the wire codec is still not deployed to the remote nodes,
+so the 74% wire cost is being paid in full; the network is 2 nodes / 21 of 28 layers as of S36;
+no outside person has ever run a node; and Phases 2-5 of the decentralisation roadmap are all
+labelled planned, since the coordinator still opens `sqlite3.connect` directly in one region.
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load
