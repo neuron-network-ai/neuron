@@ -88,3 +88,7 @@ ns.dll
 ns_*.dll
 libns.so
 libns*.so
+
+# runtime logs
+verify_service.log
+agent/agent.log
