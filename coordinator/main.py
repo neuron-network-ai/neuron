@@ -354,9 +354,35 @@ def node_list(x_register_secret: str = Header(default=None)):
 
 
 @app.delete("/node/{node_id}")
-def unregister(node_id: str, _node=Depends(require_node_token)):
+def unregister(node_id: str, x_node_token: str = Header(default=None),
+               x_register_secret: str = Header(default=None)):
+    """Remove a node registration.
+
+    Two ways in: the node's OWN token (how uninstall.py deregisters itself), or the operator's
+    register secret. The second exists because the first cannot clear the mess that actually
+    accumulates — dev nodes, abandoned test registrations and machines that were wiped without
+    uninstalling all leave rows whose tokens nobody holds any more. They then sit on the public
+    dashboard as permanently-offline entries, which makes a small live network look like a
+    graveyard to the first stranger who looks at it.
+
+    Only the `nodes` row goes. The node's LEDGER row is deliberately left alone: balances must
+    keep summing to GENESIS_TOTAL_SUPPLY, so deleting one would break the supply invariant and
+    quietly destroy NRN that node earned.
+    """
+    node = models.get_node(node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail=f"unknown node '{node_id}'")
+    by_operator = (isinstance(x_register_secret, str)
+                   and secrets.compare_digest(x_register_secret, config.REGISTRATION_SECRET))
+    by_owner = (isinstance(x_node_token, str)
+                and secrets.compare_digest(x_node_token, str(node["node_token"])))
+    if not (by_operator or by_owner):
+        raise HTTPException(status_code=401,
+                            detail="this node's own X-Node-Token, or the operator's "
+                                   "X-Register-Secret, is required")
     models.delete_node(node_id)
-    return {"status": "unregistered", "node_id": node_id}
+    return {"status": "unregistered", "node_id": node_id,
+            "by": "operator" if by_operator else "node"}
 
 
 # --------------------------------------------------------------------------- #
