@@ -27,6 +27,7 @@ import sys
 import threading
 import time
 import uuid
+from urllib.parse import urlparse
 
 import psutil
 import requests
@@ -336,6 +337,9 @@ class Agent:
                         "node is only reachable at %s:%d, so peers outside this network "
                         "will NOT be able to connect", ip, body["port"])
         self._save()
+        # Registration carries the coordinator's address too, so a node that re-registers
+        # (ticket refresh, restart, recovery) picks up a move without waiting for a beat.
+        self.adopt_coordinator_url(data)
         standing = data.get("standing", "trusted")
         log.info("registered as %s [%s], assigned layers %s (%d cores, %d GB, %s)",
                  body["node_id"], standing, data["assigned_layers"],
@@ -351,8 +355,74 @@ class Agent:
         return r.json()
 
     def ping(self):
-        requests.get(f"{self.base}/node/{self.cfg['node_id']}/ping",
-                     headers={"X-Node-Token": self.cfg["node_token"]}, timeout=10).raise_for_status()
+        r = requests.get(f"{self.base}/node/{self.cfg['node_id']}/ping",
+                         headers={"X-Node-Token": self.cfg["node_token"]}, timeout=10)
+        r.raise_for_status()
+        try:
+            self.adopt_coordinator_url(r.json())
+        except ValueError:
+            pass                    # a ping that isn't JSON is still a successful heartbeat
+
+    @staticmethod
+    def _normalize_url(url):
+        """A usable absolute http(s) URL, or None.
+
+        Strict on purpose. This value redirects every future call this node makes, so a
+        malformed one does not deserve the benefit of the doubt -- garbage, a relative path or
+        a non-http scheme is dropped rather than adopted and then failed on forever.
+        """
+        if not isinstance(url, str):
+            return None
+        url = url.strip().rstrip("/")
+        if not url:
+            return None
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return None
+        return url
+
+    def adopt_coordinator_url(self, payload):
+        """Follow the coordinator if it says it now lives somewhere else.
+
+        The address is otherwise frozen in config.json at install time and nothing can revise
+        it, so moving the public hostname would strand every existing node permanently -- a new
+        installer could not help, because ensure_config only writes defaults when there is no
+        config.json. The old host telling nodes where the new one is, while it is still up, is
+        the only mechanism that works.
+
+        The new address is PROBED before it is kept. Adopting blindly would replace one way to
+        strand the network with a faster one: a single typo in the coordinator's PUBLIC_URL
+        would be obeyed by every node at once, with nothing left able to correct them. If the
+        probe fails we stay put and are simply told again on the next heartbeat.
+
+        This is not a new trust boundary. A coordinator already tells nodes which layers to
+        serve and which peers to talk to; telling them its own address is strictly less.
+        """
+        if not isinstance(payload, dict):
+            return False
+        offered = self._normalize_url(payload.get("coordinator_url"))
+        if not offered or offered == self._normalize_url(self.cfg.get("coordinator")):
+            return False
+
+        current = self.cfg.get("coordinator")
+        log.info("coordinator says it now lives at %s (we have %s) — checking before moving",
+                 offered, current)
+        try:
+            probe = requests.get(f"{offered}/node/{self.cfg['node_id']}/ping",
+                                 headers={"X-Node-Token": self.cfg["node_token"]}, timeout=15)
+            probe.raise_for_status()
+        except requests.RequestException as e:
+            log.warning("NOT moving to %s — it did not answer (%s). Staying on %s.",
+                        offered, e.__class__.__name__, current)
+            return False
+
+        self.cfg["coordinator"] = offered
+        self.cfg["coordinator_previous"] = current
+        self._save()
+        self.base = offered
+        log.info("coordinator address updated: %s -> %s (saved; all further calls use it)",
+                 current, offered)
+        return True
 
     # -- slice download ------------------------------------------------------ #
     @staticmethod

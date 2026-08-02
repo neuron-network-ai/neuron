@@ -2449,6 +2449,65 @@ install. Two steps, neither needing a code change:
 
 ---
 
+## Session 37 (2026-08-02) — the address stops being frozen at install time
+
+### Why this had to come first
+The coordinator's address was written into `config.json` once, at install, and **nothing could
+ever revise it**. Changing the public hostname would have stranded every existing node
+permanently — and a new installer could not have rescued them, because `ensure_config` only
+writes defaults when there is no `config.json` at all. The auto-updater is no help either: it
+asks the *coordinator* for updates, so if the coordinator's address is the thing that is wrong,
+there is nothing left to ask.
+
+The only mechanism that works is the old host telling nodes where the new one is **while it is
+still up**. That has to be in place before a move, not during one. Hence: insurance, shipped
+now, used later or never.
+
+### What it does
+`config.PUBLIC_URL` (env `NEURON_PUBLIC_URL`) is returned as `coordinator_url` on **every
+heartbeat** — the one call a live node makes continuously, so a change reaches the whole
+network within 30 seconds instead of never — and on **registration**, so a node that
+re-registers (relay ticket refresh, restart, recovery) picks it up immediately.
+
+`Agent.adopt_coordinator_url()` compares, and on a difference **probes the new address before
+keeping it**: `GET <new>/node/<id>/ping` with this node's own token. Only then does it write
+`config.json`, update `self.base`, and log the move. `coordinator_previous` is kept.
+
+That probe is the design decision worth defending. This is a redirect primitive aimed at every
+node simultaneously — adopting blindly would replace one way to strand the network with a
+faster one, where a single typo in `PUBLIC_URL` is obeyed everywhere at once and nothing is
+left able to correct it. If the probe fails we stay put and get told again on the next beat.
+URLs are validated strictly for the same reason: garbage, a relative path or a non-http scheme
+is dropped without even being probed.
+
+Worth stating plainly: this is **not** a new trust boundary. A coordinator already tells nodes
+which layers to serve and which peers to connect to; telling them its own address is strictly
+less than that.
+
+`agent/test_coordinator_migration.py` **36** — the refusals get the most attention (dead
+address, HTTP error, malformed URL, no probe attempted), plus the property that actually
+matters: a restarted agent reads the new address off disk. **Deployed and verified live**: the
+heartbeat now returns `coordinator_url: https://neuronnet.duckdns.org`.
+
+### The plan, confirmed: the name does not move
+**`neuronnet.duckdns.org` stays the stable public name.** Cloudflare goes *behind* it, not in
+front of a new one. PostgreSQL, a second Oracle VM and the load balancer are then all
+server-side work with **zero client churn** — no installer rebuild, no config migration, nothing
+for any existing node to do. `PUBLIC_URL` therefore should not need to change; it exists so
+that the day it does, it is survivable.
+
+None of those three are built yet: the coordinator still opens `sqlite3.connect` directly
+(`models.py`), there is one VM in one region, and there is no Cloudflare anything.
+
+### Not done — and it gates the release
+The agent half of this ships **inside the .exe**, and `NEURON-Setup-0.17.0.exe` was built
+*before* this change. The installer on disk does **not** contain `coordinator_url` adoption.
+Since 0.17.0 has not been published to GitHub yet, nobody has that build — so the choice is a
+rebuild in place (the SHA-256 in `RELEASE_NOTES_v0.17.0.md` would change) or a bump to 0.17.1.
+Founder's call; nothing was rebuilt unasked.
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load

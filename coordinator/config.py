@@ -55,6 +55,19 @@ COORDINATOR_LEDGER_ID = "__coordinator__"
 
 # --- agent auto-update (Session 9) ------------------------------------------ #
 # Bump this when a new agent is published; agents poll /agent/version and update.
+# The coordinator's own public address, handed to every node on registration and on every
+# heartbeat so they can follow it if it ever moves.
+#
+# Without this, the address is baked into each install's config.json and nothing can revise it:
+# changing the public hostname would strand every node that already exists, permanently, and a
+# new installer could not rescue them (agent.ensure_config only writes defaults when there is no
+# config.json yet). The fix has to be in place BEFORE a move, not during one -- the old host is
+# the only thing that can tell anyone where the new one is, and only while it is still up.
+#
+# Keep this pointed at the STABLE public name. The plan is to put a load balancer behind
+# `neuronnet.duckdns.org` rather than move off it, precisely so this never has to change.
+PUBLIC_URL = os.environ.get("NEURON_PUBLIC_URL", "https://neuronnet.duckdns.org")
+
 AGENT_VERSION = os.environ.get("NEURON_AGENT_VERSION", "0.17.0")
 # Where a node fetches that version, and the hash it must match before anything is run.
 # The download is NOT served from here: this VM has 1 GB of RAM and the installer is ~200 MB,

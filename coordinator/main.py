@@ -349,6 +349,9 @@ def register(body: RegisterBody, x_register_secret: str = Header(default=None),
         "standing": standing,
         "assigned_layers": [body.layer_start, body.layer_end],
         "node_token": token,
+        # Also here, not just on the heartbeat: a node that re-registers (relay ticket refresh,
+        # restart, recovery) learns the current address immediately rather than waiting.
+        "coordinator_url": config.PUBLIC_URL,
     }
     if standing == "probationary":
         resp["note"] = ("probationary — you are registered but will not receive live "
@@ -423,8 +426,12 @@ def unregister(node_id: str, x_node_token: str = Header(default=None),
 # --------------------------------------------------------------------------- #
 @app.get("/node/{node_id}/ping")
 def ping(node_id: str, _node=Depends(require_node_token)):
+    """Heartbeat. Carries `coordinator_url` because this is the one call every live node makes
+    continuously — it is how a change of address reaches the whole network within a heartbeat
+    instead of never."""
     models.touch_node(node_id)
-    return {"status": "alive", "node_id": node_id, "last_seen": time.time()}
+    return {"status": "alive", "node_id": node_id, "last_seen": time.time(),
+            "coordinator_url": config.PUBLIC_URL}
 
 
 @app.get("/node/verify-assignment")
