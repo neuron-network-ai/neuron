@@ -9,6 +9,8 @@ agent.py directly instead.
 
   python tray.py
 """
+import json
+import logging
 import os
 import sys
 import threading
@@ -22,6 +24,8 @@ import pystray
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agent.agent import Agent, _setup_logging   # noqa: E402
 from agent import resource_guard                 # noqa: E402
+
+log = logging.getLogger("neuron.agent")   # same file as the agent's own log
 
 # donation levels shown in the tray dial (value -> menu label)
 DONATION_LABELS = [
@@ -51,6 +55,8 @@ class Tray:
     def __init__(self, config_path=None):
         self.agent = Agent(config_path) if config_path else Agent()
         self.ledger = {"balance": 0.0, "total_earned": 0.0}
+        self._ledger_error = None            # last non-200 from the ledger poll, if any
+        self._last_logged_ledger_error = None   # so one bad status isn't logged every 30s
         self.icon = pystray.Icon("neuron", icon_image(COLORS["starting"]), "NEURON",
                                  menu=self._menu())
 
@@ -73,13 +79,27 @@ class Tray:
             return "Resume" if self.agent.user_paused.is_set() else "Pause"
 
         def chat_label(_):
-            return "Open Chat UI" if self._chat_ready() else "Chat UI (starting…)"
+            # "starting…" was shown for every non-ready state, including the one where it had
+            # already failed and was never coming back. A permanently greyed "starting…" tells
+            # the owner nothing and looks like the app is broken rather than one optional part.
+            state = getattr(self.agent, "local_chat_state", "pending")
+            if self._chat_ready():
+                return "Open Chat UI"
+            return {"failed": "Chat UI unavailable — see agent.log",
+                    "disabled": "Chat UI disabled in config",
+                    }.get(state, "Chat UI (starting…)")
+
+        def balance_note(_):
+            # Distinguish "you have earned nothing" from "we could not read your balance".
+            return f"⚠ balance unavailable (HTTP {self._ledger_error})"
 
         donation = pystray.Menu(*[self._mode_item(m, label) for m, label in DONATION_LABELS])
         return pystray.Menu(
             pystray.MenuItem(title, None, enabled=False),
             pystray.MenuItem(status, None, enabled=False),
             pystray.MenuItem(earned, None, enabled=False),
+            pystray.MenuItem(balance_note, None, enabled=False,
+                             visible=lambda item: self._ledger_error is not None),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(chat_label, self._open_chat, enabled=lambda item: self._chat_ready()),
             pystray.MenuItem("API Docs", self._open_api_docs, enabled=lambda item: self._chat_ready()),
@@ -135,10 +155,30 @@ class Tray:
     def _open_dashboard(self, icon, item):
         webbrowser.open(f"{self.agent.base}/dashboard")
 
+    def _creds(self):
+        """This node's CURRENT id and token, re-read from disk each time.
+
+        The coordinator mints a fresh node_token on every registration, so the copy this
+        process loaded at startup can go stale -- a re-registration (relay ticket refresh, a
+        second copy of the agent, a restart that needs one) invalidates it. A stale token makes
+        the earnings page 401 and, worse, makes the balance poll below silently return nothing,
+        so the tray sits at "0.00 NRN" forever and the owner concludes they are earning zero.
+        Whoever registered last wrote the good token to config.json; read it from there.
+        """
+        cfg = self.agent.cfg
+        try:
+            with open(self.agent.config_path) as f:
+                disk = json.load(f)
+            if disk.get("node_token"):
+                cfg = disk
+        except (OSError, ValueError):
+            pass
+        return cfg.get("node_id"), cfg.get("node_token")
+
     def _open_my_dashboard(self, icon, item):
         """The node's own token-gated page (balance/earned/served). Falls back to the
         public network dashboard if this machine hasn't registered yet."""
-        nid, tok = self.agent.cfg.get("node_id"), self.agent.cfg.get("node_token")
+        nid, tok = self._creds()
         if nid and tok:
             webbrowser.open(f"{self.agent.base}/node/{nid}/dashboard?token={tok}")
         else:
@@ -150,14 +190,28 @@ class Tray:
 
     def _poll(self):
         while True:
-            nid = self.agent.state.get("node_id")
-            if nid:
+            nid, tok = self._creds()
+            if nid and tok:
                 try:
                     # the ledger is private to this node -> authenticate with our own token
                     r = requests.get(f"{self.agent.base}/ledger/{nid}", timeout=8,
-                                     headers={"X-Node-Token": self.agent.cfg.get("node_token", "")})
+                                     headers={"X-Node-Token": tok})
                     if r.status_code == 200:
                         self.ledger = r.json()
+                        self._ledger_error = None
+                    else:
+                        # Never swallow this. A 401 here means the displayed balance is not
+                        # "you have earned nothing", it is "we could not ask" -- and those look
+                        # identical in the menu. Unreported, it reads as the network not paying.
+                        self._ledger_error = r.status_code
+                        if r.status_code != self._last_logged_ledger_error:
+                            log.warning("cannot read this node's balance (HTTP %d) — the "
+                                        "displayed earnings are stale, not zero%s",
+                                        r.status_code,
+                                        "; this node's token has been superseded, most likely "
+                                        "by another copy of the agent registering the same "
+                                        "node id" if r.status_code == 401 else "")
+                            self._last_logged_ledger_error = r.status_code
                 except requests.RequestException:
                     pass
             self.icon.icon = icon_image(COLORS.get(self._effective_status(), COLORS["idle"]))

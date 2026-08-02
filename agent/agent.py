@@ -147,6 +147,10 @@ class Agent:
         self.server = None                     # the running NodeServer (migration reload target)
         self._tunnel_stop = None               # per-tunnel stop flag, so it can be restarted alone
         self.local_chat_server = None          # set once start_local_chat() finishes (tray readiness check)
+        # "pending" until start_local_chat() has run, then "running" / "failed" / "disabled".
+        # Without this a failed Chat UI is indistinguishable from a slow one -- the tray showed
+        # "Chat UI (starting…)", disabled, forever, with no hint that it had already given up.
+        self.local_chat_state = "pending"
 
     # -- config persistence -------------------------------------------------- #
     def _save(self):
@@ -471,15 +475,27 @@ class Agent:
         serving the network (that's the agent's primary job) -- local_chat.start() already
         swallows its own errors, this just decides whether to call it at all."""
         if not self.cfg.get("local_chat", True):
+            self.local_chat_state = "disabled"
             return
         if not self.cfg.get("model_id"):
             log.warning("local chat skipped: model_id not known yet (setup() hasn't run)")
+            self.local_chat_state = "failed"
             return
         driver_slice_dir = os.path.join(HERE, "driver_slice")
+        port = self.cfg.get("local_chat_port", local_chat.DEFAULT_PORT)
         self.local_chat_server = local_chat.start(
             self.base, self.cfg["model_id"], driver_slice_dir,
-            port=self.cfg.get("local_chat_port", local_chat.DEFAULT_PORT),
-            oauth_cfg=self.cfg.get("oauth"))
+            port=port, oauth_cfg=self.cfg.get("oauth"))
+        if self.local_chat_server is None:
+            self.local_chat_state = "failed"
+            # Said out loud because the usual cause is mundane and fixable -- something else
+            # already on this port (another copy of the agent, or a dev server) -- and the
+            # symptom otherwise is a menu entry that says "starting…" forever.
+            log.error("local Chat UI failed to start on port %d — the node is still serving "
+                      "the network; check whether that port is already in use", port)
+        else:
+            self.local_chat_state = "running"
+            log.info("local Chat UI ready on http://127.0.0.1:%d", port)
 
     def heartbeat_loop(self):
         beat = 0
