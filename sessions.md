@@ -1715,6 +1715,64 @@ was raised rather than quietly built.
 
 ---
 
+## Session 29 (2026-08-02) — the packaged app audited, because a stranger only gets one shot
+
+**Goal:** stop fixing what we trip over and go through the whole stranger-facing surface.
+Everything below was found by building 0.16.0 and actually running it, not by reading code.
+
+### Four bugs in the shipped app, all silent
+
+1. **The tray showed `0.00 NRN` forever and could not be told from earning nothing.**
+   `_open_my_dashboard` and the balance poll both used the `node_token` the process loaded at
+   **startup**. The coordinator re-mints that token on every registration, so any
+   re-registration (relay ticket refresh, a second copy, a restart that needs one) leaves the
+   tray holding a dead token. Confirmed live: the My Dashboard URL carried a token starting
+   `13dea1f0` while `config.json` held `194dfddf`, and `194dfddf` returns HTTP 200. Both now
+   re-read the token from disk, where whoever registered last wrote the good one.
+2. **The ledger poll swallowed every non-200** (`if r.status_code == 200: ...`). "You earned
+   nothing" and "we could not read your balance" rendered identically as `0.00`. For a stranger
+   watching a stuck zero, that is indistinguishable from a network that does not pay — the most
+   likely reason a first volunteer quits. Non-200 is now recorded, shown in the menu, and logged
+   once per distinct status.
+3. **A Chat UI that had already failed said "Chat UI (starting…)", greyed, forever.**
+   `local_chat.start()` returns None on failure and the tray only checked `is not None`, so
+   "failed" and "still starting" were the same state. `agent.local_chat_state` now distinguishes
+   pending / running / failed / disabled, and a failed start is logged with the usual cause
+   (port already in use).
+4. **`--headless` has never worked in any build.** `neuron_app_entry` dispatched on the flag and
+   passed it through to `agent.main()`'s argparse: `error: unrecognized arguments: --headless`,
+   exit 2, nothing runs. Found by trying to run 0.16.0 headlessly to debug bug 1.
+
+Plus `DISCLOSURE.txt` — the first thing a stranger reads — pointed at
+`github.com/raman011sharma-code/neuron-network`, which 404s. Same for `AppSupportURL`.
+
+### The pattern worth naming
+
+Every one of these is invisible on the founder's machine and only appears to a new user, and
+every one of them lived in code with **no test at all**: the tray had none, the app's single
+entry point had none. Both now do (`agent/test_tray.py` 8 cases with pystray/PIL stubbed;
+`packaging/test_app_entry.py` 5 cases). The stranger-facing surface is exactly where "it works
+for me" is worth the least.
+
+### Installer
+
+**0.16.0** built and then superseded by **0.16.1**, which carries the four fixes above plus
+everything from Sessions 26-28. Installer changes: autostart is now **checked by default** (it
+was unchecked, which quietly undid all of [P21]'s reboot work — a stranger will not go hunting
+for that checkbox), and the support URL is corrected.
+
+### Verified on the real artifact
+Installed 0.16.0 on the founder's PC: registers, fetches placement, downloads its slice, comes
+online and heartbeats. The tray "Error" that prompted this audit was a transient retry state
+between coordinator polls, not a fault — but chasing it is what surfaced all four bugs.
+
+**Not yet done:** the founder reused the July config, so the install exercised an existing
+identity (`agent-optinovate`, layers 19-27, already verified) rather than the new-user path. A
+genuine first-run test — move `%LOCALAPPDATA%\NEURON\config.json` aside, start, land on the 0-9
+gap, watch the auto-verifier promote within 60 s — is still outstanding.
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load
