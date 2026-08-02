@@ -81,6 +81,8 @@ dist/
 Thumbs.db
 .idea/
 .vscode/
+# Local build-tooling config. Useful here, nobody else's business — and this repo is public.
+.claude/
 agent/config.node-*.json
 model_slice_*/
 

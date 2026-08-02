@@ -11,7 +11,7 @@
 
 Everything discussed, planned, built, proven, and decided across 27 development
 sessions and one full-day strategy conversation. Written so any new conversation —
-with Claude, with an investor, with a grant reviewer, with a developer — can pick
+with an investor, with a grant reviewer, with a developer — can pick
 up exactly where this left off.
 
 This document supersedes all previous planning documents.
@@ -171,7 +171,7 @@ Predictor on real weights:             ❌ quality gate failed
 ### What Is Not Proven
 
 ```
-Speed numbers from Claude's server:    INVALID (1-core Xeon, random weights)
+Speed numbers from the dev sandbox:    INVALID (1-core Xeon, random weights)
 14× speedup claim:                     against naive C loop, not PyTorch BLAS
 111× combined speedup:                 fabricated, wrong baseline
 Predictor row skipping on real model:  0% on 24/28 layers (weight rows uniform)
@@ -494,7 +494,6 @@ a deployed system anywhere.
 
 ```
 1. Build installer 0.16.0
-   Claude Code said: "Say go and I'll build it"
    Includes all fixes from sessions 22-27
    Autostart ticked by default
    Correct support URL

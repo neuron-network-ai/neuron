@@ -1,7 +1,7 @@
 # NEURON — Complete Project Roadmap
 **Network of Existing Utilised Resources — Open Nodes**
 
-This file is the single source of truth for Claude Code.
+This file is the single source of truth for the build.
 Read this + sessions.md before every session.
 Never modify this file during a session — it is a reference, not a log.
 Session results go in sessions.md only.
@@ -430,7 +430,7 @@ neuron/
 
 ---
 
-## Rules for Claude Code
+## Build rules
 
 1. Read sessions.md AND ROADMAP.md before every session
 2. Never modify ROADMAP.md — it is a reference document

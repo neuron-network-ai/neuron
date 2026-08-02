@@ -23,7 +23,7 @@ Stack on all three: `torch==2.4.1` (CPU), `transformers==4.44.2`, `accelerate`. 
 Python minor version need NOT match across nodes — only the torch/transformers
 versions must, since that's what makes the pickled tensors compatible over TCP.
 
-> Note: Claude Code runs **natively on Windows** here, not in WSL2. The OptiPlex's
+> Note: the build tooling runs **natively on Windows** here, not in WSL2. The OptiPlex's
 > LAN IP `192.168.1.10` is often unreachable (Machine 1 roams onto a phone
 > hotspot), so we use its Tailscale IP `100.114.189.46`.
 
