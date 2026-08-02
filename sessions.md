@@ -2262,6 +2262,80 @@ opened for writing.
 
 ---
 
+## Session 35 (2026-08-02) — stranded escrow reconciled, Sybil signals, merged to trunk
+
+### `coordinator/reconcile_stranded_escrow.py`
+The one-time repair the escrow fix could not do for itself: Session 34 stopped **new** leaks,
+but 0.056001 NRN was already sitting in `__escrow__` against zero live holds, and
+`prune_test_accounts.py` correctly refused to run past it.
+
+Attribution is by weight of evidence, and the script **prints the evidence instead of asserting
+it** — per-request payout records were never stored, so which settlement stranded which fraction
+cannot be recovered. It infers the payer from settled hold volume rather than hardcoding a
+wallet id, which on the live snapshot picks out `w_d35c84dd…` at **98.3%** of settled volume
+(`node_a-cli-ee8b499f40a0` holds the other 1.7%). `--to` overrides.
+
+Two refusals that matter more than the happy path:
+- **escrow holding *less* than its live holds is refused, not patched.** That is a different and
+  worse bug — money backing in-flight requests would be missing — and crediting someone would
+  paper over it.
+- **a live hold is never mistaken for stranded NRN.** Stranded is `balance - sum(held)`, so a
+  request in flight is invisible to it.
+
+Also: dry run reads the DB `mode=ro` so it physically cannot write, one transaction, `--backup`,
+and `reconcile_log.json` (gitignored — it names a wallet and an amount).
+`coordinator/test_reconcile_stranded_escrow.py` **32**.
+
+One deviation from the brief, stated plainly: it does **not** assert `escrow == sum(held)`
+*before* — that is exactly the condition being repaired and would refuse every real run. It
+asserts escrow ≥ live holds before (less would be the worse bug above), and `==` after.
+
+### Sybil signals — flag and log, block nothing
+`platform` now joins `cores`/`ram_gb` at registration (agent sends `platform.platform()`), and
+the three together form `hw_fingerprint`. A second node id appearing on the same signature
+within 24h records a `fingerprint_reuse` flag.
+
+The fingerprint is **deliberately weak and the code says so**: cores/RAM/OS is low-entropy, two
+identical laptops collide, and a VM reports whatever it likes. So false positives are expected
+and nothing is ever blocked on it — a flagged node registers, routes and earns exactly like any
+other newcomer, which is the property most likely to be "fixed" later by someone who reads the
+flag as an accusation. There are four tests asserting the *not blocking*. Enforcement on
+evidence this weak would lock out honest volunteers to protect NRN that has no value yet.
+
+**The faucet gap was real.** `claim_faucet` is idempotent per wallet, which stopped a wallet
+claiming twice but not a *person*: `wallet_for_oauth` keys on `(provider, external_id)`, so
+signing in with Google and then GitHub on the same address minted two wallets and two 25 NRN
+grants. Now one grant per **verified** email, with the withheld grant flagged for review.
+Verified specifically — an unverified address is a claim, not a fact, and gating on it would let
+anyone type someone else's address to deny them a grant. Both cases are tested.
+
+Flags live at `GET /admin/sybil-flags` behind the operator secret and on the `/admin` page,
+never in public: these are unproven suspicions about specific people.
+
+A leak the tests caught: `hw_fingerprint` and `platform` were being returned by the **public**
+`/node/list`, which would have let anyone group the roster by machine — exactly the correlation
+the private-earnings and private-address decisions exist to prevent. Both are now operator-only,
+like the addresses. `coordinator/test_sybil_signals.py` **35**.
+
+### Merged to trunk
+`feature/auto-model-tiering` → **`main-full`**, fast-forward, pushed.
+
+`main-full` is the repo's default branch and its real history. **Not** `main`: that branch is
+the single-commit curated public snapshot and shares **no common ancestor** with development
+(`git merge-base` returns nothing), so merging there would have joined two unrelated histories
+and conflicted on essentially every file. The literal instruction said "main"; the branch that
+*is* main on GitHub is `main-full`. If the curated snapshot is what needs refreshing, that is
+its own operation — regenerate it from a `git archive`, as Session 30 did.
+
+### State
+All suites green: 18 coordinator (398 checks), 11 agent, 1 packaging. Working tree clean.
+`--execute` has still never been run against the live database, and it has never been opened for
+writing. The live ledger therefore still carries its 0.056001 NRN of stranded escrow and its 10
+prunable test accounts — both scripts are ready, both need a quiesced coordinator and a
+deliberate run.
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load

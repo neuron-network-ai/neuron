@@ -19,6 +19,7 @@ import argparse
 import json
 import logging
 import os
+import platform as _platform
 import shutil
 import socket
 import subprocess
@@ -270,6 +271,10 @@ class Agent:
             "layer_end": self.cfg["layer_end"],
             "cores": os.cpu_count(),
             "ram_gb": int(psutil.virtual_memory().total // 10**9),
+            # With cores/ram_gb this is the coarse hardware signature the coordinator groups
+            # on to spot one machine registering many node ids. It is a signal an operator
+            # reviews, never a block, and it says nothing a `User-Agent` header would not.
+            "platform": _platform.platform(),
             # When true the coordinator ignores the address above and stores this node at a
             # relay endpoint instead, so every peer that asks for a chain is handed a public
             # host:port. That is the whole of "a stranger can be in the pipeline".

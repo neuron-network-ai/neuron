@@ -37,6 +37,9 @@ class RegisterBody(BaseModel):
     behind_nat: bool = False       # if true, coordinator assigns a relay port (Session 12)
     ms_per_layer: float | None = None   # self-benchmark for auto-balancing (Session 14)
     head_ms: float | None = None        # driver's lm_head cost (Session 14)
+    platform: str | None = None         # e.g. "Windows-11-10.0.26200"; with cores/ram_gb this
+                                        # forms the coarse hardware signature a sybil signal
+                                        # groups on. Optional: older agents omit it.
 
 
 class InferBody(BaseModel):
@@ -311,9 +314,26 @@ def register(body: RegisterBody, x_register_secret: str = Header(default=None),
         relay_block = {"host": config.RELAY_HOST, "control_port": config.RELAY_CONTROL_PORT,
                        "data_port": config.RELAY_DATA_PORT, "public_port": relay_port,
                        "ticket": ticket}
-    models.register_node(body.node_id, tailscale_ip, port, body.layer_start,
-                         body.layer_end, body.cores, body.ram_gb, token,
-                         ms_per_layer=body.ms_per_layer, head_ms=body.head_ms, trusted=trusted)
+    known = models.get_node(body.node_id) is not None
+    fingerprint = models.register_node(
+        body.node_id, tailscale_ip, port, body.layer_start,
+        body.layer_end, body.cores, body.ram_gb, token,
+        ms_per_layer=body.ms_per_layer, head_ms=body.head_ms, trusted=trusted,
+        platform=body.platform)
+    # Sybil SIGNAL, never a block. One machine registering several node_ids in a day is what a
+    # sybil looks like -- and also what a legitimate operator running two nodes on a spare PC
+    # looks like, and what two identical laptops look like, since the fingerprint is only
+    # cores/RAM/OS. So it is recorded for the operator and nothing else happens. Blocking on a
+    # signal this weak would lock out honest people to protect NRN that has no value yet; real
+    # resistance arrives when faking it is worth something.
+    if fingerprint and not known:
+        siblings = models.fingerprint_siblings(fingerprint, body.node_id)
+        if siblings:
+            models.flag_sybil(
+                "fingerprint_reuse", fingerprint, body.node_id,
+                f"same hardware signature as {len(siblings)} other node(s) registered in the "
+                f"last 24h: {', '.join(siblings[:5])}"
+                + (" ..." if len(siblings) > 5 else ""))
     # Report the node's REAL standing, read back from the DB, not a binary guess from whether
     # this call carried the secret. A node that passed proof-of-compute is `verified`, and
     # `challenges_passed` survives re-registration — but this response used to say
@@ -353,9 +373,15 @@ def node_placement():
 def node_list(x_register_secret: str = Header(default=None)):
     """Node roster. Public callers get health/standing info but NO addresses — node
     endpoints (IP:port) are infrastructure detail, visible only with the operator secret
-    (the proof-of-compute verifier is the legitimate consumer). node_token never leaves."""
+    (the proof-of-compute verifier is the legitimate consumer). node_token never leaves.
+
+    The hardware signature is operator-only for the same reason the addresses are: published
+    against node ids it would let anyone group the roster by machine, which is precisely the
+    correlation the private-earnings and private-address decisions exist to prevent. It is a
+    review signal, not public information."""
     show_addr = x_register_secret == config.REGISTRATION_SECRET
-    hidden = {"node_token"} if show_addr else {"node_token", "tailscale_ip", "port"}
+    hidden = ({"node_token"} if show_addr
+              else {"node_token", "tailscale_ip", "port", "hw_fingerprint", "platform"})
     nodes = [{k: v for k, v in n.items() if k not in hidden} for n in models.list_nodes()]
     return {"nodes": nodes}
 
@@ -691,6 +717,17 @@ def admin_identities(banned_only: bool = False, limit: int = 200,
     return {"identities": models.list_identities(limit=limit, banned_only=banned_only)}
 
 
+@app.get("/admin/sybil-flags")
+def admin_sybil_flags(limit: int = 200, kind: str = None,
+                      x_wallet_link_secret: str = Header(default=None)):
+    """Sybil signals for operator review. Secret-gated and operator-only on purpose: these are
+    unproven suspicions about specific people, false positives are expected (the hardware
+    signature is only cores/RAM/OS), and publishing "this node looks fake" would be a public
+    accusation the evidence cannot support. Nothing is blocked on any of it."""
+    require_link_secret(x_wallet_link_secret)
+    return {"flags": models.list_sybil_flags(limit=limit, kind=kind)}
+
+
 @app.get("/wallet/{wallet_id}")
 def wallet_balance(wallet_id: str):
     """wallet_id is an unguessable secret minted by wallet_for_oauth() (32 hex chars) -- same
@@ -971,6 +1008,15 @@ def admin_page():
 <th>requests</th><th>balance</th><th>last seen</th><th>status</th><th></th></tr></thead>
 <tbody id="rows"><tr><td colspan="9" class="empty">Enter your operator key and press Load.</td></tr></tbody>
 </table></div>
+<h1 style="margin-top:2.5rem">Sybil signals</h1>
+<div class="sub">Weak by design and <b>nothing is blocked on any of it</b>. The hardware
+signature is only CPU count, RAM and OS, so two identical laptops collide and a VM can report
+whatever it likes — expect false positives and treat these as "worth a look", not as proof.
+Real Sybil resistance arrives when NRN is worth faking for.</div>
+<div class="tablewrap"><table>
+<thead><tr><th>when</th><th>kind</th><th>subject</th><th>node</th><th>detail</th></tr></thead>
+<tbody id="flagrows"><tr><td colspan="5" class="empty">Load to see flags.</td></tr></tbody>
+</table></div>
 <dialog id="detail"><div style="padding:1.2rem"><h3 id="dtitle" style="margin:0 0 .6rem"></h3>
 <div id="dbody" class="mono"></div>
 <div style="margin-top:1rem;text-align:right"><button class="ghost" id="dclose">Close</button></div>
@@ -1013,6 +1059,21 @@ async function load(){
           <button class="${banned?'ok':'danger'} ban" data-w="${esc(i.wallet_id)}"
                   data-b="${banned?1:0}">${banned?'Unban':'Ban'}</button></td></tr>`;
   }).join("") : '<tr><td colspan="9" class="empty">No identities yet.</td></tr>';
+  loadFlags();
+}
+
+async function loadFlags(){
+  let r;
+  try{ r=await fetch("/admin/sybil-flags",{headers:hdr()}); }catch(e){ return; }
+  if(!r.ok) return;
+  const {flags}=await r.json();
+  $("#flagrows").innerHTML = flags.length? flags.map(f=>`<tr>
+      <td>${when(f.created_at)}</td>
+      <td><span class="pill" style="background:#f9ab00">${esc(f.kind)}</span></td>
+      <td class="mono">${esc(f.subject)}</td>
+      <td class="mono">${esc(f.node_id)||'—'}</td>
+      <td class="muted">${esc(f.detail)}</td></tr>`).join("")
+    : '<tr><td colspan="5" class="empty">No signals — nothing has looked duplicated yet.</td></tr>';
 }
 
 document.addEventListener("click",async e=>{

@@ -28,9 +28,23 @@ CREATE TABLE IF NOT EXISTS nodes (
     challenges_failed INTEGER NOT NULL DEFAULT 0,
     trusted       INTEGER NOT NULL DEFAULT 0,
     node_token    TEXT NOT NULL,
+    platform      TEXT,
+    hw_fingerprint TEXT,
     status        TEXT NOT NULL DEFAULT 'online',
     last_seen     REAL NOT NULL,
     registered_at REAL NOT NULL
+);
+-- Sybil SIGNALS, not enforcement. Flags are recorded and shown to the operator; nothing is
+-- blocked on them. The fingerprint is deliberately weak (cores/RAM/OS), so false positives are
+-- expected -- two identical laptops look the same, and a VM fleet can report anything it likes.
+-- Real Sybil resistance needs NRN to be worth faking for, which it is not yet.
+CREATE TABLE IF NOT EXISTS sybil_flags (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind       TEXT NOT NULL,
+    subject    TEXT NOT NULL,          -- the fingerprint / email that triggered it
+    node_id    TEXT,
+    detail     TEXT,
+    created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS ledger (
     node_id         TEXT PRIMARY KEY,
@@ -130,6 +144,9 @@ def init_db():
         for col in ("challenges_passed", "challenges_failed"):   # S16
             if col not in cols:
                 c.execute(f"ALTER TABLE nodes ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
+        for col in ("platform", "hw_fingerprint"):               # Sybil signals
+            if col not in cols:
+                c.execute(f"ALTER TABLE nodes ADD COLUMN {col} TEXT")
         if "trusted" not in cols:                                # S12 (open join)
             c.execute("ALTER TABLE nodes ADD COLUMN trusted INTEGER NOT NULL DEFAULT 0")
             # every pre-open-join node registered under the shared secret -> grandfather
@@ -291,27 +308,79 @@ def record_attestation(node_id, passed):
 # --------------------------------------------------------------------------- #
 # Nodes
 # --------------------------------------------------------------------------- #
+def hardware_fingerprint(cores, ram_gb, platform):
+    """A coarse machine signature from what a node already reports at registration.
+
+    Deliberately weak, and worth being explicit about why: cores/RAM/OS is low-entropy, so two
+    identical laptops collide and anything running in a VM can report whatever it likes. It is
+    a SIGNAL for an operator to look at, not an identity -- which is why nothing is ever blocked
+    on it. Returns None when a node reported nothing useful, so absent data never groups nodes
+    together as if they matched.
+    """
+    if cores is None and ram_gb is None and not platform:
+        return None
+    return f"{cores or '?'}c/{int(ram_gb) if ram_gb else '?'}g/{(platform or '?').strip()}"
+
+
 def register_node(node_id, tailscale_ip, port, layer_start, layer_end, cores,
-                  ram_gb, token, ms_per_layer=None, head_ms=None, trusted=False):
+                  ram_gb, token, ms_per_layer=None, head_ms=None, trusted=False,
+                  platform=None):
     now = time.time()
+    fingerprint = hardware_fingerprint(cores, ram_gb, platform)
     with _db() as c:
         c.execute(
             """INSERT INTO nodes (node_id, tailscale_ip, port, layer_start, layer_end,
                                   cores, ram_gb, ms_per_layer, head_ms, trusted, node_token,
+                                  platform, hw_fingerprint,
                                   status, last_seen, registered_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?, 'online', ?, ?)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 'online', ?, ?)
                ON CONFLICT(node_id) DO UPDATE SET
                    tailscale_ip=excluded.tailscale_ip, port=excluded.port,
                    layer_start=excluded.layer_start, layer_end=excluded.layer_end,
                    cores=excluded.cores, ram_gb=excluded.ram_gb,
                    ms_per_layer=COALESCE(excluded.ms_per_layer, nodes.ms_per_layer),
                    head_ms=COALESCE(excluded.head_ms, nodes.head_ms),
+                   platform=COALESCE(excluded.platform, nodes.platform),
+                   hw_fingerprint=COALESCE(excluded.hw_fingerprint, nodes.hw_fingerprint),
                    trusted=excluded.trusted,
                    node_token=excluded.node_token, status='online', last_seen=excluded.last_seen""",
             (node_id, tailscale_ip, port, layer_start, layer_end, cores, ram_gb,
-             ms_per_layer, head_ms, 1 if trusted else 0, token, now, now),
+             ms_per_layer, head_ms, 1 if trusted else 0, token, platform, fingerprint,
+             now, now),
         )
         c.execute("INSERT OR IGNORE INTO ledger (node_id) VALUES (?)", (node_id,))
+    return fingerprint
+
+
+def flag_sybil(kind, subject, node_id=None, detail=None):
+    """Record a signal for the operator. Never blocks anything, and never raises -- a flag
+    failing to write must not take down a registration."""
+    with _db() as c:
+        c.execute("INSERT INTO sybil_flags (kind, subject, node_id, detail, created_at) "
+                  "VALUES (?,?,?,?,?)", (kind, subject, node_id, detail, time.time()))
+
+
+def fingerprint_siblings(fingerprint, node_id, within_seconds=86400):
+    """Other node_ids that registered on the same hardware signature inside the window."""
+    if not fingerprint:
+        return []
+    with _db() as c:
+        rows = c.execute(
+            "SELECT node_id, registered_at FROM nodes WHERE hw_fingerprint=? AND node_id!=? "
+            "AND registered_at >= ? ORDER BY registered_at",
+            (fingerprint, node_id, time.time() - within_seconds)).fetchall()
+    return [r["node_id"] for r in rows]
+
+
+def list_sybil_flags(limit=200, kind=None):
+    with _db() as c:
+        if kind:
+            rows = c.execute("SELECT * FROM sybil_flags WHERE kind=? "
+                             "ORDER BY created_at DESC LIMIT ?", (kind, limit)).fetchall()
+        else:
+            rows = c.execute("SELECT * FROM sybil_flags ORDER BY created_at DESC LIMIT ?",
+                             (limit,)).fetchall()
+    return [dict(r) for r in rows]
 
 
 def update_layers(node_id, layer_start, layer_end):
@@ -649,8 +718,30 @@ def wallet_for_oauth(provider, external_id, email=None, email_verified=None):
                  (provider, external_id, wallet_id, email, int(bool(email_verified)), now, now))
         c.execute("INSERT OR IGNORE INTO ledger (node_id, account_type) VALUES (?, 'wallet')",
                  (wallet_id,))
+    # One faucet grant per VERIFIED EMAIL, not per identity. claim_faucet is idempotent per
+    # wallet, which stopped a wallet claiming twice but not one person claiming twice: signing
+    # in with Google and then GitHub on the same address minted two wallets and two grants.
+    # The email must be provider-verified to count -- an unverified address is a claim, not a
+    # fact, and gating on it would let anyone type someone else's address to deny them a grant.
+    if email and email_verified and email_already_faucet_claimed(email, wallet_id):
+        flag_sybil("faucet_email_reuse", email.strip().lower(), wallet_id,
+                   f"{provider} identity for an email that already claimed the faucet "
+                   f"-- grant withheld")
+        return wallet_id, True
     claim_faucet(wallet_id, config.FAUCET_AMOUNT_NRN)
     return wallet_id, True
+
+
+def email_already_faucet_claimed(email, except_wallet_id=None):
+    """Has any OTHER verified identity on this email already taken the faucet?"""
+    if not email:
+        return False
+    with _db() as c:
+        rows = c.execute(
+            "SELECT o.wallet_id FROM oauth_identities o JOIN ledger l ON l.node_id=o.wallet_id "
+            "WHERE LOWER(o.email)=? AND o.email_verified=1 AND l.faucet_claimed=1",
+            (email.strip().lower(),)).fetchall()
+    return any(r["wallet_id"] != except_wallet_id for r in rows)
 
 
 def is_oauth_wallet(wallet_id):
