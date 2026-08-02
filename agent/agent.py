@@ -817,9 +817,25 @@ class Agent:
         except Exception as e:                                      # noqa: BLE001
             log.debug("payout binding skipped (%s: %s)", e.__class__.__name__, e)
 
+    def _serving_now(self):
+        """Is this machine mid-request? The updater's guard against replacing the app under a
+        live inference — a node that disappears mid-chain kills the answer for everyone on it."""
+        try:
+            from agent import node_server
+            return node_server.is_busy()
+        except Exception:                                       # noqa: BLE001
+            return True          # unknown means busy: defer rather than risk it
+
+    def update_loop(self):
+        """Startup check, then every 24h. The whole point of the project reaching strangers:
+        they will not reinstall to pick up a fix, so fixes have to reach them."""
+        from agent import updater
+        updater.update_loop(self.base, stop=self._stop, busy=self._serving_now)
+
     def run(self):
         self.setup()
         self.bind_payout_address()
+        threading.Thread(target=self.update_loop, daemon=True).start()
         threading.Thread(target=self.migration_loop, daemon=True).start()
         threading.Thread(target=self.peer_verify_loop, daemon=True).start()
         threading.Thread(target=self.start_local_chat, daemon=True).start()

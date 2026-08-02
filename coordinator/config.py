@@ -55,7 +55,18 @@ COORDINATOR_LEDGER_ID = "__coordinator__"
 
 # --- agent auto-update (Session 9) ------------------------------------------ #
 # Bump this when a new agent is published; agents poll /agent/version and update.
-AGENT_VERSION = os.environ.get("NEURON_AGENT_VERSION", "0.3.0")
+AGENT_VERSION = os.environ.get("NEURON_AGENT_VERSION", "0.17.0")
+# Where a node fetches that version, and the hash it must match before anything is run.
+# The download is NOT served from here: this VM has 1 GB of RAM and the installer is ~200 MB,
+# so the coordinator only advertises metadata and GitHub Releases does the bandwidth.
+AGENT_DOWNLOAD_URL = os.environ.get(
+    "NEURON_AGENT_DOWNLOAD_URL",
+    f"https://github.com/neuron-network-ai/neuron/releases/download/v{AGENT_VERSION}"
+    f"/NEURON-Setup-{AGENT_VERSION}.exe")
+# SHA-256 of that file. Empty until a release is published and hashed -- and an EMPTY hash
+# means no node will install anything, which is the correct failure direction: an unverified
+# binary pushed to every volunteer's machine is the worst thing this project could ship.
+AGENT_SHA256 = os.environ.get("NEURON_AGENT_SHA256", "")
 
 # --- stranger-NAT relay (Session 12) ---------------------------------------- #
 # A node behind NAT registers with behind_nat=true; the coordinator assigns it a

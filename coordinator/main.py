@@ -1306,7 +1306,13 @@ this page yours alone. "Spent" becomes live once wallet spending ships.</p>
 # --------------------------------------------------------------------------- #
 @app.get("/agent/version")
 def agent_version():
-    return {"version": config.AGENT_VERSION}
+    """What the auto-updater reads. `version` is kept as the first key for older agents that
+    only look at that; the rest is what makes an unattended update safe to actually perform.
+
+    sha256 empty means "do not install" — see config.AGENT_SHA256."""
+    return {"version": config.AGENT_VERSION,
+            "download_url": config.AGENT_DOWNLOAD_URL,
+            "sha256": config.AGENT_SHA256}
 
 
 @app.get("/models")

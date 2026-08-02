@@ -2356,6 +2356,99 @@ deliberate run.
 
 ---
 
+## Session 36 (2026-08-02) — the coordinator deployed, and fixes can finally reach strangers
+
+### The live coordinator was months of work behind
+Probed before touching it: `/node/{id}/payout-challenge` → **404**, `/admin/sybil-flags` → **404**.
+Everything from Sessions 32-35 existed only on this laptop. Deployed 16 coordinator modules +
+`relay_auth.py` to the Oracle VM after a full backup (`~/neuron-backup-20260802-221443`, 56 MB),
+installed `eth-account` in the VM venv (payout binding needs it; it is imported lazily so the
+coordinator starts fine without it and only binding fails), restarted, verified:
+
+| | before | after |
+|---|---|---|
+| `/node/{id}/payout-challenge` | 404 | **401** (exists, needs a node token) |
+| `/admin/sybil-flags` | 404 | **401** unauth, **200** with the operator key |
+| `/supply` invariant | — | `1,000,000,000.0`, ok |
+| `/status` | — | 2 nodes online, 21/28 layers |
+
+The DB auto-migrated: payout columns, `sybil_flags`, `platform`/`hw_fingerprint`. The escrow
+leak fix is now live, so no further settlement can strand NRN.
+
+### The auto-updater — rewritten, because the old one could never have worked
+`agent/updater.py` downloaded `agent.py` and swapped it in. The shipped app is a **frozen
+PyInstaller bundle**: the code is inside `neuron-agent.exe` and there is no `agent.py` on disk
+to replace. It was also never called from anywhere, and the coordinator advertised
+`AGENT_VERSION = "0.3.0"` while the installer said 0.16.5 — fourteen minor versions of drift in
+a value nothing read.
+
+Rewritten around what the app actually is. Frozen build: download the published installer,
+verify SHA-256, run it `/VERYSILENT` and exit so it can replace the files underneath. Source
+checkout: refuse and say `git pull` — a working tree is many modules and possibly local edits,
+and silently overwriting it would be hostile.
+
+Three rules, ordered by how badly each ends if broken, and each one tested:
+
+1. **Nothing unverified is ever executed.** No published hash → refuse. Mismatch → refuse *and
+   delete the file*, so a rejected executable is not left on disk for something else to find.
+   An empty `AGENT_SHA256` therefore means no node installs anything, which is the correct
+   failure direction for a mechanism that runs binaries on volunteers' machines unattended.
+2. **Never mid-request.** A node vanishing during inference reaches the driver as "socket
+   closed mid-message" and kills the answer for everyone on that chain. This needed a real
+   signal: `compute_lock` looked like the obvious one and is **wrong** — it only guards a slice
+   reload since serving moved to `batching.MicroBatcher`, so it is free almost all the time.
+   `node_server.is_busy()` now counts live connections plus a 120s grace, because a driver
+   holds a chain across many token round trips and may reconnect between them. A busy-check
+   that *raises* is treated as busy, never as idle.
+3. **The updater can never take the node down.** Unreachable coordinator, non-JSON response,
+   truncated download — logged and skipped, serving continues. `remote_info` returns None for
+   "could not ask", never "up to date".
+
+`/agent/version` now returns `{version, download_url, sha256}`, keeping `version` first for
+older agents. The download is **not** served from the VM — 1 GB of RAM and a ~200 MB installer
+— it points at GitHub Releases and the coordinator only advertises metadata.
+`agent/test_updater.py` **28**.
+
+**Honest limit:** the mechanism is wired and safe, but it delivers nothing yet. `AGENT_SHA256`
+is empty until a GitHub release is published and hashed, and by rule 1 an empty hash means no
+node installs anything. Publishing 0.17.0 and setting that env var on the VM is what switches
+it on.
+
+### Installer 0.17.0 — built and verified
+`packaging/neuron.iss` 0.16.5 → **0.17.0**, `config.AGENT_VERSION` 0.3.0 → 0.17.0,
+`updater.LOCAL_VERSION` 0.17.0. Rebuilt with `--clean` after killing the running exe (a running
+copy locks the file; a stale cache once shipped old bytecode for a whole session).
+
+    dist/installer/NEURON-Setup-0.17.0.exe    216.6 MB
+    sha256  939925ee8ae7ca343e9e90295e8a40b21c2b61f5cdffe0965834067dec29bfe3
+
+Verified in the bundle: **`_sqlite3.pyd` + `sqlite3.dll` are present** (the Chat UI failure),
+and `eth_account`/`eth_keys`/`eth_utils` (payout binding, never shipped before). A smoke run of
+the built exe registered, auto-placed on 0-13, and began its slice download — and the log lines
+now carry the logger name (`[INFO] neuron.agent ...`), so the logging fix is in the artifact too.
+
+**That smoke run had a side effect I did not intend: it registered a real node
+(`agent-optinovate-d4e1d9`) on the LIVE coordinator** and started a 1.78 GB download before the
+timeout killed it. Deleted it immediately; node list and the supply invariant verified clean
+afterwards. A build smoke test should point at a throwaway coordinator, not production — the
+`--headless` run inherits `coordinator` from the default config, and an isolated `LOCALAPPDATA`
+isolates *state*, not the network.
+
+### Three version strings, one meaning
+`config.AGENT_VERSION` (what the coordinator advertises) · `updater.LOCAL_VERSION` (baked into
+the exe) · `neuron.iss AppVersion` (installer filename). The update decision is just the first
+being greater than the second. Keeping three in sync by hand is exactly how #1 drifted to 0.3.0
+while #3 said 0.16.5 — a single VERSION file they all derive from is the obvious follow-up.
+
+### To switch auto-updates on
+Nothing updates yet, by design: `AGENT_SHA256` is empty and an empty hash refuses every
+install. Two steps, neither needing a code change:
+1. publish `NEURON-Setup-0.17.0.exe` as a GitHub release tagged `v0.17.0` (the advertised
+   `download_url` already points there);
+2. set `NEURON_AGENT_SHA256=939925ee…bfe3` in the VM's systemd unit and restart.
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load

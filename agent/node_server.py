@@ -37,6 +37,46 @@ from slice_downloader import load_slice_model    # noqa: E402
 # of serialising them.
 compute_lock = threading.Lock()
 
+# Is this machine in the middle of serving somebody? Used by the auto-updater, which must never
+# replace the app underneath a request in flight -- a dropped hop shows up to the driver as
+# "socket closed mid-message" and the whole inference fails, for every user on that chain.
+#
+# compute_lock is NOT the signal: it only guards a slice reload now (the serving path moved to
+# batching.MicroBatcher), so it is almost always free even mid-request. Counting live
+# connections is what actually reflects work, and the timestamp covers the gaps between a
+# chain's per-token round trips, when the connection is open but momentarily idle.
+_serving_lock = threading.Lock()
+_serving_conns = 0
+_last_activity = 0.0
+
+
+def _serving_enter():
+    global _serving_conns, _last_activity
+    with _serving_lock:
+        _serving_conns += 1
+        _last_activity = time.time()
+
+
+def _serving_exit():
+    global _serving_conns, _last_activity
+    with _serving_lock:
+        _serving_conns = max(0, _serving_conns - 1)
+        _last_activity = time.time()
+
+
+def is_busy(idle_seconds=120):
+    """True if a connection is open, or one closed less than `idle_seconds` ago.
+
+    The grace period is deliberate: a driver holds a chain across many token round trips and
+    may reconnect between them, so "no open socket right now" does not mean "nobody is using
+    this node". Erring towards busy only delays an update by a couple of minutes; erring the
+    other way breaks somebody's answer.
+    """
+    with _serving_lock:
+        if _serving_conns > 0:
+            return True
+        return (time.time() - _last_activity) < idle_seconds
+
 
 class NodeServer:
     def __init__(self, slice_dir, layer_start, layer_end, total_layers, paused_flag=None):
@@ -220,6 +260,7 @@ class NodeServer:
             srv.close()
 
     def _handle(self, conn, addr):
+        _serving_enter()
         try:
             self.serve(conn, addr)
         # TimeoutError is a sibling of ConnectionError under OSError, not caught by it --
@@ -229,6 +270,7 @@ class NodeServer:
         except (ConnectionError, TimeoutError, EOFError) as e:
             print(f"[node] conn {addr} ended: {e}")
         finally:
+            _serving_exit()
             conn.close()
 
 
