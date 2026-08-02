@@ -324,12 +324,47 @@ class Agent:
                      headers={"X-Node-Token": self.cfg["node_token"]}, timeout=10).raise_for_status()
 
     # -- slice download ------------------------------------------------------ #
+    @staticmethod
+    def slice_layers_on_disk(weights):
+        """Which decoder layers a downloaded slice actually contains.
+
+        Read from the safetensors header (an 8-byte little-endian length then JSON), so it
+        reflects the bytes on disk rather than what some config claims about them.
+        Returns (lo, hi) or None if it cannot be determined.
+        """
+        try:
+            with open(weights, "rb") as f:
+                n = int.from_bytes(f.read(8), "little")
+                if not 0 < n < 100 * 1024 * 1024:
+                    return None
+                header = json.loads(f.read(n).decode())
+            idx = {int(k.split(".")[2]) for k in header
+                   if k.startswith("model.layers.") and k.split(".")[2].isdigit()}
+            return (min(idx), max(idx)) if idx else None
+        except (OSError, ValueError, KeyError, IndexError):
+            return None
+
     def ensure_slice(self, info):
         slice_dir = os.path.join(HERE, os.path.normpath(self.cfg["slice_dir"]))
         weights = os.path.join(slice_dir, "model.safetensors")
         if os.path.exists(weights):
-            log.info("slice already present (%s) — skipping download", slice_dir)
-            return slice_dir
+            # Existence was the ONLY check, so a slice downloaded for one layer range was
+            # happily reused when the node was later placed on a different one -- serving
+            # another segment's weights while claiming this segment. Nothing detects that
+            # locally: the node answers confidently with wrong activations, fails
+            # proof-of-compute, and eventually gets flagged, with no clue why. Reachable
+            # whenever placement changes: delete config.json and re-register, and the
+            # coordinator hands you whichever gap needs filling, not the range you had.
+            have = self.slice_layers_on_disk(weights)
+            want = (info["layer_start"], info["layer_end"])
+            if have == want:
+                log.info("slice already present (%s) — skipping download", slice_dir)
+                return slice_dir
+            log.warning("cached slice holds layers %s but this node serves %d-%d — "
+                        "discarding it and downloading the right one",
+                        f"{have[0]}-{have[1]}" if have else "an unreadable range",
+                        want[0], want[1])
+            shutil.rmtree(slice_dir, ignore_errors=True)
         self.state["status"] = "downloading"
         log.info("downloading slice: layers %d-%d (~%.2f GB) ...",
                  info["layer_start"], info["layer_end"], info["estimated_download_gb"])
