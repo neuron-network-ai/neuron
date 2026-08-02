@@ -44,6 +44,9 @@ ui/*.log
 *.db-shm
 coordinator/node_tokens.json
 coordinator/nodes.local.json
+# prune_test_accounts.py's audit trail — holds per-account balances, same privacy class as
+# the DB itself (Session 25: no node's earnings are public).
+coordinator/prune_log.json
 
 # --- private / pre-public docs (keep out of the public repo) ---
 TOKENOMICS.md
