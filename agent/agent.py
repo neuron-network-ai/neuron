@@ -178,6 +178,7 @@ class Agent:
         # Without this a failed Chat UI is indistinguishable from a slow one -- the tray showed
         # "Chat UI (starting…)", disabled, forever, with no hint that it had already given up.
         self.local_chat_state = "pending"
+        self.local_chat_error = None           # the reason, when state becomes "failed"
 
     # -- config persistence -------------------------------------------------- #
     def _save(self):
@@ -650,11 +651,14 @@ class Agent:
             port=port, oauth_cfg=self.cfg.get("oauth"))
         if self.local_chat_server is None:
             self.local_chat_state = "failed"
-            # Said out loud because the usual cause is mundane and fixable -- something else
-            # already on this port (another copy of the agent, or a dev server) -- and the
-            # symptom otherwise is a menu entry that says "starting…" forever.
-            log.error("local Chat UI failed to start on port %d — the node is still serving "
-                      "the network; check whether that port is already in use", port)
+            # Report the ACTUAL exception. This used to assert "check whether that port is
+            # already in use" no matter what went wrong, which is a confident wrong diagnosis:
+            # the real failure on a packaged build was `No module named '_sqlite3'`, and the
+            # message sent everyone to inspect a port that was free.
+            self.local_chat_error = local_chat.LAST_ERROR
+            log.error("local Chat UI failed to start on port %d (%s) — the node is still "
+                      "serving the network", port,
+                      self.local_chat_error or "no reason recorded")
         else:
             self.local_chat_state = "running"
             log.info("local Chat UI ready on http://127.0.0.1:%d", port)

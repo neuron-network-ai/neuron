@@ -24,6 +24,9 @@ log = logging.getLogger("neuron.agent.local_chat")
 
 DEFAULT_PORT = 8080
 
+# Why the last start() failed, for whoever has to tell the user. None until something fails.
+LAST_ERROR = None
+
 # config.json's "oauth" keys -> the env vars ui/oauth.py reads at import time. config.json is
 # the only place a packaged, console-less desktop install can supply these -- there's no shell
 # to set NEURON_GOOGLE_CLIENT_ID etc. before a double-clicked tray app starts.
@@ -108,5 +111,11 @@ def start(coordinator, model_id, slice_dir, port=DEFAULT_PORT, host="127.0.0.1",
         threading.Thread(target=_run, daemon=True, name="local-chat").start()
         return server
     except Exception as e:
+        # Record WHY, not just that. start() returns None on failure, so the caller had no way
+        # to report the cause and guessed at one -- it told users to check whether port 8080
+        # was in use, when the real answer here was a missing _sqlite3 in the packaged build.
+        # A confident wrong diagnosis costs more than no diagnosis.
+        global LAST_ERROR
+        LAST_ERROR = f"{type(e).__name__}: {e}"
         log.warning("could not start the personal Chat UI (node-serving continues): %s", e)
         return None

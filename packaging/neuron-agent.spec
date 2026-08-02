@@ -65,6 +65,13 @@ for dist in ("transformers", "torch", "tokenizers", "huggingface-hub", "safetens
 # transformers loads model classes lazily — force the Qwen2 model module (our model) in.
 hiddenimports += collect_submodules("transformers.models.qwen2")
 # our own top-level modules, bundled so the frozen app can import them.
+# sqlite3 is reached only through ui/conversations.py (chat history) and coordinator/models.py,
+# both imported lazily off the local-chat path -- so it was never declared and its C extension
+# was bundled or not depending on what else happened to drag it in. A build that dropped it
+# shipped an app whose Chat UI dies with `No module named '_sqlite3'` while the node itself
+# keeps serving, which is exactly how it reached a user. Declared now so it cannot silently go
+# missing again.
+hiddenimports += ["sqlite3", "_sqlite3"]
 hiddenimports += ["common", "slice_downloader", "tunnel_client", "neuron_driver", "node_a",
                   "agent", "agent.agent", "agent.resource_guard", "agent.node_server",
                   "agent.tray", "agent.uninstall", "agent.local_chat",
