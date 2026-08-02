@@ -2327,8 +2327,28 @@ and conflicted on essentially every file. The literal instruction said "main"; t
 *is* main on GitHub is `main-full`. If the curated snapshot is what needs refreshing, that is
 its own operation — regenerate it from a `git archive`, as Session 30 did.
 
+### Four tests had been failing since b5b4f22, and my own sweep was hiding it
+Verifying the merge by **exit code** instead of by the last printed line surfaced
+`coordinator/test_model_tiers.py` failing — and it had been failing since **b5b4f22**
+("half-precision weight storage"), which lowered the 7b tier from 6 nodes / 40 GB to 3 / 20 and
+left four cases asserting against the old numbers. Confirmed pre-existing by running the suite
+in a worktree at `7e9a94d`, before any of this arc.
+
+Two ways it stayed invisible. The suite raises on the first bad assert and prints no summary
+line, so its output *ends* with `ok test_…` from the cases that already ran — and every sweep I
+had run in these sessions used `tail -1` as the pass signal. That is a bad habit and the reason
+it survived: **`| tail -1` is not a test result, the exit code is.**
+
+Worse than the red: two of the four were asserting the *opposite of their names*.
+`test_sustained_loss_demotes` and `test_brief_dip_does_not_demote` used `nodes(3, ram=8)` as
+"below 7b"; once 7b needed only 3 nodes / 20 GB that population was feasible, so the network
+never became infeasible and the demotion path was never exercised at all. The fixtures now
+derive from `mt.TIERS`, and a new `_below(tier)` helper **asserts** its population is really
+infeasible — so the next threshold change breaks loudly instead of quietly turning a
+hysteresis test into a no-op.
+
 ### State
-All suites green: 18 coordinator (398 checks), 11 agent, 1 packaging. Working tree clean.
+All 30 suites green **by exit code**: 18 coordinator, 11 agent, 1 packaging. Working tree clean.
 `--execute` has still never been run against the live database, and it has never been opened for
 writing. The live ledger therefore still carries its 0.056001 NRN of stranded escrow and its 10
 prunable test accounts — both scripts are ready, both need a quiesced coordinator and a
