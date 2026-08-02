@@ -30,4 +30,16 @@ automatically within a minute and starts earning after that — nothing to ask a
 
 **Check earnings:** the balance is shown at the top of your chat page.
 
+**Your payout address:** the agent creates a key for you on first run and tells the network
+that your NRN belongs to it — you don't have to do anything, and you don't need a crypto
+wallet. The key is saved as `payout_key.json` next to your config; **back it up**, because if
+NRN ever moves on-chain, whoever holds that file holds those earnings. It's an ordinary
+Ethereum key, so you can import it into any wallet.
+
+Already have a wallet and want to use it instead? Put its address in `payout_address` in
+`config.json`, then run `python -m agent.bind_payout --address 0xYourAddress`. It prints a
+short message; sign that in your wallet and pass it back with `--signature`. Your private key
+never leaves your wallet. (Changing an address later needs a signature from the old one — that
+way, someone who copies your config file still can't redirect your earnings.)
+
 **Remove everything:** `python agent/uninstall.py`

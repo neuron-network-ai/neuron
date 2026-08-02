@@ -19,7 +19,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from coordinator import (auth, balancer, config, genesis, ledger, migration,
-                         model_registry, model_tiers, models, router)
+                         model_registry, model_tiers, models, payout, router)
 import relay_auth
 
 
@@ -68,6 +68,13 @@ class WalletOAuthBody(BaseModel):
 class AttestBody(BaseModel):
     passed: bool
     max_err: float | None = None
+
+
+class PayoutBindBody(BaseModel):
+    address: str                          # the EVM address to be paid
+    nonce: str                            # from GET /node/{id}/payout-challenge
+    signature: str                        # binding_message signed by `address`
+    old_signature: str | None = None      # required only when changing a bound address
 
 
 class ViolationBody(BaseModel):
@@ -764,6 +771,70 @@ def get_ledger(node_id: str, x_node_token: str = Header(default=None)):
 
 
 # --------------------------------------------------------------------------- #
+# Payout address binding (blockchain/MIGRATION_PLAN.md blocker 1)
+# --------------------------------------------------------------------------- #
+@app.get("/node/{node_id}/payout-challenge")
+def payout_challenge(node_id: str, address: str = None,
+                     x_node_token: str = Header(default=None)):
+    """Issue the single nonce this node must sign to bind (or change) its payout address.
+
+    Gated on the node's own token: a nonce is not a secret, but handing them out to anyone
+    would let a stranger invalidate a node's in-flight challenge at will. Pass `?address=` to
+    get back the exact message text — that is what a human pastes into a wallet's "sign
+    message" box, and it must match byte for byte.
+    """
+    _require_own_token(node_id, x_node_token)
+    nonce = models.issue_payout_challenge(node_id)
+    out = {"node_id": node_id, "nonce": nonce,
+           "expires_in_seconds": config.PAYOUT_CHALLENGE_TTL}
+    if address:
+        try:
+            checksummed = payout.normalize_address(address)
+        except payout.PayoutError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        out["address"] = checksummed
+        out["message"] = payout.binding_message(node_id, checksummed, nonce)
+    return out
+
+
+@app.post("/node/{node_id}/payout-address")
+def bind_payout_address(node_id: str, body: PayoutBindBody,
+                        x_node_token: str = Header(default=None),
+                        x_register_secret: str = Header(default=None)):
+    """Bind the EVM address this node's NRN is paid to, proving control of it.
+
+    Auth is deliberately two-layered. The node's own token says *this node* is asking; the
+    signature says *the address owner* consents. Neither alone is enough, because neither
+    alone is convincing: a token can be copied off a disk, and a signature says nothing about
+    which node it was meant for unless the node_id is inside it (it is).
+
+    Rebinding an already-bound address additionally needs `old_signature` from the currently
+    bound key, so a stolen token cannot redirect earnings. The register secret overrides that
+    — the recovery path for a genuinely lost key, and a deliberately human decision.
+    """
+    _require_own_token(node_id, x_node_token)
+    operator = (isinstance(x_register_secret, str)
+                and secrets.compare_digest(x_register_secret, config.REGISTRATION_SECRET))
+    try:
+        result = payout.bind(node_id, body.address, body.nonce, body.signature,
+                             old_signature=body.old_signature, operator_override=operator)
+    except payout.PayoutError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return result
+
+
+@app.get("/node/{node_id}/payout-address")
+def read_payout_address(node_id: str, x_node_token: str = Header(default=None)):
+    """A node's own binding. Private, like its balance: a payout address is a persistent
+    pseudonymous identifier, and publishing the map from node to address would tie every
+    node's earnings together on-chain for anyone watching."""
+    _require_own_token(node_id, x_node_token)
+    bound = models.get_payout_address(node_id)
+    return {"node_id": node_id, "payout_address": bound["payout_address"] if bound else None,
+            "bound_at": bound["bound_at"] if bound else None}
+
+
+# --------------------------------------------------------------------------- #
 # Part 5 — Status + dashboard
 # --------------------------------------------------------------------------- #
 def _network_summary():
@@ -1122,6 +1193,13 @@ def node_dashboard(node_id: str, token: str = None,
     st_color = {"trusted": "#137333", "verified": "#1a73e8",
                 "probationary": "#f9ab00", "flagged": "#c5221f"}.get(st, "#5f6368")
     rep = node.get("reputation")
+    bound = models.get_payout_address(node_id)
+    payout_html = (
+        f"<code>{bound['payout_address']}</code> "
+        f"<span style='color:#5f6368'>(where your NRN goes if the ledger moves on-chain)</span>"
+        if bound else
+        "<span style='color:#5f6368'>not set — your NRN has nowhere to go on-chain. "
+        "The agent binds one automatically; see INSTALL.md.</span>")
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta http-equiv="refresh" content="5">
 <title>NEURON — {node_id}</title>
@@ -1155,6 +1233,7 @@ def node_dashboard(node_id: str, token: str = None,
       (passed {node.get('challenges_passed', 0)} / failed {node.get('challenges_failed', 0)})</td></tr>
   <tr><th>network</th><td>{network['online_nodes']} nodes online ·
       {network['total_layers_covered']}/{network['total_layers']} layers covered</td></tr>
+  <tr><th>payout address</th><td>{payout_html}</td></tr>
 </table>
 <p class="note">Keep this URL private — it contains your node token, which is what makes
 this page yours alone. "Spent" becomes live once wallet spending ships.</p>

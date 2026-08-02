@@ -7,6 +7,7 @@ tables: nodes, ledger, requests. Node online/offline status is computed from
 """
 import contextlib
 import json
+import secrets as _secrets
 import sqlite3
 import time
 
@@ -38,7 +39,17 @@ CREATE TABLE IF NOT EXISTS ledger (
     requests_served INTEGER NOT NULL DEFAULT 0,
     account_type    TEXT NOT NULL DEFAULT 'node',
     faucet_claimed  INTEGER NOT NULL DEFAULT 0,
-    locked_until    REAL
+    locked_until    REAL,
+    payout_address   TEXT,
+    payout_bound_at  REAL
+);
+-- One live challenge per account. The nonce a node must sign to prove it controls the EVM
+-- address it is claiming; single-use and short-lived, so a captured signature cannot be
+-- replayed later to re-point someone's earnings at an address they have since abandoned.
+CREATE TABLE IF NOT EXISTS payout_challenges (
+    account_id TEXT PRIMARY KEY,
+    nonce      TEXT NOT NULL,
+    issued_at  REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS requests (
     request_id       TEXT PRIMARY KEY,
@@ -160,6 +171,14 @@ def init_db():
             c.execute("ALTER TABLE ledger ADD COLUMN violation_count INTEGER NOT NULL DEFAULT 0")
         if "moderation_banned" not in lcols:
             c.execute("ALTER TABLE ledger ADD COLUMN moderation_banned INTEGER NOT NULL DEFAULT 0")
+        # On-chain payout binding (blockchain/MIGRATION_PLAN.md blocker 1): a ledger account id
+        # is a hostname-ish string, not a key, so there has never been anywhere to send NRN if
+        # the ledger moved on-chain. NULL until the account proves control of an EVM address.
+        for col in ("payout_address",):
+            if col not in lcols:
+                c.execute(f"ALTER TABLE ledger ADD COLUMN {col} TEXT")
+        if "payout_bound_at" not in lcols:
+            c.execute("ALTER TABLE ledger ADD COLUMN payout_bound_at REAL")
         # Verified identity (abuse accountability): a filter is always evadable, so the real
         # control is knowing WHO sent a request and being able to act on them. email_verified
         # distinguishes a real provider-verified address from a throwaway; last_seen shows
@@ -374,6 +393,63 @@ def get_ledger(node_id):
     with _db() as c:
         row = c.execute("SELECT * FROM ledger WHERE node_id=?", (node_id,)).fetchone()
     return dict(row) if row else None
+
+
+def issue_payout_challenge(account_id):
+    """Mint (and store) the single nonce this account may sign next. Issuing a second one
+    invalidates the first -- there is never more than one live challenge per account, so a
+    nonce cannot be farmed in bulk and spent later."""
+    nonce = _secrets.token_hex(16)
+    with _db() as c:
+        c.execute("INSERT INTO payout_challenges (account_id, nonce, issued_at) VALUES (?,?,?) "
+                  "ON CONFLICT(account_id) DO UPDATE SET nonce=excluded.nonce, "
+                  "issued_at=excluded.issued_at", (account_id, nonce, time.time()))
+    return nonce
+
+
+def consume_payout_challenge(account_id, nonce, ttl_seconds):
+    """Check and burn a challenge in one step. Returns a reason string on failure, None on
+    success. Burning happens whether or not the caller goes on to succeed at anything else,
+    so a failed bind cannot be retried against the same nonce with a different signature."""
+    with _db() as c:
+        row = c.execute("SELECT nonce, issued_at FROM payout_challenges WHERE account_id=?",
+                        (account_id,)).fetchone()
+        if row is None:
+            return "no challenge issued -- request GET /node/{id}/payout-challenge first"
+        c.execute("DELETE FROM payout_challenges WHERE account_id=?", (account_id,))
+        if not _secrets.compare_digest(str(row["nonce"]), str(nonce)):
+            return "nonce does not match the challenge issued for this account"
+        if time.time() - row["issued_at"] > ttl_seconds:
+            return f"challenge expired (older than {ttl_seconds:.0f}s) -- request a new one"
+    return None
+
+
+def set_payout_address(account_id, address, account_type="node"):
+    """Bind (or rebind) an account's on-chain payout address. Creates the ledger row if the
+    account has never earned anything, so a node can bind before its first payment."""
+    with _db() as c:
+        c.execute("INSERT OR IGNORE INTO ledger (node_id, account_type) VALUES (?, ?)",
+                  (account_id, account_type))
+        c.execute("UPDATE ledger SET payout_address=?, payout_bound_at=? WHERE node_id=?",
+                  (address, time.time(), account_id))
+
+
+def get_payout_address(account_id):
+    with _db() as c:
+        row = c.execute("SELECT payout_address, payout_bound_at FROM ledger WHERE node_id=?",
+                        (account_id,)).fetchone()
+    if row is None or not row["payout_address"]:
+        return None
+    return {"payout_address": row["payout_address"], "bound_at": row["payout_bound_at"]}
+
+
+def payout_addresses():
+    """Every account that has bound an address -- the address book blockchain/migrate_ledger.py
+    reads instead of a hand-maintained JSON file."""
+    with _db() as c:
+        rows = c.execute("SELECT node_id, payout_address FROM ledger "
+                         "WHERE payout_address IS NOT NULL").fetchall()
+    return {r["node_id"]: r["payout_address"] for r in rows}
 
 
 def node_ledgers():

@@ -13,6 +13,12 @@ safetensors
 psutil
 requests
 
+# Payout address binding (agent/payout_key.py): generates this node's EVM key and signs the
+# coordinator's challenge, so earnings have an on-chain destination. Pure-Python secp256k1
+# via eth-keys — no build toolchain needed. Optional: without it the node still serves and
+# still earns, it just cannot bind an address yet.
+eth-account
+
 # Optional — the system-tray icon (green = earning, pause, NRN balance).
 # Uncomment on a desktop; leave commented on a headless server.
 # pystray

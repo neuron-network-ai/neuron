@@ -112,6 +112,12 @@ GENESIS_BUCKETS_LIQUIDITY_ID = "__liquidity__"         #  50,000,000 — reserve
 ESCROW_LEDGER_ID = "__escrow__"                        # 0 — in-flight held payments only
 GENESIS_TOTAL_SUPPLY = 1_000_000_000
 
+# On-chain payout binding (coordinator/payout.py). How long a signing challenge stays valid.
+# Short because the only thing that happens between issuing and using it is one HTTP round
+# trip and a local signature; long enough that a human pasting the message into a wallet by
+# hand is not racing a timer.
+PAYOUT_CHALLENGE_TTL = float(os.environ.get("NEURON_PAYOUT_CHALLENGE_TTL", "600"))
+
 # Shared secret between the coordinator and a driver process (ui/app.py) so POST
 # /wallet/oauth can be trusted: the driver holds the real OAuth client secret and has
 # already verified the (provider, external_id) pair with Google/GitHub before calling

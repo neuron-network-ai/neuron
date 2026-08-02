@@ -29,7 +29,13 @@ for pkg in ("torch", "transformers", "accelerate", "safetensors", "tokenizers",
             # around a NATIVE library (llama.dll + ggml*.dll); collect_all pulls those in, and
             # without them the frozen app imports llama_cpp and dies at load time instead of
             # falling back cleanly.
-            "llama_cpp", "diskcache"):
+            "llama_cpp", "diskcache",
+            # Payout address binding (agent/payout_key.py). eth_account imports its backend
+            # lazily, so without collect_all the frozen app finds no secp256k1 at runtime and
+            # every node silently ships without an on-chain payout destination.
+            "eth_account", "eth_keys", "eth_utils", "eth_abi", "rlp", "hexbytes",
+            "eth_hash", "eth_typing", "eth_rlp", "ckzg", "cytoolz", "toolz",
+            "pyunormalize", "bitarray", "parsimonious"):
     try:
         d, b, h = collect_all(pkg)
         datas += d
@@ -62,6 +68,7 @@ hiddenimports += collect_submodules("transformers.models.qwen2")
 hiddenimports += ["common", "slice_downloader", "tunnel_client", "neuron_driver", "node_a",
                   "agent", "agent.agent", "agent.resource_guard", "agent.node_server",
                   "agent.tray", "agent.uninstall", "agent.local_chat",
+                  "agent.payout_key", "agent.bind_payout",
                   "ui", "ui.app", "ui.oauth", "api", "api.openai_compat",
                   "safety", "safety.moderation", "rag", "rag.retriever",
                   "engine", "engine.local_gguf",

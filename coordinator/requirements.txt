@@ -7,3 +7,8 @@
 fastapi
 uvicorn[standard]
 requests
+
+# Payout address binding (coordinator/payout.py) — recovers the signer of a node's
+# proof-of-control signature. Still no torch: eth-account is pure Python plus small wheels.
+# Imported lazily, so a coordinator without it starts fine and only payout binding fails.
+eth-account

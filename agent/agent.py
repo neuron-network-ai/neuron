@@ -74,6 +74,11 @@ DEFAULT_CONFIG = {
     "slice_dir": "./model_slice/",
     "donation_mode": "idle", "idle_threshold_seconds": 60,
     "behind_nat": True, "log_level": "INFO",
+    # Where this node's NRN goes if the ledger moves on-chain. Leave null and the agent
+    # generates its own key (agent/payout_key.py) and binds it for you. Set it to your own
+    # wallet address instead and the agent will NOT generate one -- bind it yourself with
+    # `python -m agent.bind_payout`, which needs a signature only your wallet can make.
+    "payout_address": None,
     # every installed agent also runs its own personal Chat UI (agent/local_chat.py) --
     # your own front door to the network, on your own machine, off by default to the
     # internet (127.0.0.1 only). Independent of donation_mode: pausing compute-sharing
@@ -771,8 +776,25 @@ class Agent:
         log.info("migration: now serving %s layers %d-%d", prepared["model_id"],
                  prepared["layer_start"], prepared["layer_end"])
 
+    def bind_payout_address(self):
+        """Give this node's earnings an on-chain destination (MIGRATION_PLAN.md blocker 1).
+
+        Best-effort and non-fatal: an unbound node serves and earns exactly as before, it just
+        has nowhere to be paid if the ledger ever moves on-chain. Runs after setup() because it
+        needs a registered node_id and a live token.
+        """
+        try:
+            from agent import payout_key
+            payout_key.ensure_bound(
+                self.base, self.cfg["node_id"], self.cfg["node_token"],
+                state_dir=os.path.dirname(self.config_path) or HERE,
+                configured_address=self.cfg.get("payout_address"))
+        except Exception as e:                                      # noqa: BLE001
+            log.debug("payout binding skipped (%s: %s)", e.__class__.__name__, e)
+
     def run(self):
         self.setup()
+        self.bind_payout_address()
         threading.Thread(target=self.migration_loop, daemon=True).start()
         threading.Thread(target=self.peer_verify_loop, daemon=True).start()
         threading.Thread(target=self.start_local_chat, daemon=True).start()

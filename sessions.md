@@ -1896,6 +1896,201 @@ green.
 
 ---
 
+## Session 31 (2026-08-02) — NRN as a real ERC-20, prepared and rehearsed, deployed nowhere
+
+### Decision, settled the same day: Polygon is skipped
+
+- **Phase 1** — the SQLite ledger. Current, working, stays the hot ledger.
+- **Phase 2** — **NEURON Chain directly.** Not Polygon, not "Polygon first then migrate".
+- **No Polygon deployment until further notice**, mainnet or testnet.
+- On-chain work waits for **50+ external nodes and 500+ MAU**. External nodes today: zero.
+
+The work below stands regardless — it is written against the EVM and against the coordinator's
+ledger, not against Polygon. If NEURON Chain is EVM-compatible, `NRN.sol` deploys unchanged and
+`chain.py` needs one new `NETWORKS` entry; if it is not, the contract is the written
+specification of the token's rules (fixed 1B, 60/20/15/5, release-not-mint, owner pause) and
+those port even when the Solidity does not. `deploy.py`'s refusal message now cites this
+decision, so anyone reaching for a public network is told why it is closed rather than just
+that it is.
+
+**Nothing was deployed.** No transaction has been sent to Polygon, Amoy, Mumbai or any other
+public network. The whole of `blockchain/` is gitignored, along with the npm toolchain it needs
+(`/node_modules`, `/package.json`, `/package-lock.json` — hardhat has to resolve
+`@openzeppelin` from above `blockchain/`, or it treats every OpenZeppelin contract as one of
+our own source files and refuses to compile).
+
+### The contract
+
+`blockchain/NRN.sol` — OpenZeppelin 5.1 `ERC20` + `ERC20Pausable` + `Ownable`, solc 0.8.24,
+"NEURON"/"NRN", 18 decimals, 1,000,000,000 total. Constructor splits it 60/20/15/5.
+
+The brief asked for a fixed 1B supply *and* an owner who can "mint node rewards from the 60%
+locked supply". Those only reconcile if the 60% already exists, so **`mintReward` releases, it
+does not mint**: the constructor mints the entire supply once, the 60% to the contract's own
+address, and `mintReward` transfers out of it against a `rewardsDistributed` counter that
+cannot be overdrawn. `totalSupply()` is 1B forever — the same property `ledger.py` has held
+since Workstream B, carried on-chain rather than dropped at the boundary. Holding the reserve at
+the contract address also means no key can move it; the only exit is `onlyOwner` and capped.
+
+### The migration script, and the two things the schema disagreed with
+
+`blockchain/migrate_ledger.py` reads the coordinator ledger, pays every account with a balance,
+logs each one with its transaction hash, then re-reads `balanceOf` and reconciles. Dry run is
+the default; `--execute` is the only thing that sends. Two corrections the brief's
+`SELECT node_id, wallet_id, balance FROM ledger` did not anticipate:
+
+1. **There is no `wallet_id` column.** `models.py` keys the ledger on `node_id` for all three
+   account types. The query adapts to either schema.
+2. **User wallets must not be paid from the reward pool.** A user's balance came from the
+   faucet, which `wallet_for_oauth` funds out of the **150M ecosystem** bucket. Paying it with
+   `mintReward` draws 60%-pool NRN for something the 15% pool already paid for — the on-chain
+   ecosystem wallet ends up permanently richer than its SQLite row and the emission pool
+   permanently poorer. Caught by a bucket-reconciliation check that compares all four genesis
+   buckets against their on-chain holders; `account_type='wallet'` rows are now settled by a
+   transfer from the ecosystem wallet. This is the single most useful test in the suite, because
+   no per-account balance check can see it — every individual balance was correct.
+
+Genesis buckets themselves are skipped explicitly: the constructor's 60/20/15/5 split *is*
+those four rows, and migrating them again would double-count 40% of supply.
+
+### Local test — PASSED, 60 checks
+
+`python blockchain/run_local_test.py` starts `npx hardhat node`, deploys, builds a throwaway
+ledger shaped like the real one, migrates it, reconciles, and tears the chain down. 28 harness
+checks + 32 in `blockchain/test_nrn.py` (supply, distribution, transfer/approve, mintReward,
+owner-only, allocation overdraw, pause). Three real bugs came out of it:
+
+- the resume guard compared `amount_wei` as an int against the string JSON round-trips it to,
+  so **a second `--execute` run paid everyone twice**. Now compared as strings, and tested.
+- teardown terminated `cmd.exe` and left the actual node holding port 8545, which the next run
+  then silently reused with stale chain state. `taskkill /T` on Windows.
+- the ecosystem/rewards split above.
+
+### Run against the real ledger (read-only, no chain writes)
+
+Against `backups-offbox/neuron-20260802-115534.db`: **16 accounts hold NRN and none has an EVM
+address**, about 228 NRN in total. That is the actual blocker — `ledger.node_id` is a string
+like `agent-optinovate-447583`, nothing has ever asked a node for a payout address, and there is
+no proof-of-control if it did. It also surfaced that the live ledger still contains
+`attacker-demo-1`, `attacker-demo-2`, `probe-only` and `live-verify-wallet` — 100+ NRN of
+faucet grants from security testing that would become real transferable tokens.
+
+One correction to the invariant check: the live ledger sums to `999,999,999.99999999999999719`,
+about 3e-15 short. That is float dust in SQLite REALs, not a missing coin, and
+`models.supply_snapshot` already tolerates it (`abs(total - 1e9) < 1e-6`). The exact residual is
+logged rather than hidden. The older local `coordinator/neuron.db` is pre-genesis (4 rows,
+sums to 1.000001) and is correctly refused.
+
+### Deploy script
+
+`blockchain/deploy.py` deploys, writes `blockchain/config.json`, and verifies the source via the
+Etherscan V2 endpoint Polygonscan runs on. Any network marked public needs **both** `--yes` and
+`NEURON_ALLOW_PUBLIC_DEPLOY=1`, so neither a stray flag nor a stray env var is enough alone.
+`hardhat.config.js` has no public network at all.
+
+**Mumbai is gone.** The brief named it; Polygon decommissioned it in April 2024 and its RPCs and
+faucets no longer exist. The entry resolves and warns; the flow is written against **Amoy**
+(chain id 80002).
+
+### Answers
+
+Contract compiled: **yes**. Local tests pass: **yes** (60/60). Migration script works: **yes**,
+including against a real ledger snapshot. Ready to deploy when told: **no, and it should not
+be** — see `blockchain/MIGRATION_PLAN.md`. Blocking: node payout addresses with proof of
+control (nothing collects them), pruning the demo accounts, key custody for an owner key that
+can release 600M NRN (multisig/hardware, not a file on one laptop), and the MiCA read
+`TOKENOMICS.md` gates on. Also honest: on-chain settlement cannot replace SQLite — one
+transaction per node per request is unworkable — so the chain is a settlement and withdrawal
+layer over the hot ledger, and this migration is the first run of that same mechanism. Putting
+the ledger on-chain removes "the record dies with one Oracle VM"; it does not by itself remove
+the coordinator's authority over who earned what.
+
+---
+
+## Session 32 (2026-08-02) — earnings get an owner: payout addresses, proved not claimed
+
+Closes blocker 1 of `blockchain/MIGRATION_PLAN.md`, and it is the piece that had to land
+**before** strangers arrive rather than after: today's 16 accounts could have been mapped to
+addresses by hand in an afternoon, a thousand cannot.
+
+### A column would have been the wrong fix
+
+`ledger.payout_address` on its own looks like the problem solved while leaving it open —
+anyone who can authenticate as a node could write *any* address into it, including someone
+else's, and the coordinator would have no way to tell an operator claiming their own wallet
+from an attacker pointing a stranger's earnings at their own.
+
+So a binding is a signature. `GET /node/{id}/payout-challenge` issues a single-use nonce;
+the node signs a message naming **its own node_id, the address, and that nonce**;
+`POST /node/{id}/payout-address` recovers the signer and requires it to equal the address being
+claimed. `coordinator/payout.py` holds the logic, deliberately separate from `main.py` so the
+verification has somewhere to be tested without HTTP.
+
+Each field in the signed text is load-bearing, and each one is a test:
+- the **node_id** means a signature valid for node A cannot bind node B (tested by lifting a
+  real signature from one node and replaying it at another);
+- the **nonce** is single-use and expiring, consumed *before* the signature is checked — so a
+  wrong guess costs the challenge and nobody can grind signatures against one nonce;
+- the **address** is what is authorised, and the message says in plain words that signing
+  transfers no funds, because this appears in a wallet prompt and "sign this hex blob" is how
+  people get robbed.
+
+### The control that survives a stolen token
+
+The interesting case is not the first bind, it is the **re**bind. A `node_token` is a bearer
+credential sitting in a config file on a volunteer's disk; if copying it were enough to change
+where the money goes, none of the above would matter. So changing an already-bound address
+additionally requires `old_signature` — the same message signed by the address currently on
+file. An attacker with the token still needs the original operator's key. The register secret
+overrides it, which is the recovery path for a genuinely lost key and deliberately a human
+decision, since it is also exactly what an attacker would ask for.
+
+### Volunteers should not need a crypto wallet
+
+`agent/payout_key.py` generates an ordinary secp256k1 key on first run, binds it automatically,
+and stores it 0600 next to the config — importable into any wallet later. The operator does
+nothing and still ends up with an address only they control. Two deliberate refusals: a
+**corrupt key file never generates a replacement** (that would strand an address that may
+already have been paid), and an operator-supplied `payout_address` is **never auto-bound** —
+we hold no key for it, so `python -m agent.bind_payout` prints the exact text to sign in their
+own wallet and takes the signature back. Binding is best-effort throughout: an older
+coordinator with no payout endpoints, or one briefly unreachable, must never stop a node
+serving.
+
+Nice property that falls out: the key is keyed to the *machine*, not the node_id. A node that
+regenerates its id (the Session 29 collision fix) rebinds the same address automatically.
+
+### Verified
+- `coordinator/test_payout_address.py` **31** — forged signatures, cross-node replay, nonce
+  reuse/expiry, rebind with and without the old key, operator recovery, EIP-55 checksums, and
+  that the address appears on the node's own dashboard and **nowhere public** (a payout address
+  is a persistent pseudonymous identifier; publishing node→address would tie every node's
+  earnings together on-chain for anyone watching).
+- `agent/test_payout_key.py` **16** — including a real round trip: the agent signs, and
+  `coordinator/payout.py` verifies. Both sides build the message independently, and if they
+  ever disagree by one character every binding fails while a stubbed test still passes.
+- All 14 coordinator suites and all 11 agent suites green. `blockchain/run_local_test.py` now
+  **30 + 32** — the test ledger binds two accounts via the column and leaves them out of the
+  JSON book, so the run only passes if `migrate_ledger.py` actually reads bindings (it prefers
+  them: one was proved, the other typed).
+
+### Not done
+User wallets (`w_…`) have no binding path — they authenticate with the wallet-link secret, not
+a node token, and 6 of the 16 unmapped live accounts are wallets. `__coordinator__` needs an
+operator-chosen address. No policy yet for accounts that never bind. Nothing is bound in
+production — this is deployed nowhere, and existing nodes bind on their next agent restart. The
+tray still has no payout-address affordance. And the honest limit: an auto-generated key is a
+hot key on a volunteer's machine protected by file permissions and nothing else — fine for an
+address that only ever *receives*, not for holding value, which is why the agent tells the
+operator where the key is instead of hiding it.
+
+New dependency `eth-account` on both the coordinator (imported lazily, so a coordinator without
+it still starts and only binding fails) and the agent (optional — a node without it serves and
+earns as before). Added to both requirements files and to the PyInstaller spec, where a missing
+lazily-imported backend would otherwise ship an exe that silently never binds.
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load
