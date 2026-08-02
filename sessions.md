@@ -2540,6 +2540,70 @@ coordinator move survivable.
 
 ---
 
+## Session 38 (2026-08-03) — auto-update switched on, and the live ledger cleaned
+
+No new code. Three things that had been built and never actually done.
+
+### 0.17.1 published — with a tag mismatch that would have silently broken everything
+The founder published the release while this ran. It is **tagged `0.17.1`, not `v0.17.1`** — but
+`config.AGENT_DOWNLOAD_URL` derives its URL from the version as `v{version}`, so the address
+every node was about to be handed **404'd**. Verified directly rather than assumed:
+
+    advertised  .../releases/download/v0.17.1/NEURON-Setup-0.17.1.exe  -> HTTP 404
+    actual      .../releases/download/0.17.1/NEURON-Setup-0.17.1.exe   -> HTTP 200
+
+Left unfixed, switching the hash on would have had every node download nothing, log a warning,
+and stay where it was — an auto-update mechanism that appears live and delivers nothing.
+Overridden with `NEURON_AGENT_DOWNLOAD_URL` in the systemd unit rather than re-tagging a
+published release. Worth deciding later whether to re-tag for consistency, since `v0.17.0` and
+`v0.13.1` both carry the `v`.
+
+**The published asset was verified byte-for-byte**, not assumed: downloaded all 216,655,277
+bytes from GitHub and hashed them. `befeddd3…ab71`, identical to the local build and to what the
+coordinator now advertises. That check is the whole basis on which every volunteer's machine
+will run this binary unattended.
+
+### Auto-update is live
+`/agent/version` now returns version `0.17.1`, a non-empty sha256, and a URL that resolves 200.
+This is the first moment a fix can reach a stranger without asking them to do anything.
+
+### The live ledger, cleaned — first time either script has touched production
+Coordinator stopped, **two** backups (the verified snapshot via `coordinator.backup`, plus a raw
+copy at `~/neuron-db-pre-cleanup-20260802-220233.db`), then dry run → read → execute for each,
+in order.
+
+*Reconcile:* 0.056001 NRN stranded, 0 requests in flight, attribution 98.3% to
+`w_d35c84dd…`. Credited back. `__escrow__` 0.056001 → **0.000000**, matching its live holds.
+
+*Prune:* 10 accounts, **201.555610 NRN** → `__ecosystem__`. That total is 0.056001 higher than
+the earlier dry run predicted, and correctly so: the reconciled escrow went to a wallet that is
+itself a prune target, so it flowed straight through to the ecosystem bucket. The two scripts
+composed exactly as designed.
+
+All **12** unclassified accounts held `0.000000`, so nothing undecided had money in it.
+
+    __emission_pool__   599,999,971.999972
+    __founder__         200,000,000.000000
+    __ecosystem__       150,000,001.555610
+    __liquidity__        50,000,000.000000
+    __escrow__                   0.000000
+    total_supply     1,000,000,000.0   invariant_ok: True   (exactly 1e9)
+
+What still holds NRN, and nothing else does: `node_a` 9.011876, `node_c` 8.107126, `node_b`
+6.082124, `__coordinator__` 2.867800, `node-c-pavilion` and `node-b-optiplex` 0.187746 each.
+Real compute on real hardware, and fees actually earned.
+
+`__ecosystem__` sits 1.555610 **above** its 150M allocation — correct, not drift: it is the
+faucet NRN that came back plus fees those test wallets paid to nodes and the coordinator along
+the way. Supply is conserved; the bucket split moved.
+
+### Blocker 2 of MIGRATION_PLAN.md is closed
+Test identities can no longer become real transferable tokens on-chain. Blocker 1 (payout
+addresses) was closed in Session 32. Both prerequisites for an on-chain migration are done —
+which does not bring it closer, since the decision is still NEURON Chain at 50+ nodes.
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load
