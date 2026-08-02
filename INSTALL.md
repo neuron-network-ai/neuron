@@ -18,8 +18,8 @@ too big for any one computer. You earn **NRN** for that work.
 
 **Install:**
 ```
-git clone https://github.com/raman011sharma-code/neuron.git
-cd neuron
+git clone https://github.com/raman011sharma-code/neuron-network.git
+cd neuron-network
 python -m venv .venv && .venv\Scripts\activate     # Linux/macOS: source .venv/bin/activate
 pip install -r agent/requirements.txt
 python agent/agent.py

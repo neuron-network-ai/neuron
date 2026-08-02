@@ -17,7 +17,7 @@ On Windows, tick **"Add Python to PATH"** on the first screen. It's easy to miss
 
 ### Step 2 — Download NEURON
 
-Go to **https://github.com/raman011sharma-code/neuron**, click the green **Code** button, then
+Go to **https://github.com/raman011sharma-code/neuron-network**, click the green **Code** button, then
 **Download ZIP**. Unzip it somewhere you'll find again, like your Desktop.
 
 ### Step 3 — Start it
@@ -25,7 +25,7 @@ Go to **https://github.com/raman011sharma-code/neuron**, click the green **Code*
 Open a terminal (Windows: search for **PowerShell**) and type these one at a time:
 
 ```
-cd Desktop\neuron-main
+cd Desktop\neuron-network-main
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r agent/requirements.txt

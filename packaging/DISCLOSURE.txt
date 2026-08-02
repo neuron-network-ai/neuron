@@ -12,7 +12,7 @@ Before you install NEURON, three honest things:
    doesn't have yet), so Windows SmartScreen or your antivirus may show an
    "unrecognized app" warning. That is expected for any unsigned open-source
    app, not a sign something is wrong. You can read every line of the source
-   at https://github.com/raman011sharma-code/neuron before trusting it.
+   at https://github.com/raman011sharma-code/neuron-network before trusting it.
 
 3. WHAT THIS APP ACTUALLY DOES.
    It downloads a small slice of an AI model (~1 GB), uses ~1-2% of your CPU
