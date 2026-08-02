@@ -92,3 +92,7 @@ libns*.so
 # runtime logs
 verify_service.log
 agent/agent.log
+
+# off-box coordinator backups (pulled copies of the live ledger)
+backups-offbox/
+coordinator/backups/
