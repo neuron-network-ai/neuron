@@ -68,9 +68,12 @@ node only holds **its slice** of the model (roughly `layers × ~110 MB` in fp32,
 | coordinator | registry / routing / ledger | Dell OptiPlex (always-on) | — | — | Ubuntu |
 
 Stack on every node: CPU-only `torch==2.4.1`, `transformers==4.44.2`, `accelerate`. The
-coordinator needs only `fastapi` + `uvicorn`. Nodes reach each other over
-[Tailscale](https://tailscale.com/); they need not share a Python minor version — only the
-torch/transformers versions must match (that's what keeps the TCP tensor pickles compatible).
+coordinator needs only `fastapi` + `uvicorn`. **Nodes reach each other through the built-in
+relay — no VPN, no port forwarding, no Tailscale. Just install and run.** Your node makes only
+outbound connections and the relay hands your peers a public address for you, which is what
+lets an ordinary machine behind a home router take part. Nodes need not share a Python minor
+version — only the torch/transformers versions must match (that's what keeps the tensors
+compatible across the wire).
 
 ## How to run a node
 
@@ -159,13 +162,18 @@ network health, never per-node balances. (Tunable in `coordinator/config.py`.)
 
 ## Status
 
-**Session 7 complete** — the coordinator is deployed to an always-on host (the OptiPlex,
-`:8001`) and the full flow works end-to-end through it: register → route → infer → credit
-NRN, with a live dashboard. 3-node pipeline proven at **6.16 tok/s**, bit-exact.
+**Session 30 complete — the network is live and open to strangers.** Coordinator at
+[neuronnet.duckdns.org](https://neuronnet.duckdns.org) (dashboard at `/dashboard`). Install the
+agent and your machine registers itself, picks its own layer range, downloads only that slice,
+and is **auto-verified by the network within about a minute** — no operator, no approval queue,
+no shared secret. NAT traversal is built in via the relay, so no VPN and no port forwarding.
+Answers your machine can serve run locally on a quantized 7B at **7.8 tok/s**; anything bigger
+goes across the node pipeline.
 
-**Next:** nodes that self-report health, heterogeneity-aware auto-balancing of the layer
-split, dynamic membership (nodes join/leave), and models too big for any single node (the
-capacity case for distribution).
+**Next:** coordinator redundancy (several stateless coordinators over a shared database), then
+peer-to-peer discovery so a chain can be assembled without asking any central service, then the
+NRN ledger on-chain. Supply is already fixed at 1,000,000,000 NRN and transfer-only — nothing
+mints.
 
 ## Repository layout
 
