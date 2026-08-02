@@ -34,6 +34,13 @@ def _main():
         from agent.uninstall import main
         main()
     elif "--headless" in args:
+        # Strip the dispatch flag before handing over: agent.main() parses sys.argv with
+        # argparse, which does not know --headless and exits 2 with
+        # "unrecognized arguments: --headless". The whole headless mode was unusable in the
+        # packaged app -- `neuron-agent.exe --headless` printed a usage error and quit. Every
+        # other flag (--config, --donation-mode, --port, ...) must still reach it, so filter
+        # only this one rather than clearing argv.
+        sys.argv = [sys.argv[0]] + [a for a in args if a != "--headless"]
         from agent.agent import main
         main()
     else:
