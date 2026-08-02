@@ -1821,6 +1821,81 @@ anything — the repo is still private, so `STRANGER_INSTALL.md` points at a 404
 
 ---
 
+## Session 30 (2026-08-02) — off one machine, off one person, off one name
+
+### Published
+Code pushed off this machine for the first time, then moved off the founder's personal account
+to an organisation: **`github.com/neuron-network-ai/neuron`**. `main-full` (the real 84-commit
+history) is the default branch; the old single-commit curated snapshot is preserved on `main`.
+Personal identity stripped from the repo — real name → "NEURON Labs" in LICENSE/README/
+ROADMAP/TOKENOMICS, location line dropped, `ssh user@host` and `/home/<user>` genericised in
+sessions.md. Commits were already authored under GitHub's noreply address, so no real email
+was ever exposed. Installer rebuilt through **0.16.5** as the URLs changed (the disclosure page
+and AppSupportURL are compiled into the setup binary, so a link fix needs a rebuild to reach
+anyone).
+
+Two stranger-stoppers came out of the renames, both invisible until someone follows the guide
+literally: cloning `neuron.git` lands in `neuron/` (the guide said `cd neuron-network`), and the
+ZIP extracts to `neuron-main` (the guide said `neuron-network-main`). Either one strands a
+newcomer at step 3, right after a long download.
+
+### A live outage, caused by the tier ladder reaching a model it could not fetch
+Removing the homeserver node dropped the network to 3 machines, which is exactly
+`7b`'s `min_nodes`, so the coordinator auto-promoted the whole network to
+**Qwen2.5-7B** — and every node's `/node/{id}/slice-info` returned **502**:
+
+    could not read model header: 404 ... /Qwen2.5-7B-Instruct/resolve/main/model.safetensors
+
+`coordinator/sliceinfo.py` assumed a **single** `model.safetensors`, because Qwen2.5-1.5B is
+the only model ever exercised and HF ships it unsharded. Every larger model is sharded
+(`model-0000N-of-0000M.safetensors` + an index), so the hardcoded URL 404s. Nobody could learn
+what to download, nobody could serve the new tier, and the chain could not heal.
+`slice_downloader.shard_files()` had handled this correctly for two sessions; the coordinator
+never did. Now shard-aware, verified against both: 7B resolves to the two files actually
+holding layers 21-27 (4.35 GB of 15.2), 1.5B still one file. **This is the same shape as the
+gated-Meta landmine — a tier the download path cannot fetch takes the network down at the
+moment it is reached.** Both were latent until capacity crossed a threshold.
+
+### [P12] was stale and I repeated it — corrected
+Said out loud that the ledger "mints 1.0 NRN out of nothing per request with no supply cap".
+That is what `PROBLEMS.md` [P12] still says, and it has not been true since Workstream B:
+`config.GENESIS_TOTAL_SUPPLY = 1_000_000_000`, `coordinator/genesis.py` seeds the fixed buckets
+(60/20/15/5), `ledger.py` opens with *"NRN is transfer-only from here on — this file never
+mints"*, settlement transfers out of escrow, and `test_wallet_settlement.py` asserts
+`SUM(balance) == 1e9` after every operation. The founder corrected me. Check the code before
+repeating a problem entry — `PROBLEMS.md` records what was true when written.
+
+### Decentralisation, step 1: the network verifies its own newcomers
+The last human in the join path is gone. Previously a stranger stayed probationary — reachable,
+serving nothing, earning nothing — until the founder personally ran `security/proof_of_compute`
+against them, so growth required one particular laptop to be on, and the credential that
+allowed verification could not be delegated without handing over the network.
+
+Now any verified node pulls `GET /node/verify-assignment`, runs the **same** proof-of-compute,
+and reports a verdict signed with its own node token via `POST /node/{id}/peer-attest`.
+`PEER_VERIFY_QUORUM` (default 2) *distinct* agreements promote the newcomer.
+
+The consensus rules are the whole risk, so they are explicit and tested:
+- votes are keyed `(verifier_id, target_id)` — one machine voting six times counts **once**, so
+  a single node cannot wave through its own sybils; two verified machines must collude instead
+- a node cannot verify itself (400); only an eligible node may vote or be assigned work (403);
+  a bogus token is 401
+- **unreachable is not cheating** — the agent reports nothing when it cannot reach a target,
+  because a failed attestation is permanent and a few of them exclude an honest machine for good
+
+The operator's `/node/{id}/attest` still works unchanged; peer quorum is a second, human-free
+route to the same standing. `coordinator/test_peer_verify.py` 14/14; all six coordinator suites
+green.
+
+### What is still centralised (honest list)
+1. **The coordinator** — one VM decides routing, placement, standing, and holds the ledger.
+   This is now the real single point, since the supply rules are already sound.
+2. **The relay** — same VM; every NAT'd hop crosses it. NAT hole-punching removes it.
+3. **The ledger** — SQLite on that VM. On-chain is about removing "one person holds the
+   database", not about fixing a supply hole.
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load
