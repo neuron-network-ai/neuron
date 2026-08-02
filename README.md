@@ -1,19 +1,95 @@
 # NEURON
 
-**N**etwork of **E**xisting **U**tilised **R**esources — **O**pen **N**odes
+A private AI chat that runs on your own computer — and while you're not using the machine, it
+joins a network of ordinary computers that together run AI models too big for any one of them.
 
-NEURON is a distributed LLM inference network built from ordinary computers. Instead of
-running a whole model on one machine, it splits a transformer's layers into contiguous
-slices and spreads them across nodes on a network: each node loads *only its own layers*,
-runs them on the incoming activations, and passes the result to the next node over plain
-TCP. A tiny (~20 KB) agent turns spare CPU on any laptop into one stage of a collective
-inference pipeline. A **coordinator** tracks which nodes are online, routes each request to
-a complete layer chain, and pays node operators in **NRN**, the network coin.
+## Download
 
-The current build runs **Qwen2.5-1.5B-Instruct** (28 layers) split across **three real
-machines** with a per-node KV cache — numerically **bit-exact** versus running the whole
-model on one machine — and proves the core thesis: adding nodes scales *throughput* (more
-simultaneous users), which is where distribution actually pays off.
+**[⬇ NEURON-Setup-0.16.5.exe](https://github.com/neuron-network-ai/neuron/releases/download/v0.16.5/NEURON-Setup-0.16.5.exe)** (202 MB)
+
+Windows installer — no technical knowledge needed. Double-click, then open
+**http://localhost:8080** and sign in with Google or GitHub.
+
+Two things to expect: Windows will say the installer is "unrecognized" (it isn't code-signed yet
+— the full source is in this repository), and the first start downloads about **1.4 GB**, which
+is the AI model itself. After that it just runs.
+
+On Linux or macOS, see [For developers](#for-developers-source-install) below.
+
+## What you get
+
+- **A private AI chat** at `localhost:8080`. Nothing you type leaves your computer.
+- **A 7B model at ~7.8 tokens/second** on your own CPU, if your machine has the RAM for it
+  (~14 GB free). Smaller machines run a 1.5B model at ~28 tok/s instead.
+- **Your machine earns NRN** while it sits idle, for helping run the shared network.
+- **No GPU required.** No crypto wallet, no payment details, nothing collected about you.
+- It **pauses the moment you touch the keyboard**, and on battery. You won't notice it running.
+
+## What the network is
+
+One computer can only run an AI model that fits in its memory. A big model doesn't fit anywhere
+ordinary — that's why the good ones live in data centres.
+
+NEURON splits a model into **layer slices** and gives each machine one slice to hold. Your
+computer loads only its own layers, runs them on the data coming in, and passes the result to the
+next machine. Nobody holds the whole model; together they run it end to end.
+
+So the more people who join, the bigger the model everyone can use. The network serves the largest
+model its current members can back, and moves up on its own as machines join:
+
+| Model | Needs |
+|---|---|
+| Qwen2.5-1.5B | 2 machines, 6 GB between them |
+| Qwen2.5-7B | 3 machines, 20 GB |
+| Qwen2.5-72B | 20 machines, 180 GB |
+
+When the model already fits on your machine, it just runs there — faster, private, and free. The
+network is for the case where it doesn't.
+
+## Honest numbers
+
+This is an early alpha, and these are the real figures, not projections:
+
+- **Local engine:** 7.8 tok/s on the 7B model, 27.9 tok/s on 1.5B (measured, 16-core CPU, Q4_K_M).
+- **The network is tiny.** As of 2 August 2026: **2 machines registered, 1 online**, covering 7 of
+  28 layers. Live count on the [dashboard](https://neuronnet.duckdns.org/dashboard).
+- **Lifetime requests served: 38.** Total NRN paid out to nodes: 25.8.
+- **NRN has no cash value.** It is a record of compute contributed, nothing more. There is no
+  exchange, no sale, and no promise that there will be one.
+- Supply is fixed at 1,000,000,000 NRN and the ledger is transfer-only — nothing mints.
+- **One coordinator, one relay, one SQLite ledger**, all on a single cloud VM. Backed up hourly,
+  but it is still one machine. Removing that is the current work.
+
+Earnings today are small because the network is small. That's the honest position.
+
+## For developers (source install)
+
+Works on Windows, Linux and macOS. Python 3.11+.
+
+```bash
+git clone https://github.com/neuron-network-ai/neuron.git
+cd neuron
+python -m venv .venv && .venv\Scripts\activate     # Linux/macOS: source .venv/bin/activate
+pip install -r agent/requirements.txt
+python agent/agent.py
+```
+
+Then open http://localhost:8080, sign in, and start chatting. Your node registers itself, picks
+its own layer range, downloads only that slice, and is **verified by other nodes within about a
+minute** — no operator, no approval queue, no shared secret.
+
+Remove everything: `python agent/uninstall.py`.
+
+Running the pipeline by hand, without the agent — each stage serves a contiguous layer range:
+
+```bash
+python node_c.py --port 50999      # middle stage — layers 10–18
+python node_b.py --port 50999      # last stage — layers 19–27 + final norm
+python node_a.py --coordinator https://neuronnet.duckdns.org --prompt "Why is the sky blue"
+```
+
+`python selftest_shard.py` proves the split is bit-exact against running the whole model on one
+machine. Your own coordinator: `python -m uvicorn coordinator.main:app --port 8001`.
 
 ## Architecture
 
@@ -23,6 +99,8 @@ simultaneous users), which is where distribution actually pays off.
     ▼
  ┌─────────────┐   returns the chain (which nodes / which layers / where) + request_id
  │ Coordinator │   registry · health-checks · routing · NRN ledger · dashboard
+ │ neuronnet   │   neuronnet.duckdns.org
+ │ .duckdns.org│
  └─────────────┘
     │  2. the client runs the returned pipeline, activations over TCP:
     ▼
@@ -39,151 +117,52 @@ simultaneous users), which is where distribution actually pays off.
 
 One line: **User → Coordinator → [ node_a → node_c → node_b ] → Coordinator → User.**
 
-## Scaling proof
+**No VPN, no port forwarding, no Tailscale.** Your node makes only outbound connections; a public
+relay hands your peers an address for you, which is what lets a machine behind a home router take
+part.
 
-Aggregate throughput on the same 4-prompt workload, as machines are added to the pipeline:
-
-| Nodes | Pipeline | Throughput |
-|------:|----------|-----------:|
-| 1 | single machine | ~3.2 tok/s |
-| 2 | `node_a → node_b` | 4.61 tok/s |
-| 3 | `node_a → node_c → node_b` | **6.16 tok/s** |
-
-All nodes run busy simultaneously (up to 3.8× pipeline overlap); parallel throughput beats
-serial by ~3.6×. Scaling is sub-linear because the nodes are *heterogeneous* (the added
-machines are slower) and the driver carries the output head — see `sessions.md` for the full
-per-node utilisation breakdown and analysis.
-
-## What hardware do I need?
-
-Any machine with a normal CPU and a few GB of free RAM can be a node — no GPU required. A
-node only holds **its slice** of the model (roughly `layers × ~110 MB` in fp32, plus the
-~0.9 GB embedding on the first node). The reference network:
-
-| Node | Role | Machine | CPU | RAM | OS |
-|------|------|---------|-----|-----|-----|
-| `node_a` | driver: embed + first layers + `lm_head` | Windows 11 PC | 16 cores | 63 GB | Windows 11 |
-| `node_c` | middle layers (relay) | HP Pavilion (Ryzen) | 4 cores | 11 GB | Ubuntu 24.04 |
-| `node_b` | last layers + norm | Dell OptiPlex | 6 cores | 15 GB | Ubuntu |
-| coordinator | registry / routing / ledger | Dell OptiPlex (always-on) | — | — | Ubuntu |
-
-Stack on every node: CPU-only `torch==2.4.1`, `transformers==4.44.2`, `accelerate`. The
-coordinator needs only `fastapi` + `uvicorn`. **Nodes reach each other through the built-in
-relay — no VPN, no port forwarding, no Tailscale. Just install and run.** Your node makes only
-outbound connections and the relay hands your peers a public address for you, which is what
-lets an ordinary machine behind a home router take part. Nodes need not share a Python minor
-version — only the torch/transformers versions must match (that's what keeps the tensors
-compatible across the wire).
-
-## How to run a node
-
-A "node" is just one of the pipeline scripts, each serving a contiguous layer range:
-
-```bash
-# middle stage (node_c) — layers 10–18
-python node_c.py --port 50999
-# last stage (node_b) — layers 19–27 + norm
-python node_b.py --port 50999
-```
-The first node (`node_a`) is the driver; it embeds the prompt, runs its layers, drives
-generation, and applies `lm_head`. Each node loads only its own shard on first connect
-(see `common.load_model_shard`).
-
-**Direct mode** (no coordinator — hardcode the chain):
-```bash
-python node_a.py --host-c <node-c-ip> --host-b <node-b-ip> --s1 9 --s2 18 --max-new-tokens 80
-```
-Flags: `--serial` (baseline), `--copies 2` (N=8 concurrent), `--prompt "..."` (single
-request), `--s1/--s2` (layer boundaries). Verify a split is bit-exact vs. one machine with
-`python selftest_shard.py`.
-
-## How to run the coordinator
-
-The coordinator (FastAPI + SQLite, in `coordinator/`) is the network brain. From the repo
-root:
-
-```bash
-pip install fastapi uvicorn
-python -m uvicorn coordinator.main:app --host 0.0.0.0 --port 8001
-```
-Register the nodes and keep them alive (registers + heartbeats):
-```bash
-python coordinator/register_nodes.py
-```
-Then let `node_a` discover the chain from the coordinator instead of hardcoding it:
-```bash
-python node_a.py --coordinator http://<coordinator-host>:8001 --prompt "Why is the sky blue"
-```
-
-### Dashboard
-
-`http://<coordinator>:8001/dashboard` is a plain, auto-refreshing (5 s) HTML page: a green
-**HEALTHY** / red **DEGRADED** banner, summary cards (nodes online, layers covered, requests
-served, NRN distributed), and a table of every node — layer range, online/offline badge,
-address, cores, RAM, and NRN balance. Interactive API docs live at `/docs`.
-
-### Coordinator API
-
-| Method | Path | Auth | Purpose |
-|--------|------|------|---------|
-| POST | `/node/register` | open* | register a node, get a `node_token` |
-| GET | `/node/list` | — | all nodes + status + layers |
-| DELETE | `/node/{id}` | `X-Node-Token` | unregister |
-| GET | `/node/{id}/ping` | `X-Node-Token` | heartbeat (every 30 s; offline after 90 s) |
-| POST | `/infer` | — | get a valid chain `{chain, request_id}` |
-| POST | `/infer/{id}/complete` | — | report done → credits NRN |
-| GET | `/ledger/{id}` | — | balance / total_earned / requests_served |
-| GET | `/status` | — | network + stats JSON |
-| GET | `/dashboard` | — | HTML dashboard |
-
-\* **Open join.** Anyone can register a node — no secret required. A node that registers
-without the secret joins as **probationary**: it is reachable and can be challenged, but it
-does *not* receive live requests or earn NRN until a verifier confirms it with a
-proof-of-compute challenge (then it becomes **verified**). Presenting the valid
-`X-Register-Secret` marks a node **trusted** and skips probation (how the project's own dev
-nodes register). Set `NEURON_OPEN_JOIN=0` to require the secret for every registration (fully
-private network).
-
-## How do I earn NRN?
-
-Run a node, register it with the coordinator (open join — no secret needed), and stay online.
-A new node starts **probationary** and earns nothing until it passes a proof-of-compute
-challenge; once **verified**, every completed inference request it serves mints **1.0 NRN**:
-
-- the coordinator keeps a **10% fee** (0.10 NRN),
-- the remaining **0.9 NRN is split across the chain in proportion to layers held** — a node
-  holding `L` of the model's 28 layers earns `0.9 · L/28` per request.
-
-So a 10-layer node earns `0.9 · 10/28 = 0.321` NRN per request; a 9-layer node `0.289`. Over
-a full chain the nodes share 0.9 and the coordinator keeps 0.1. **Earnings are private:** your
-balance is visible only to you — in the app's tray ("My Dashboard") or via
-`GET /ledger/<node_id>` with your node's own `X-Node-Token`. The public dashboard shows
-network health, never per-node balances. (Tunable in `coordinator/config.py`.)
+Every completed request settles **1.0 NRN**: the coordinator keeps 10%, and the remaining 0.9 is
+split across the chain in proportion to layers held — a node holding `L` of 28 layers earns
+`0.9 · L/28`. Your balance is visible only to you; the public dashboard never shows it.
 
 ## Status
 
-**Session 30 complete — the network is live and open to strangers.** Coordinator at
-[neuronnet.duckdns.org](https://neuronnet.duckdns.org) (dashboard at `/dashboard`). Install the
-agent and your machine registers itself, picks its own layer range, downloads only that slice,
-and is **auto-verified by the network within about a minute** — no operator, no approval queue,
-no shared secret. NAT traversal is built in via the relay, so no VPN and no port forwarding.
-Answers your machine can serve run locally on a quantized 7B at **7.8 tok/s**; anything bigger
-goes across the node pipeline.
+**Session 30 complete.**
 
-**Next:** coordinator redundancy (several stateless coordinators over a shared database), then
-peer-to-peer discovery so a chain can be assembled without asking any central service, then the
-NRN ledger on-chain. Supply is already fixed at 1,000,000,000 NRN and transfer-only — nothing
-mints.
+- Network **live** at [neuronnet.duckdns.org](https://neuronnet.duckdns.org).
+- Installer **0.16.5 released** — the first build a stranger can actually use.
+- **Auto-verification working**: peers verify a new node by quorum, no human in the path.
+- **First stranger: pending.** Nobody outside the project has run it yet.
+
+Next: several stateless coordinators over a shared database (so it isn't one process), then
+peer-to-peer discovery so a chain can form without asking any central service.
 
 ## Repository layout
 
 ```
+agent/               the node agent: register, place, download slice, serve, heartbeat, tray
+coordinator/         FastAPI + SQLite: registry, placement, routing, model tiers, ledger, dashboard
+engine/              local quantized execution (llama.cpp / GGUF) when the model fits your machine
+ui/                  local chat UI, OAuth sign-in, conversation history
+api/                 OpenAI-compatible endpoint (/v1/*)
+safety/              prompt and response moderation
+security/            proof-of-compute challenge used to verify nodes
+packaging/           PyInstaller spec and the Windows installer
+rag/                 retrieval, so answers can use current information
+
 common.py            model sharding, manual layer driver, KV cache, TCP framing
-node_a.py            driver: embed + first layers + lm_head, parallel request driver
+node_a.py            driver stage: embed + first layers + lm_head, parallel request driver
 node_b.py            last stage: layers + final norm
 node_c.py            middle relay stage
+neuron_driver.py     streaming generation across the chain
+batching.py          batching several requests through one pipeline pass
+junction_cache.py    caches activations at stage boundaries
+slice_downloader.py  fetches only the byte ranges of the weights a node owns
+wire_codec.py        activation wire format (4.3× smaller, no pickle)
+relay.py             public relay that lets NAT'd nodes reach each other
+tunnel_client.py     the node side of that relay
+verify_service.py    runs verification challenges against joining nodes
 selftest_shard.py    proves the sharded split is bit-exact vs. one machine
-coordinator/         FastAPI + SQLite: registry, health, routing, NRN ledger, dashboard
 sessions.md          full engineering log, session by session
 ```
 
