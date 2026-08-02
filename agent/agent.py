@@ -110,11 +110,27 @@ log = logging.getLogger("neuron.agent")
 
 
 def _setup_logging(level="INFO"):
+    """Attach handlers to the `neuron` PARENT logger, not to `neuron.agent`.
+
+    The tray says "Chat UI unavailable — see agent.log" when local_chat fails. The two things
+    that actually fail there are the weight fetch (`neuron.engine.local_gguf`) and the model
+    load (`neuron.driver`) -- and neither is a child of `neuron.agent`, so their records
+    propagated to a root logger with no handlers and were discarded. In windowed tray mode
+    there is no console either, so the reason a user was told to look up had nowhere to appear.
+    Pointing someone at an empty log is worse than saying nothing.
+
+    encoding="utf-8" because the existing file is full of mojibake where "·" was written
+    through the console's ANSI codepage.
+    """
+    parent = logging.getLogger("neuron")
+    parent.setLevel(getattr(logging, level, logging.INFO))
     log.setLevel(getattr(logging, level, logging.INFO))
-    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S")
-    for h in (logging.FileHandler(LOG_PATH), logging.StreamHandler()):
+    if parent.handlers:          # idempotent: tray mode and main() can both call this
+        return
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s %(message)s", "%H:%M:%S")
+    for h in (logging.FileHandler(LOG_PATH, encoding="utf-8"), logging.StreamHandler()):
         h.setFormatter(fmt)
-        log.addHandler(h)
+        parent.addHandler(h)
 
 
 def detect_tailscale_ip():
