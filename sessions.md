@@ -2554,9 +2554,18 @@ every node was about to be handed **404'd**. Verified directly rather than assum
 
 Left unfixed, switching the hash on would have had every node download nothing, log a warning,
 and stay where it was — an auto-update mechanism that appears live and delivers nothing.
-Overridden with `NEURON_AGENT_DOWNLOAD_URL` in the systemd unit rather than re-tagging a
-published release. Worth deciding later whether to re-tag for consistency, since `v0.17.0` and
-`v0.13.1` both carry the `v`.
+Worked around with `NEURON_AGENT_DOWNLOAD_URL` in the systemd unit.
+
+**Then the founder re-tagged it to `v0.17.1`, which inverted the workaround.** The override now
+pointed at the old no-`v` URL, which 404s, so the fix had become the bug — a stale override is
+worse than none, because it silently overrides a value that has since become correct. Checked
+rather than assumed: `v0.17.1` → 200, `0.17.1` → 404. Override removed (the hash stays), so the
+URL config.py derives from the version is used again, and the systemd file now carries a comment
+explaining why it must not come back.
+
+Verified the way that actually settles it — walked the agent's own path end to end: read
+`/agent/version`, fetch the advertised URL, hash the 216,655,277 bytes that arrive, compare to
+the advertised hash. Match. **An agent would accept this update.**
 
 **The published asset was verified byte-for-byte**, not assumed: downloaded all 216,655,277
 bytes from GitHub and hashed them. `befeddd3…ab71`, identical to the local build and to what the
