@@ -1,7 +1,7 @@
 """
 diagonal_check.py — Does the cube diagonal idea work on real weights?
 ======================================================================
-Author: Raman Kumar Sharma / NEURON Network
+Author: NEURON Labs / NEURON Network
 
 Tests whether real Qwen2.5-1.5B weight matrices have diagonal structure
 that allows corner sampling to predict center activation patterns.
@@ -309,7 +309,7 @@ def main():
     
     print("="*60)
     print("Diagonal Structure Check for NeuronScript Cube Predictor")
-    print("Testing Raman's cube diagonal idea on real Qwen2.5 weights")
+    print("Testing the cube diagonal idea on real Qwen2.5 weights")
     print("="*60)
     
     results = []

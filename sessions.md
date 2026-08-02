@@ -16,7 +16,7 @@ along the way.
 | Role | embed + first layers + `lm_head` | middle layers (relay) | last layers + norm |
 | Hardware | Windows 11, 63 GB, 16 cores | HP Pavilion, Ryzen, 4 cores, 11 GB | Dell OptiPlex, 6 cores, 15 GB |
 | Python | 3.11 venv `C:\Users\optin\neuron\.venv` | 3.12 venv `~/neuron/.venv` | 3.10 venv `~/neuron/.venv` |
-| Reach (Tailscale) | — | `ssh raman@100.79.125.112` | `ssh homeadmin@100.114.189.46` |
+| Reach (Tailscale) | — | `ssh <node-c-host>` | `ssh <node-b-host>` |
 | Port | connects out | listens **50999** | listens **50999** |
 
 Stack on all three: `torch==2.4.1` (CPU), `transformers==4.44.2`, `accelerate`. The
@@ -1826,10 +1826,10 @@ anything — the repo is still private, so `STRANGER_INSTALL.md` points at a 404
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load
 on first connect.
 ```bash
-ssh homeadmin@100.114.189.46 "cd ~/neuron && ./.venv/bin/python node_b.py --port 50999"
+ssh <node-b-host> "cd ~/neuron && ./.venv/bin/python node_b.py --port 50999"
 ```
 ```bash
-ssh raman@100.79.125.112 "cd ~/neuron && ./.venv/bin/python node_c.py --port 50999"
+ssh <node-c-host> "cd ~/neuron && ./.venv/bin/python node_c.py --port 50999"
 ```
 
 **2. Throughput demo — 4 requests in parallel (Windows).**
@@ -1848,7 +1848,7 @@ C:\Users\optin\neuron\.venv\Scripts\python.exe C:\Users\optin\neuron\selftest_sh
 **4. Via the coordinator (S6/S7).** The coordinator runs on the always-on OptiPlex
 (`:8001`). Register the nodes, then let node_a discover the chain itself.
 ```bash
-ssh homeadmin@100.114.189.46 "cd ~/neuron-coordinator && ~/neuron/.venv/bin/python -m uvicorn coordinator.main:app --host 0.0.0.0 --port 8001"
+ssh <node-b-host> "cd ~/neuron-coordinator && ~/neuron/.venv/bin/python -m uvicorn coordinator.main:app --host 0.0.0.0 --port 8001"
 ```
 ```bash
 C:\Users\optin\neuron\.venv\Scripts\python.exe coordinator\register_nodes.py
@@ -1879,10 +1879,10 @@ key (`pip install openai`). Standalone usage docs at `/docs`.
 
 **Stop the servers** (self-safe pattern — no literal script name in the kill):
 ```bash
-ssh homeadmin@100.114.189.46 "pkill -f '[n]ode_b.py'"
+ssh <node-b-host> "pkill -f '[n]ode_b.py'"
 ```
 ```bash
-ssh raman@100.79.125.112 "pkill -f '[n]ode_c.py'"
+ssh <node-c-host> "pkill -f '[n]ode_c.py'"
 ```
 
 ---

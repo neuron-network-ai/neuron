@@ -88,7 +88,7 @@ Token name:     NEURON (NRN)
 Total supply:   1,000,000,000 NRN
 Distribution:
   60% → node rewards (earned over 10 years, halving every 2 years)
-  20% → founder (Raman Kumar Sharma)
+  20% → founder (NEURON Labs)
   15% → ecosystem grants and partnerships
    5% → liquidity pool at public launch
 
@@ -467,5 +467,5 @@ Build the agent. Get the first stranger. Everything else follows.
 ---
 
 *Last updated: Session 16 (security: proof-of-compute + reputation + rate-limit) complete. S12 infra done (first stranger pending); S13 (Android) DEFERRED — needs llama.cpp (plan in SCALING.md; tokenomics in TOKENOMICS.md; security in SECURITY.md). Next: S17 (NRN on-chain) — but NOT before the first stranger.*
-*Founder: Raman Kumar Sharma, Rotterdam, Netherlands*
+*NEURON Labs*
 *Contact: via GitHub*

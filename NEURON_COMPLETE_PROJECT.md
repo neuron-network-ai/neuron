@@ -1,8 +1,7 @@
 # NEURON — Complete Project Document
 ## Network of Existing Utilised Resources — Open Nodes
 
-**Author:** Raman Kumar Sharma  
-**Location:** Rotterdam, Netherlands  
+**Author:** NEURON Labs  
 **Date:** August 2026  
 **Status:** Sessions 1-27 complete. First stranger ready.
 
@@ -424,7 +423,7 @@ who can read it or cut you off.
 Total supply:   1,000,000,000 NRN
 Distribution:
   60% → node rewards (10 years, halving every 2 years)
-  20% → founder (Raman Kumar Sharma)
+  20% → founder (NEURON Labs)
   15% → ecosystem grants and partnerships
    5% → liquidity pool at public launch
 
@@ -577,7 +576,7 @@ SIDN Fund application
 ONLY after Sessions 28-30 give real hardware results
 Paper with honest numbers from your machines
 arXiv submission: cs.LG + cs.DC
-Raman Kumar Sharma, Rotterdam, 2026
+NEURON Labs, 2026
 Permanent timestamp on all contributions
 ```
 
@@ -731,5 +730,5 @@ Everything else follows.
 ---
 
 *NEURON — Network of Existing Utilised Resources — Open Nodes*  
-*Raman Kumar Sharma — Rotterdam, Netherlands — 2026*  
+*NEURON Labs — 2026*  
 *github.com/raman011sharma-code/neuron*

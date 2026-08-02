@@ -181,4 +181,4 @@ sessions.md          full engineering log, session by session
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE). © 2026 Raman Kumar Sharma.
+Apache License 2.0 — see [LICENSE](LICENSE). © 2026 NEURON Labs.
