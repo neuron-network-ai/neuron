@@ -48,6 +48,16 @@ coordinator/nodes.local.json
 # --- private / pre-public docs (keep out of the public repo) ---
 TOKENOMICS.md
 
+# --- blockchain work-in-progress (NRN ERC-20, migration, deploy) ---
+# Nothing here is deployed and nothing here is public yet. Holds a deploy key path,
+# wallet addresses and the ledger snapshot it migrates — keep it local until launch.
+blockchain/
+# ...and the npm toolchain it needs. node_modules must sit above blockchain/ so that
+# `sources: "."` in hardhat.config.js does not treat OpenZeppelin as project sources.
+/node_modules/
+/package.json
+/package-lock.json
+
 # --- SSH / private keys (NEVER commit — belt-and-suspenders) ---
 *.key
 *.pem
