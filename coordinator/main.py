@@ -368,6 +368,66 @@ def ping(node_id: str, _node=Depends(require_node_token)):
     return {"status": "alive", "node_id": node_id, "last_seen": time.time()}
 
 
+@app.get("/node/verify-assignment")
+def verify_assignment(x_node_token: str = Header(default=None)):
+    """Hand a VERIFIED node somebody to check (peer verification).
+
+    This is what takes the operator out of the loop. Until now a newcomer could not earn until
+    the founder personally ran security/proof_of_compute against it, so the network's ability
+    to grow depended on one laptop being switched on. Now any already-verified node can pull an
+    assignment and vouch, and PEER_VERIFY_QUORUM distinct vouches promote the newcomer.
+
+    The caller authenticates with its OWN node token, which is also how we know it is verified
+    and which id its vote belongs to. It gets the target's address here because addresses are
+    otherwise private ([P11]) -- a verifier cannot challenge what it cannot reach.
+    """
+    me = models.node_by_token(x_node_token) if x_node_token else None
+    if me is None:
+        raise HTTPException(status_code=401, detail="X-Node-Token of a verified node required")
+    if not me.get("eligible"):
+        raise HTTPException(status_code=403,
+                            detail="only a verified/trusted node may verify others")
+    now = time.time()
+    already = models.peer_targets_of(me["node_id"])
+    for n in models.online_nodes(now):
+        if n["node_id"] == me["node_id"] or n.get("standing") != "probationary":
+            continue
+        if n["node_id"] in already:      # one vote each; don't re-issue work already done
+            continue
+        sm = serving_model()
+        return {"node_id": n["node_id"], "host": n["tailscale_ip"], "port": n["port"],
+                "layer_start": n["layer_start"], "layer_end": n["layer_end"],
+                "total_layers": sm["layers"], "model_id": sm["model_id"],
+                "quorum": config.PEER_VERIFY_QUORUM}
+    return {"node_id": None}
+
+
+@app.post("/node/{node_id}/peer-attest")
+def peer_attest(node_id: str, body: AttestBody, x_node_token: str = Header(default=None)):
+    """A verified node's verdict on a probationary one. Authenticated by the VERIFIER's own
+    node token, so every vote is attributable and one machine gets one vote per target."""
+    me = models.node_by_token(x_node_token) if x_node_token else None
+    if me is None:
+        raise HTTPException(status_code=401, detail="X-Node-Token of a verified node required")
+    if not me.get("eligible"):
+        raise HTTPException(status_code=403, detail="only a verified/trusted node may attest")
+    if me["node_id"] == node_id:
+        raise HTTPException(status_code=400, detail="a node cannot verify itself")
+    if models.get_node(node_id) is None:
+        raise HTTPException(status_code=404, detail=f"unknown node '{node_id}'")
+    models.record_peer_attestation(me["node_id"], node_id, body.passed,
+                                   getattr(body, "max_err", None))
+    passes, fails = models.peer_verdicts(node_id)
+    n = models.get_node(node_id)
+    print(f"[peer-verify] {me['node_id']} says {node_id} "
+          f"{'PASSED' if body.passed else 'FAILED'} "
+          f"({passes}/{config.PEER_VERIFY_QUORUM} distinct passes)")
+    return {"node_id": node_id, "verifier": me["node_id"], "passed": body.passed,
+            "distinct_passes": passes, "distinct_fails": fails,
+            "quorum": config.PEER_VERIFY_QUORUM, "standing": n["standing"],
+            "eligible": n["eligible"]}
+
+
 @app.post("/node/{node_id}/attest")
 def attest(node_id: str, body: AttestBody, _=Depends(require_register_secret)):
     """A trusted verifier reports a proof-of-compute result (Session 16). Failed

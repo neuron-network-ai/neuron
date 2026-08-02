@@ -42,6 +42,13 @@ TOKEN_BYTES = 24               # per-node auth token length (in bytes, hex-encod
 OPEN_JOIN = os.environ.get("NEURON_OPEN_JOIN", "1") == "1"
 # Proof-of-compute passes a probationary node needs before it may serve live traffic and earn.
 PROBATION_MIN_PASSES = int(os.environ.get("NEURON_PROBATION_MIN_PASSES", "1"))
+# Peer verification: how many DISTINCT already-verified nodes must independently pass a
+# newcomer's proof-of-compute before it is promoted. The point is to take the operator out of
+# the loop entirely -- before this, a stranger could not earn until the founder's own PC ran
+# the verifier, so the network's growth depended on one person being awake. 2 rather than 1
+# because a single verifier could otherwise promote an unlimited number of its own sybils;
+# with 2 an attacker needs two independently-verified machines to collude.
+PEER_VERIFY_QUORUM = int(os.environ.get("NEURON_PEER_VERIFY_QUORUM", "2"))
 
 # Special ledger key that accumulates the coordinator's fee.
 COORDINATOR_LEDGER_ID = "__coordinator__"

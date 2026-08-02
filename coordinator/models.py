@@ -80,6 +80,18 @@ CREATE TABLE IF NOT EXISTS moderation_events (
     category    TEXT,
     created_at  REAL NOT NULL
 );
+-- Peer verification: WHICH node vouched for which. Promotion requires agreement from
+-- PEER_VERIFY_QUORUM *distinct* verifiers, so one machine cannot wave through a crowd of
+-- its own sybils however many times it attests. The PRIMARY KEY is what enforces "distinct":
+-- a verifier re-attesting the same target replaces its own vote instead of adding one.
+CREATE TABLE IF NOT EXISTS peer_attestations (
+    verifier_id TEXT NOT NULL,
+    target_id   TEXT NOT NULL,
+    passed      INTEGER NOT NULL,
+    max_err     REAL,
+    created_at  REAL NOT NULL,
+    PRIMARY KEY (verifier_id, target_id)
+);
 """
 
 
@@ -179,13 +191,74 @@ def _node_dict(row, now=None):
     # TRUSTED (registered with the secret) or has passed proof-of-compute enough times.
     # A fresh stranger is PROBATIONARY — reachable and challengeable, but not in production.
     d["trusted"] = bool(d.get("trusted"))
-    passed = p >= config.PROBATION_MIN_PASSES
+    # Two independent routes to `verified`, deliberately:
+    #   - the operator's own verifier (challenges_passed, Session 16), and
+    #   - a quorum of DISTINCT already-verified peers (peer_attestations).
+    # The second is what removes the human: with it, a stranger who joins at 3am is promoted by
+    # the network itself rather than waiting for the founder's laptop to be switched on.
+    peer_ok = d.get("peer_passes", 0) >= config.PEER_VERIFY_QUORUM
+    passed = p >= config.PROBATION_MIN_PASSES or peer_ok
+    d["peer_verified"] = peer_ok
     d["eligible"] = (not d["flagged"]) and (d["trusted"] or passed)
     d["standing"] = ("flagged" if d["flagged"]
                      else "trusted" if d["trusted"]
                      else "verified" if passed
                      else "probationary")
     return d
+
+
+# Counts DISTINCT verifiers that passed each node, joined in so _node_dict can decide standing
+# without a second query per node (list_nodes runs on every dashboard refresh and health sweep).
+_PEER_PASSES = ("(SELECT COUNT(*) FROM peer_attestations pa"
+                " WHERE pa.target_id = nodes.node_id AND pa.passed = 1) AS peer_passes")
+
+
+def record_peer_attestation(verifier_id, target_id, passed, max_err=None):
+    """One verified node's verdict on another. Upsert, so a verifier has exactly one vote."""
+    with _db() as c:
+        c.execute("INSERT INTO peer_attestations (verifier_id,target_id,passed,max_err,created_at)"
+                  " VALUES (?,?,?,?,?) ON CONFLICT(verifier_id,target_id) DO UPDATE SET"
+                  " passed=excluded.passed, max_err=excluded.max_err,"
+                  " created_at=excluded.created_at",
+                  (verifier_id, target_id, 1 if passed else 0, max_err, time.time()))
+
+
+def peer_verdicts(target_id):
+    """(distinct verifiers who passed it, distinct who failed it)."""
+    with _db() as c:
+        rows = c.execute("SELECT passed, COUNT(*) n FROM peer_attestations WHERE target_id=?"
+                         " GROUP BY passed", (target_id,)).fetchall()
+    d = {int(r["passed"]): r["n"] for r in rows}
+    return d.get(1, 0), d.get(0, 0)
+
+
+def node_by_token(token):
+    """Resolve a node from its own token — how a node authenticates as itself when it acts as
+    a verifier. Constant-time compare is unnecessary here (the lookup is by exact value and a
+    miss reveals nothing), but the token is never logged."""
+    if not token:
+        return None
+    with _db() as c:
+        row = c.execute(f"SELECT *, {_PEER_PASSES} FROM nodes WHERE node_token=?",
+                        (token,)).fetchone()
+    return _node_dict(row) if row else None
+
+
+def peer_targets_of(verifier_id):
+    """Which nodes this verifier has already voted on, so it isn't handed the same work twice."""
+    with _db() as c:
+        rows = c.execute("SELECT target_id FROM peer_attestations WHERE verifier_id=?",
+                         (verifier_id,)).fetchall()
+    return {r["target_id"] for r in rows}
+
+
+def peer_verifier_count(verifier_id):
+    """How many distinct nodes this verifier has vouched for — used to spot a node trying to
+    wave through a whole fleet on its own."""
+    with _db() as c:
+        r = c.execute("SELECT COUNT(*) n FROM peer_attestations WHERE verifier_id=? AND passed=1",
+                      (verifier_id,)).fetchone()
+    return r["n"] if r else 0
 
 
 def record_attestation(node_id, passed):
@@ -231,14 +304,15 @@ def update_layers(node_id, layer_start, layer_end):
 
 def get_node(node_id, now=None):
     with _db() as c:
-        row = c.execute("SELECT * FROM nodes WHERE node_id=?", (node_id,)).fetchone()
+        row = c.execute(f"SELECT *, {_PEER_PASSES} FROM nodes WHERE node_id=?",
+                        (node_id,)).fetchone()
     return _node_dict(row, now) if row else None
 
 
 def list_nodes(now=None):
     now = now if now is not None else time.time()
     with _db() as c:
-        rows = c.execute("SELECT * FROM nodes ORDER BY layer_start").fetchall()
+        rows = c.execute(f"SELECT *, {_PEER_PASSES} FROM nodes ORDER BY layer_start").fetchall()
     return [_node_dict(r, now) for r in rows]
 
 

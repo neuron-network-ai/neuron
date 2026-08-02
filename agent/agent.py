@@ -60,6 +60,10 @@ BIND_TIMEOUT_S = 20
 # connection through the relay and back into our own server, so it is not free.
 RELAY_PROBE_EVERY = 4
 RELAY_PROBE_TIMEOUT_S = 20
+# How often a verified node looks for a newcomer to vouch for. Slow on purpose: verifying is
+# a favour to the network, not this node's job, and a newcomer waiting an extra minute costs
+# nothing next to needing a human to be awake.
+PEER_VERIFY_POLL_SECONDS = 60
 
 # Written on first run if no config exists (so a freshly-installed app just works): open join,
 # auto-placement, green idle donation, relay on. Matches agent/config.json.
@@ -537,6 +541,70 @@ class Agent:
                 except OSError:
                     pass
 
+    # -- peer verification: the network verifies itself ---------------------- #
+    def peer_verify_loop(self):
+        """Once verified, help verify newcomers.
+
+        This is what makes joining independent of any one person. Before it, a stranger stayed
+        probationary — reachable, but earning nothing and serving nothing — until the operator
+        personally ran security/proof_of_compute against them. So the network could only grow
+        while one particular laptop was switched on, and that laptop's owner held a secret
+        nobody else could be given. Here every verified node does the same check against a
+        newcomer and reports a verdict signed with its own node token; PEER_VERIFY_QUORUM
+        distinct agreements promote them.
+
+        Deliberately reuses the SAME proof-of-compute a human verifier ran — a peer is not
+        trusted more cheaply, it is just not a person.
+        """
+        while not self._stop.is_set():
+            self._stop.wait(PEER_VERIFY_POLL_SECONDS)
+            if self._stop.is_set() or self.server is None:
+                continue
+            try:
+                r = requests.get(f"{self.base}/node/verify-assignment",
+                                 headers={"X-Node-Token": self.cfg.get("node_token", "")},
+                                 timeout=15)
+                if r.status_code in (401, 403):
+                    continue          # not verified yet ourselves — nothing to do
+                r.raise_for_status()
+                job = r.json()
+            except requests.RequestException:
+                continue
+            if not job.get("node_id"):
+                continue
+            try:
+                verdict = self.challenge_peer(job)
+            except Exception as e:
+                # Could not reach them / they are mid-restart. Report NOTHING: a failed
+                # attestation is permanent and unreachability is not evidence of cheating.
+                log.info("peer verify: could not challenge %s (%s) — leaving it for another "
+                         "verifier", job["node_id"], e.__class__.__name__)
+                continue
+            try:
+                out = requests.post(f"{self.base}/node/{job['node_id']}/peer-attest",
+                                    json=verdict,
+                                    headers={"X-Node-Token": self.cfg.get("node_token", "")},
+                                    timeout=15)
+                out.raise_for_status()
+                d = out.json()
+                log.info("peer verify: %s %s (max_err %.2e) — %d/%d distinct passes, now '%s'",
+                         job["node_id"], "PASSED" if verdict["passed"] else "FAILED",
+                         verdict.get("max_err", 0.0), d.get("distinct_passes", 0),
+                         d.get("quorum", 0), d.get("standing"))
+            except requests.RequestException as e:
+                log.warning("peer verify: could not report verdict for %s: %s",
+                            job["node_id"], e)
+
+    def challenge_peer(self, job):
+        """Run proof-of-compute against another node. Returns {'passed', 'max_err'}."""
+        from security import proof_of_compute as poc
+        lo, hi, total = job["layer_start"], job["layer_end"], job["total_layers"]
+        if hi == total - 1:
+            res = poc.attest(job["host"], job["port"], lo, total)
+        else:
+            res = poc.attest_middle(job["host"], job["port"], lo, hi + 1)
+        return {"passed": bool(res["passed"]), "max_err": float(res["max_err"])}
+
     # -- personal Chat UI (agent/local_chat.py) ------------------------------ #
     def start_local_chat(self):
         """Best-effort: a broken/slow local Chat UI must never stop this machine from
@@ -706,6 +774,7 @@ class Agent:
     def run(self):
         self.setup()
         threading.Thread(target=self.migration_loop, daemon=True).start()
+        threading.Thread(target=self.peer_verify_loop, daemon=True).start()
         threading.Thread(target=self.start_local_chat, daemon=True).start()
         self.heartbeat_loop()
 
