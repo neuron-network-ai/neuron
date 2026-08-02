@@ -5,14 +5,14 @@ joins a network of ordinary computers that together run AI models too big for an
 
 ## Download
 
-**[⬇ NEURON-Setup-0.16.5.exe](https://github.com/neuron-network-ai/neuron/releases/download/v0.16.5/NEURON-Setup-0.16.5.exe)** (202 MB)
+**[⬇ NEURON-Setup-0.17.0.exe](https://github.com/neuron-network-ai/neuron/releases/download/v0.17.0/NEURON-Setup-0.17.0.exe)** (217 MB)
 
 Windows installer — no technical knowledge needed. Double-click, then open
 **http://localhost:8080** and sign in with Google or GitHub.
 
 Two things to expect: Windows will say the installer is "unrecognized" (it isn't code-signed yet
-— the full source is in this repository), and the first start downloads about **1.4 GB**, which
-is the AI model itself. After that it just runs.
+— the full source is in this repository), and the first start downloads **1.4–1.8 GB**, which is
+your share of the AI model. After that it just runs, and updates itself.
 
 On Linux or macOS, see [For developers](#for-developers-source-install) below.
 
@@ -127,11 +127,16 @@ split across the chain in proportion to layers held — a node holding `L` of 28
 
 ## Status
 
-**Session 30 complete.**
+**Session 36 complete.**
 
 - Network **live** at [neuronnet.duckdns.org](https://neuronnet.duckdns.org).
-- Installer **0.16.5 released** — the first build a stranger can actually use.
+- Installer **0.17.0 released** — the local chat UI works, and this is the last build anyone
+  has to install by hand.
+- **Auto-update working**: the app checks daily, verifies a published SHA-256 before running
+  anything, and never updates mid-request. Fixes reach volunteers without asking them.
 - **Auto-verification working**: peers verify a new node by quorum, no human in the path.
+- **Earnings have an owner**: each node registers an Ethereum address it proves it controls,
+  so balances can leave the coordinator's database intact.
 - **First stranger: pending.** Nobody outside the project has run it yet.
 
 Next: several stateless coordinators over a shared database (so it isn't one process), then
