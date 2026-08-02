@@ -42,11 +42,34 @@ def _total_earned(cfg):
 
 
 def _deregister(cfg):
+    """Remove this node from the coordinator. Returns (ok, human-readable detail).
+
+    This used to fire the DELETE and ignore everything that came back -- exceptions swallowed
+    by a bare `except: pass`, and every non-2xx treated as success because the status was never
+    read. A failed deregistration is not cosmetic: `new_node_id()` mints a FRESH random suffix
+    on every install (deliberately -- it is what stopped hostname collisions locking people
+    out), so a reinstall never reclaims the old registration. The orphan then sits on the
+    network forever, holding a layer range nobody serves, while the uninstaller cheerfully
+    reports success. Seen live: one machine listed twice as `agent-<host>` and
+    `agent-<host>-67e4eb`, with the chain stuck DEGRADED behind the dead one.
+
+    The 401 case is the likely one and worth its own message: the coordinator re-mints a
+    node's token on every registration, so any copy that re-registered after this config was
+    written left the token on disk dead.
+    """
+    url = f"{cfg['coordinator'].rstrip('/')}/node/{cfg['node_id']}"
     try:
-        requests.delete(f"{cfg['coordinator'].rstrip('/')}/node/{cfg['node_id']}",
-                        headers={"X-Node-Token": cfg.get("node_token", "")}, timeout=8)
-    except Exception:
-        pass
+        r = requests.delete(url, headers={"X-Node-Token": cfg.get("node_token", "")}, timeout=8)
+    except requests.RequestException as exc:
+        return False, f"could not reach the coordinator ({type(exc).__name__})"
+    if r.status_code in (200, 204):
+        return True, "deregistered"
+    if r.status_code == 404:
+        return True, "already gone from the coordinator"
+    if r.status_code == 401:
+        return False, ("the coordinator rejected this node's token — another copy of the agent "
+                       "registered after this one and replaced it")
+    return False, f"the coordinator answered HTTP {r.status_code}"
 
 
 def _stop_agent():
@@ -113,19 +136,21 @@ def _remove_cron_fallback():
         print("  removed keepalive script")
 
 
-def main():
+def main(argv=None):
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default=CONFIG_PATH)
     # ignore extra flags (the installer invokes this as `<app>.exe --deregister`)
-    args, _ = ap.parse_known_args()
+    args, _ = ap.parse_known_args(argv)
     config_path = args.config
 
     cfg = json.load(open(config_path)) if os.path.exists(config_path) else {}
     earned = _total_earned(cfg) if cfg.get("node_id") else 0.0
 
+    dereg_ok, dereg_detail = True, None
     if cfg.get("node_id") and cfg.get("node_token"):
-        _deregister(cfg)
+        dereg_ok, dereg_detail = _deregister(cfg)
+        print(f"  {'deregistered' if dereg_ok else 'COULD NOT DEREGISTER'}: {dereg_detail}")
     _stop_agent()
     _remove_startup()
 
@@ -139,6 +164,19 @@ def main():
 
     print(f"\nNEURON removed. Thank you for contributing {earned:.2f} NRN total.")
 
+    if not dereg_ok:
+        # Say it plainly rather than let a silent orphan degrade the network. Reinstalling
+        # will NOT fix this -- the new install takes a new node id on purpose.
+        print(f"\n  WARNING: this machine is still listed on the network as "
+              f"'{cfg['node_id']}'.\n"
+              f"  Reason: {dereg_detail}.\n"
+              f"  Reinstalling will not clear it — a new install registers under a new id, so\n"
+              f"  the old one would linger and hold a layer range nobody serves.\n"
+              f"  Ask the network operator to remove it:\n"
+              f"      DELETE {cfg['coordinator'].rstrip('/')}/node/{cfg['node_id']}\n"
+              f"      header: X-Register-Secret: <operator secret>")
+    return 0 if dereg_ok else 1
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
