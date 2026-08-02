@@ -8,7 +8,7 @@
 ; and on uninstall deregisters the node + deletes its slice/config.
 
 #define AppName "NEURON"
-#define AppVersion "0.16.4"
+#define AppVersion "0.16.5"
 #define AppExe "neuron-agent.exe"
 
 [Setup]
@@ -16,7 +16,7 @@ AppId={{A7E3C9F1-2B4D-4E6A-8C1F-9D0E5B7A3C21}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher=NEURON Labs
-AppSupportURL=https://github.com/raman011sharma-code/neuron-network
+AppSupportURL=https://github.com/neuron-network-ai/neuron
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
