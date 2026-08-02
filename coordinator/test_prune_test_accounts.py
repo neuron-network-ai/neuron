@@ -27,7 +27,7 @@ ok = fail = 0
 # Shaped like the live ledger: the four buckets + escrow, the dev trio, the coordinator's fee
 # row, and the eight faucet-funded test identities. Sums to exactly 1,000,000,000.
 LEDGER = [
-    ("__emission_pool__", 599_999_972.431465, "bucket"),
+    ("__emission_pool__", 599_999_971.555973, "bucket"),
     ("__founder__",       200_000_000.0,      "bucket"),
     ("__ecosystem__",     149_999_800.0,      "bucket"),
     ("__liquidity__",      50_000_000.0,      "bucket"),
@@ -44,13 +44,19 @@ LEDGER = [
     ("node_a-cli-ee8b499f40a0",    24.971,    "wallet"),
     ("w_d35c84ddd33ea857d74c29db22cd76a9", 24.295, "wallet"),
     ("w_ef7ca46713e2bc4d0d627b69fe4aa660", 25.0,   "wallet"),
-    ("agent-optinovate",            2.025002, "node"),   # unclassified: a real node we ran
-    ("stranger-test-win",           0.208607, "node"),   # unclassified
+    ("agent-optinovate",            2.025002, "node"),   # dev install of the packaged agent
+    ("stranger-test-win",           0.208607, "node"),   # rehearsal of the stranger join path
+    ("node-b-optiplex",             0.187746, "node"),   # the OptiPlex under an earlier id
+    ("node-c-pavilion",             0.187746, "node"),   # the Pavilion under an earlier id
+    ("unknown-node-xyz",            0.5,      "node"),   # matches no rule -- must be reported
     ("w_spent_out",                 0.0,      "wallet"),  # prune target, already empty
 ]
 PRUNED = ["attacker-demo-1", "attacker-demo-2", "probe-only", "live-verify-wallet",
           "node_a-cli-e79214baa6df", "node_a-cli-ee8b499f40a0",
-          "w_d35c84ddd33ea857d74c29db22cd76a9", "w_ef7ca46713e2bc4d0d627b69fe4aa660"]
+          "w_d35c84ddd33ea857d74c29db22cd76a9", "w_ef7ca46713e2bc4d0d627b69fe4aa660",
+          "stranger-test-win", "agent-optinovate"]
+KEPT = ["node_a", "node_b", "node_c", "__coordinator__",
+        "node-b-optiplex", "node-c-pavilion"]
 
 
 def check(label, cond, detail=""):
@@ -116,15 +122,13 @@ def main():
           all(t["reason"] and t["to"] == "__ecosystem__" for t in log["transfers"]))
 
     print("\n-- classification")
-    check("the dev trio and the fee account are kept",
-          {"node_a", "node_b", "node_c", "__coordinator__"}
-          <= {k["account_id"] for k in log["kept"]})
+    check("real hardware and earned fees are kept -- including the older machine ids",
+          set(KEPT) <= {k["account_id"] for k in log["kept"]})
     check("genesis buckets are kept",
           {"__emission_pool__", "__founder__", "__ecosystem__", "__liquidity__"}
           <= {k["account_id"] for k in log["kept"]})
     check("accounts matching no rule are reported, not swept",
-          sorted(u["account_id"] for u in log["unclassified"])
-          == ["agent-optinovate", "stranger-test-win"])
+          sorted(u["account_id"] for u in log["unclassified"]) == ["unknown-node-xyz"])
     check("an already-empty prune target is not a transfer",
           "w_spent_out" not in {t["account_id"] for t in log["transfers"]}
           and log["totals"]["already_empty"] == 1)
@@ -142,12 +146,15 @@ def main():
           str({a: b[a] for a in PRUNED if b[a] != 0}))
     check("the dev trio is untouched",
           (b["node_a"], b["node_b"], b["node_c"]) == (9.011876, 6.082124, 8.107126))
+    check("the same machines under their older ids are untouched",
+          (b["node-b-optiplex"], b["node-c-pavilion"]) == (0.187746, 0.187746))
     check("the coordinator's fees are untouched", b["__coordinator__"] == 2.8678)
-    check("unclassified accounts are untouched",
-          (b["agent-optinovate"], b["stranger-test-win"]) == (2.025002, 0.208607))
+    check("unclassified accounts are untouched", b["unknown-node-xyz"] == 0.5)
+    check("the two dev-artifact nodes WERE pruned",
+          (b["agent-optinovate"], b["stranger-test-win"]) == (0, 0))
     check("the other genesis buckets are untouched",
           (b["__emission_pool__"], b["__founder__"], b["__liquidity__"])
-          == (599_999_972.431465, 200_000_000.0, 50_000_000.0))
+          == (599_999_971.555973, 200_000_000.0, 50_000_000.0))
     starting = {n: v for n, v, _ in LEDGER}
     moved = sum(starting[a] for a in PRUNED)
     import math
@@ -173,13 +180,13 @@ def main():
 
     print("\n-- explicit overrides")
     db2 = make_db()
-    code, log = run(db2, "--execute", "--prune-also", "stranger-test-win")
+    code, log = run(db2, "--execute", "--prune-also", "unknown-node-xyz")
     check("--prune-also sweeps an unclassified account",
-          balances(db2)["stranger-test-win"] == 0
-          and "stranger-test-win" in {t["account_id"] for t in log["transfers"]})
+          balances(db2)["unknown-node-xyz"] == 0
+          and "unknown-node-xyz" in {t["account_id"] for t in log["transfers"]})
     check("and the reason says why it was included",
           any(t["reason"] == "pruned by --prune-also"
-              for t in log["transfers"] if t["account_id"] == "stranger-test-win"))
+              for t in log["transfers"] if t["account_id"] == "unknown-node-xyz"))
     db3 = make_db()
     code, log = run(db3, "--execute", "--keep-also", "probe-only")
     check("--keep-also protects a default prune target",

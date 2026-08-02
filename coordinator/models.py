@@ -564,6 +564,22 @@ def get_hold(request_id):
     return dict(row) if row else None
 
 
+def escrow_state():
+    """(escrow balance, sum of holds still in state 'held').
+
+    These two must be equal. __escrow__ is a staging area for in-flight payments, never a
+    destination, so every NRN in it should be backed by a live hold -- and when nothing is in
+    flight, it should be exactly 0. The live ledger held 0.056001 NRN against zero live holds
+    before ledger.settle() started refunding what it could not pay out.
+    """
+    with _db() as c:
+        held = c.execute(
+            "SELECT COALESCE(SUM(amount),0) AS s FROM holds WHERE status='held'").fetchone()["s"]
+        row = c.execute("SELECT balance FROM ledger WHERE node_id=?",
+                        (config.ESCROW_LEDGER_ID,)).fetchone()
+    return (row["balance"] if row else 0.0), held
+
+
 def mark_hold_settled(request_id):
     with _db() as c:
         c.execute("UPDATE holds SET status='settled' WHERE request_id=?", (request_id,))

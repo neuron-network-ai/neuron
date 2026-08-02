@@ -2091,6 +2091,177 @@ lazily-imported backend would otherwise ship an exe that silently never binds.
 
 ---
 
+## Session 33 (2026-08-02) — the payout work committed, and a prune script that refused to run
+
+### Committed and pushed
+`fe105ab` (gitignore: blockchain prep + npm toolchain stay local) and `dd7f4f3` (the whole
+payout-address feature: 14 files, 1,234 insertions) are on
+`origin/feature/auto-model-tiering`. Nothing from `blockchain/` or `neuronscript_*` went with
+them — both are gitignored and the staged file list was checked against them before each
+commit. No attribution trailers; author is the founder's own noreply identity.
+
+### `coordinator/prune_test_accounts.py`
+Returns development balances to `__ecosystem__` so they cannot become real transferable tokens
+on-chain (`blockchain/MIGRATION_PLAN.md` blocker 2). Dry run by default; `--execute` applies;
+`--backup` copies the DB first; every transfer is logged to `prune_log.json` with a timestamp
+and the rule that selected it.
+
+`__ecosystem__` is not an arbitrary destination — **every** prune target is a ~25 NRN faucet
+grant, and the faucet is funded from the 150M ecosystem bucket, so this returns each one to the
+bucket it was drawn from. Node earnings came from `__emission_pool__` instead, which is exactly
+why node_a/b/c are kept rather than swept along.
+
+Two design choices worth keeping:
+
+**Nothing unnamed is ever swept.** An account matching no rule is KEPT and reported as
+unclassified, because a balance nobody classified is a decision, not a default. On the live
+snapshot that is **14 accounts** — 10 with zero balance (`nat-probe`, `audit-verify-test`,
+`node-a-local`, the three superseded `agent-optinovate-*` ids…) and **4 that hold NRN and need
+your call**:
+
+    agent-optinovate    2.025002      node-b-optiplex     0.187746
+    stranger-test-win   0.208607      node-c-pavilion     0.187746
+
+All four did real compute on real hardware — `node-b-optiplex`/`node-c-pavilion` are the
+OptiPlex and Pavilion under older ids, so by the same logic that keeps node_a/b/c they arguably
+belong on the keep list. `--prune-also` / `--keep-also` decide it without a code change.
+
+**The supply check is stricter than a tolerance.** Crediting `__ecosystem__` once per account
+(`balance = balance + x`) drifted the total by **3e-8**: each addition into a ~1.5e8 balance
+rounds to the nearest double, and doubles are ~3e-8 apart there. Eight of them lost real
+precision — invisible under the coordinator's own 1e-6 tolerance, which is how an invariant
+starts sliding. Now the amounts are summed in `Decimal` and written once, and the check is that
+drift is within **one ulp of the destination balance** — the single unavoidable rounding of one
+float addition. On the live snapshot the rehearsal drifted 3e-15.
+
+`coordinator/test_prune_test_accounts.py` **37**: the dry run is byte-for-byte non-mutating (not
+merely "intended to be"), a mid-run failure rolls back completely with no partial prune,
+`node_a` is not caught by the `node_a-cli-` prefix, a broken invariant or a non-zero escrow is
+refused, and the run is idempotent.
+
+### The refusal found a real bug: `__escrow__` has leaked
+
+The dry run against a copy of the live backup **refused to execute**: `__escrow__` holds
+**0.056001 NRN** while the `holds` table has **zero rows in state `held`** — all 13 are
+`settled` or `released`. Escrow is bookkeeping for in-flight payments and must be 0 when nothing
+is in flight, so that NRN is stranded, not reserved.
+
+`coordinator/ledger.py::settle()` moves everything out of escrow in three transfers — node
+shares, the fee, the refund — but the node shares are inside `if total_le > 0`. When **no**
+planned node is eligible at settlement time, `total_le` is 0, the whole `pool`
+(90% of the charge) is never transferred **and never refunded**: it stays in escrow forever.
+The arithmetic fits — wallet `w_d35c84dd…` spent 0.705 NRN, so its pool was ~0.6345, and the
+three nodes that served it hold 0.584099 between them; the ~0.05 gap is the same order as the
+stranded amount. Per-request payout records aren't stored, so that is a strong hypothesis
+rather than a proven attribution, and the smaller per-settlement share-rounding residue is a
+second, minor contributor.
+
+**This blocks the prune on the live ledger** and wants its own fix — a money-path change
+deserves its own tests, not a bolt-on here. Suggested: sweep any post-settlement remainder back
+to the paying wallet as part of the refund, and assert escrow returns to 0 after every settle.
+
+### Rehearsed, not run
+`--execute` has **not** been run against anything live. The live DB was never opened for
+writing: everything above was a copy in a scratch directory, and the copy was only executed
+against after simulating a correctly-drained escrow (returning the 0.056001 to the paying
+wallet — what a fixed `settle()` would have done). That rehearsal applied 8 transfers across the
+real 31-account shape, held the invariant, and brought `__ecosystem__` to 149,999,999.322001 —
+0.678 NRN short of its 150M allocation, which is faucet NRN these identities genuinely **spent**
+on inference and is now node earnings, correctly staying with the nodes.
+
+`prune_test_accounts.py` and its test were left uncommitted here — committed in Session 34,
+along with the escrow fix this session's refusal uncovered.
+
+---
+
+## Session 34 (2026-08-02) — the escrow leak fixed, and the last four accounts classified
+
+### The leak
+
+`ledger.py::settle()` moves money OUT of `__escrow__` in three transfers — node shares, the
+fee, the refund. Two of them could silently fail to account for everything:
+
+1. the node payout sat inside `if total_le > 0`, so when **no** planned node was eligible the
+   entire 90% pool was neither paid nor refunded — it stayed in escrow permanently;
+2. each node's share was rounded independently, so the shares did not add up to the pool and a
+   sub-cent residue was left behind on **every single settlement**.
+
+Both are gone. The last eligible node is now paid the remainder rather than its own rounded
+share, so the shares sum to the pool exactly; and the refund is derived from what actually
+**left** escrow rather than from the amount charged:
+
+```python
+refund = round(hold_amount - paid, 6)
+```
+
+That one change makes the refund total by construction. It covers the ordinary unused-hold
+case, the whole pool when nobody was eligible, and anything a transfer failed to move — the
+money the network did not deliver goes back to whoever paid it, which is the only defensible
+destination.
+
+Deliberately scoped to this hold's own amount, never to escrow's balance: escrow is a shared
+pot, and "sweep whatever is left in escrow" would raid every request still in flight. There is
+a test for exactly that (settle one request while another is held, and check the in-flight 4.0
+is untouched).
+
+### A second bug, introduced by the first fix and caught by the tests
+
+Computing the refund in rounded decimal while escrow's balance is the result of its own chain
+of float operations means the two disagree in the 15th digit — and `models.transfer`'s
+`balance >= amount` guard then **refuses the entire refund** over a 1e-15 shortfall. A 7.77 NRN
+hold stranded 7.752. The refund is now clamped to `models.escrow_state()`'s balance, which can
+only ever shave dust because the refund is by construction no larger than this hold's own
+remainder.
+
+### Asserted, not assumed
+
+`settle()` ends by checking `models.escrow_state()`: escrow's balance against the sum of holds
+still in state `held`. Not "escrow == 0" — escrow legitimately holds every in-flight request,
+and this network runs concurrent requests by design, so zero is only the idle case of the real
+invariant. A mismatch logs at ERROR with the request id and the arithmetic; it does not raise,
+because the transfers have already committed and turning a bookkeeping discrepancy into a 500
+on a request that succeeded would be worse than reporting it.
+
+`coordinator/test_escrow_conservation.py` **40**: normal, one node ineligible, **no** node
+eligible, empty plan, plan nodes that no longer exist, six splits that do not divide evenly,
+25 consecutive settlements (where a per-settlement residue would only show up in the
+accumulation), a failing payout transfer, and the concurrency case. Verified the suite fails
+against the old `settle()` before confirming it passes against the new one — 16 failures, in
+every case that was never previously exercised. `test_wallet_settlement.py` (76) still green:
+it checked escrow drains on the happy path, which is exactly why neither leak was visible.
+
+One honest note: a hold→settle round trip leaves ~1e-15 of float residue in escrow, because
+`balance = balance - amount` cannot exactly undo `balance = balance + amount` on a REAL column.
+That is rounding, not stranded NRN — eight orders of magnitude below the 1e-6 the supply
+invariant tolerates — and the tests assert against a 1e-9 dust threshold rather than pretending
+exact zero is achievable.
+
+### The four unclassified accounts, decided
+- **`node-b-optiplex`, `node-c-pavilion` → keep.** They are the OptiPlex and the Pavilion under
+  earlier node ids — the same machines as `node_b`/`node_c`, so the same rule applies.
+- **`stranger-test-win` → prune.** A rehearsal of the stranger join path on the founder's own
+  Windows box; never an outside person.
+- **`agent-optinovate` → prune.** A dev install of the packaged agent.
+
+Each prune target now carries its own reason into `prune_log.json` rather than sharing one
+generic string — the log is an audit trail, and "test identity" would not tell anyone later why
+a particular balance moved. The live snapshot now classifies **10 to prune (201.499609 NRN), 11
+to keep, and 10 unclassified — all of which hold exactly 0.000000**, so nothing is left
+undecided that has any money in it.
+
+### Still blocking the live prune
+The fix stops **new** leaks. It does not reconcile the **0.056001 NRN already stranded** in
+`__escrow__` on the live ledger, so `prune_test_accounts.py` still refuses to execute there —
+correctly. That stranded amount belongs to `w_d35c84dd…`, which is itself a prune target, so it
+lands in `__ecosystem__` either way; it just needs a deliberate one-time reconciliation rather
+than being folded into a script whose entire safety argument is that it never touches anything
+unnamed.
+
+`--execute` has still never been run against anything live, and the live database has never been
+opened for writing.
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load

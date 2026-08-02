@@ -54,10 +54,24 @@ ESCROW = "__escrow__"
 GENESIS = {"__emission_pool__", "__founder__", "__ecosystem__", "__liquidity__", "__escrow__"}
 
 # Real work on real hardware, and fees actually earned. These keep their NRN.
-KEEP = {"node_a", "node_b", "node_c", "__coordinator__"}
+# node-b-optiplex / node-c-pavilion are the OptiPlex and the Pavilion under earlier node ids --
+# the same two machines as node_b / node_c, so the same rule applies to them (founder decision,
+# 2026-08-02).
+KEEP = {"node_a", "node_b", "node_c", "__coordinator__",
+        "node-b-optiplex", "node-c-pavilion"}
 
-# Test identities created during security and wallet development.
-PRUNE_NAMES = {"attacker-demo-1", "attacker-demo-2", "probe-only", "live-verify-wallet"}
+# Test identities, each with the reason it is one -- this ends up in the audit log, where
+# "test identity" alone would not tell anyone later why a balance moved.
+PRUNE_NAMES = {
+    "attacker-demo-1": "adversarial test identity (security development)",
+    "attacker-demo-2": "adversarial test identity (security development)",
+    "probe-only": "probe identity used to exercise the join path",
+    "live-verify-wallet": "wallet created to verify settlement against the live coordinator",
+    # Both of these ran on the founder's own Windows box. Real compute, but ours, and created
+    # to test the system rather than to use it (founder decision, 2026-08-02).
+    "stranger-test-win": "rehearsal of the stranger join path -- never an outside person",
+    "agent-optinovate": "dev install of the packaged agent",
+}
 PRUNE_PREFIXES = (
     ("node_a-cli-", "CLI test wallet from wallet-settlement development"),
     ("w_", "faucet-funded test wallet (OAuth wallet development)"),
@@ -76,7 +90,7 @@ def classify(account_id, extra_prune=(), extra_keep=()):
     if account_id in KEEP:
         return "keep", "real compute on real hardware, or fees actually earned"
     if account_id in PRUNE_NAMES:
-        return "prune", "test identity created during security development"
+        return "prune", PRUNE_NAMES[account_id]
     for prefix, why in PRUNE_PREFIXES:
         if account_id.startswith(prefix):
             return "prune", why
