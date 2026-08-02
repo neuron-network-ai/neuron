@@ -25,6 +25,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 
 import psutil
 import requests
@@ -231,11 +232,29 @@ class Agent:
         """
         return bool(self.cfg.get("behind_nat", True))
 
+    def new_node_id(self):
+        """A node id that will not collide with somebody else's machine.
+
+        This used to be exactly `agent-{hostname}`, which collides deterministically: Windows
+        ships defaults like DESKTOP-8F3K2P1, plenty of people run "laptop", and one person
+        reinstalling produces the same id as before. That matters because the coordinator
+        REFUSES a secret-less registration of an id that is already `trusted` or `verified`
+        (the hijack guard, and rightly so) -- so the second machine to use a given hostname, or
+        the same machine after losing its config, gets a 409 forever and can never join. Seen
+        live as an endless "this node_id is registered with a different token" retry loop.
+        The random suffix is generated once and persisted, so the id is stable for this install
+        but unique across installs.
+        """
+        return f"agent-{socket.gethostname().lower()}-{uuid.uuid4().hex[:6]}"
+
     def register(self):
         self.ensure_placement()
         ip = detect_tailscale_ip()
+        if not self.cfg.get("node_id"):
+            self.cfg["node_id"] = self.new_node_id()
+            self._save()
         body = {
-            "node_id": self.cfg.get("node_id") or f"agent-{socket.gethostname().lower()}",
+            "node_id": self.cfg["node_id"],
             "tailscale_ip": ip,
             "port": self.cfg.get("port", 50999),
             "layer_start": self.cfg["layer_start"],
@@ -387,6 +406,20 @@ class Agent:
                 # "coordinator unreachable" sends everyone hunting a network fault that does
                 # not exist, so name it and say what actually fixes it.
                 status = getattr(getattr(e, "response", None), "status_code", None)
+                if status == 409 and not self.cfg.get("node_token"):
+                    # We hold no token for this id, so we cannot prove we own it and never
+                    # will: the coordinator's hijack guard will refuse this registration on
+                    # every future attempt too. Retrying is an infinite loop. This is the
+                    # "somebody else already has my hostname" / "I lost my config" case, and
+                    # the honest answer is that we are a NEW node -- so take a new identity
+                    # rather than sitting there forever claiming one we cannot open.
+                    old = self.cfg.get("node_id")
+                    self.cfg["node_id"] = self.new_node_id()
+                    self._save()
+                    log.warning("node id '%s' is already claimed by another machine and we "
+                                "hold no token for it — joining as '%s' instead",
+                                old, self.cfg["node_id"])
+                    continue
                 if status == 409:
                     detail = ("this node_id is registered with a different token — another "
                               "copy of the agent probably re-registered it. Restart this agent "
