@@ -190,10 +190,13 @@ def main():
     check("and stored checksummed", out["payout_address"] == alice.address)
     expect_400("the zero address is refused",
                lambda: payout.normalize_address("0x" + "0" * 40), "zero address")
-    bad = alice.address[:10].lower() + alice.address[10:]        # break EIP-55, keep the hex
-    if bad != alice.address:
-        expect_400("a mistyped mixed-case address fails its checksum",
-                   lambda: payout.normalize_address(bad), "EIP-55")
+    # A fixed address from the EIP-55 spec, not a generated one: with a random key this case
+    # silently skipped itself whenever the leading bytes happened to contain no uppercase,
+    # so the suite reported 30 or 31 depending on the draw.
+    eip55 = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"
+    check("a correctly checksummed address passes", payout.normalize_address(eip55) == eip55)
+    expect_400("a mistyped mixed-case address fails its checksum",
+               lambda: payout.normalize_address(eip55[:10].lower() + eip55[10:]), "EIP-55")
 
     print("\n-- privacy")
     pub = models.list_nodes()
