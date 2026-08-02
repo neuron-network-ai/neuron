@@ -1766,10 +1766,58 @@ Installed 0.16.0 on the founder's PC: registers, fetches placement, downloads it
 online and heartbeats. The tray "Error" that prompted this audit was a transient retry state
 between coordinator polls, not a fault — but chasing it is what surfaced all four bugs.
 
-**Not yet done:** the founder reused the July config, so the install exercised an existing
-identity (`agent-optinovate`, layers 19-27, already verified) rather than the new-user path. A
-genuine first-run test — move `%LOCALAPPDATA%\NEURON\config.json` aside, start, land on the 0-9
-gap, watch the auto-verifier promote within 60 s — is still outstanding.
+### Two more found by attempting the clean first-run test — both fatal, both silent
+
+**5. A hostname collision locked a machine out of the network permanently.** `node_id` was
+exactly `agent-{hostname}`, which collides deterministically: Windows ships defaults like
+DESKTOP-8F3K2P1, machines get called "laptop", and the same machine reinstalling produces the id
+it had before. The coordinator refuses a secret-less registration of an id already
+trusted/verified (the hijack guard — correct), so a collision meant a 409 on **every** attempt,
+forever, advising "restart to pick up the current token" when no copy of the agent held that
+token. Anyone who lost their config, reinstalled without uninstalling, or shared a hostname with
+an existing node could never join. Generated ids now carry a random suffix
+(`agent-<host>-<6 hex>`), persisted once; and a 409 while holding **no** token takes a fresh
+identity instead of looping, while a 409 while holding one still means "another copy
+re-registered me" and must not rotate. `agent/test_node_id_collision.py` (6).
+
+**6. A re-placed node served another segment's weights.** `ensure_slice()` skipped the download
+whenever *a* `model.safetensors` existed, never checking which layers were in it. Delete
+config.json and re-register and the coordinator hands out whichever gap needs filling — not the
+range you had — so the node loaded the old segment's weights while claiming the new one. Nothing
+detects that locally: it answers confidently with wrong activations, fails proof-of-compute, is
+flagged after three strikes, and nothing anywhere explains why. The assigned range is now
+compared against the layer indices read from the **safetensors header on disk**, so the bytes
+decide rather than a config claim. No marker file and no forced re-download for existing slices —
+the header was always authoritative. `agent/test_slice_reuse.py` (4).
+
+Both were found by following this file's own "move config.json aside" instruction, which walked
+straight into the first and would have hit the second next: this machine's state dir held a 19-27
+slice while the clean test places on 0-9.
+
+### The clean first-run test — PASSED
+
+Run from source with the fixes, fresh config, nothing pre-seeded but the slice:
+
+```
+10:54:50  auto-placed on layers 0-9 (fill-gap: chain is missing layers 0-9)
+10:54:51  registered as agent-optinovate-447583 [probationary]     <- unique id, no collision
+10:54:51  slice already present — skipping download                <- header validated as 0-9
+10:54:56  node server listening on port 50999
+10:54:57  relay tunnel started — reachable via 150.230.22.250:9005
+10:55:13  agent-optinovate-447583 VERIFIED — max_err 0.00e+00, 300ms
+```
+
+**22 seconds from registration to earning-eligible, no human involved.** Network 28/28, healthy.
+That is the whole stranger onboarding path working end to end for the first time.
+
+### Installer
+Final artifact: **`NEURON-Setup-0.16.3.exe`** (211 MB). 0.16.0/.1/.2 were superseded during the
+audit and deleted so the wrong one cannot ship. Verified in the built exe: `--headless` works,
+the bundled chat.html carries the footer fix, and both new agent fixes are in the frozen source.
+
+**Still not done:** the packaged .exe has not itself been run through a clean first-run (the flow
+above was proven from source with identical code). And no actual outside person has installed
+anything — the repo is still private, so `STRANGER_INSTALL.md` points at a 404.
 
 ---
 
