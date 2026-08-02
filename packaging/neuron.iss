@@ -8,7 +8,7 @@
 ; and on uninstall deregisters the node + deletes its slice/config.
 
 #define AppName "NEURON"
-#define AppVersion "0.15.0"
+#define AppVersion "0.16.0"
 #define AppExe "neuron-agent.exe"
 
 [Setup]
@@ -16,7 +16,7 @@ AppId={{A7E3C9F1-2B4D-4E6A-8C1F-9D0E5B7A3C21}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher=NEURON Labs
-AppSupportURL=https://github.com/raman011sharma-code/neuron-network
+AppSupportURL=https://github.com/raman011sharma-code/neuron
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
@@ -34,7 +34,11 @@ ArchitecturesInstallIn64BitMode=x64compatible
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Shortcuts:"
-Name: "startup"; Description: "Start NEURON automatically when I sign in"; GroupDescription: "Startup:"; Flags: unchecked
+; Checked by DEFAULT. A node that does not come back after a reboot leaves the network on its
+; first power cycle and never returns, and the earn-rate the installer promised quietly becomes
+; zero ([P21]). A stranger will not go hunting for this checkbox, so the safe default is on;
+; unticking it is still one click for anyone who wants to start it by hand.
+Name: "startup"; Description: "Start NEURON automatically when I sign in"; GroupDescription: "Startup:"
 
 [Files]
 ; the whole PyInstaller onedir output (neuron-agent.exe + _internal\)
