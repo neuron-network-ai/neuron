@@ -1,7 +1,7 @@
-# NEURON v0.1.0 — first public release
+# NEURON v0.16.4
 
-**Early alpha.** A small network (a handful of machines) running a 1.5B model. It works, and it
-is honest about what it is.
+**Early alpha.** A small network (a handful of machines). It works, and it is honest about
+what it is. Download **NEURON-Setup-0.16.4.exe** below.
 
 ## What NEURON is
 

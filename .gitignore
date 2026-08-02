@@ -75,6 +75,9 @@ neuronscript.py
 neuronscript_simd.c
 neuronscript_tiler.c
 neuronscript_bitmask.c
+neuronscript_cube.c
+cube_check.py
+cube_corr_audit.py
 neuronscript*.o
 neuronscript*.obj
 neuronscript*.dll
@@ -82,4 +85,6 @@ neuronscript*.so
 
 # built kernel artifacts
 ns.dll
+ns_*.dll
 libns.so
+libns*.so

@@ -8,8 +8,10 @@ driver -- node_a.py, neuron_driver.py -- talks to it unchanged.
 
 Usage (on a Linux node with an AVX2 CPU):
     gcc -O3 -mavx2 -march=native -shared -fPIC neuronscript_simd.c -o libns.so
-    NEURON_NS_LIB=./libns.so python node_ns.py --slice-dir ./model_slice \
+    NEURON_NS_LIB=./libns.so python node_ns.py \
         --layer-start 10 --layer-end 18 --total-layers 28 --port 51099
+
+    --slice-dir DIR  load from a byte-range slice instead of the HF cache
 
     --engine torch   run the identical server on PyTorch, for an A/B on one machine
 
@@ -56,9 +58,20 @@ class NSNodeServer:
         self._batchers = {}
         self._batcher_lock = threading.Lock()
 
-        print(f"[ns] loading slice {slice_dir} (layers {layer_start}-{layer_end}) ...")
         t0 = time.time()
-        self.model = load_slice_model(slice_dir)
+        if slice_dir:
+            print(f"[ns] loading slice {slice_dir} (layers {layer_start}-{layer_end}) ...")
+            self.model = load_slice_model(slice_dir)
+        else:
+            # No slice on disk: load the same layers straight from the HF cache, exactly the
+            # way node_b/node_c do. This is what makes an engine A/B honest -- both engines
+            # then run byte-identical weights, so any output difference is the kernel's.
+            # The last stage owns the final norm; a middle stage must not apply it.
+            is_last = (layer_end == total_layers - 1)
+            print(f"[ns] loading layers {layer_start}-{layer_end} from the HF cache "
+                  f"(norm={is_last}) ...")
+            _tok, self.model, _n = common.load_model_shard(
+                layer_start, layer_end + 1, norm=is_last)
         if engine == "ns":
             lib = ns_engine.load()
             if lib is None:
@@ -189,7 +202,9 @@ class NSNodeServer:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--slice-dir", required=True)
+    ap.add_argument("--slice-dir", default=None,
+                    help="load this node's layers from a byte-range slice. Omit to load the "
+                         "same layers from the HF cache instead (what node_b/node_c do).")
     ap.add_argument("--layer-start", type=int, required=True)
     ap.add_argument("--layer-end", type=int, required=True)
     ap.add_argument("--total-layers", type=int, default=28)
