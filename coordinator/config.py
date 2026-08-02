@@ -68,7 +68,7 @@ COORDINATOR_LEDGER_ID = "__coordinator__"
 # `neuronnet.duckdns.org` rather than move off it, precisely so this never has to change.
 PUBLIC_URL = os.environ.get("NEURON_PUBLIC_URL", "https://neuronnet.duckdns.org")
 
-AGENT_VERSION = os.environ.get("NEURON_AGENT_VERSION", "0.17.0")
+AGENT_VERSION = os.environ.get("NEURON_AGENT_VERSION", "0.17.1")
 # Where a node fetches that version, and the hash it must match before anything is run.
 # The download is NOT served from here: this VM has 1 GB of RAM and the installer is ~200 MB,
 # so the coordinator only advertises metadata and GitHub Releases does the bandwidth.

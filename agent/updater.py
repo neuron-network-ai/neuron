@@ -40,7 +40,7 @@ import time
 
 import requests
 
-LOCAL_VERSION = "0.17.0"          # bump together with packaging/neuron.iss
+LOCAL_VERSION = "0.17.1"          # bump together with packaging/neuron.iss
 CHECK_SECONDS = 24 * 3600
 DOWNLOAD_TIMEOUT = 600
 HERE = os.path.dirname(os.path.abspath(__file__))

@@ -5,7 +5,7 @@ joins a network of ordinary computers that together run AI models too big for an
 
 ## Download
 
-**[⬇ NEURON-Setup-0.17.0.exe](https://github.com/neuron-network-ai/neuron/releases/download/v0.17.0/NEURON-Setup-0.17.0.exe)** (217 MB)
+**[⬇ NEURON-Setup-0.17.1.exe](https://github.com/neuron-network-ai/neuron/releases/download/v0.17.1/NEURON-Setup-0.17.1.exe)** (217 MB)
 
 Windows installer — no technical knowledge needed. Double-click, then open
 **http://localhost:8080** and sign in with Google or GitHub.
@@ -130,7 +130,7 @@ split across the chain in proportion to layers held — a node holding `L` of 28
 **Session 36 complete.**
 
 - Network **live** at [neuronnet.duckdns.org](https://neuronnet.duckdns.org).
-- Installer **0.17.0 released** — the local chat UI works, and this is the last build anyone
+- Installer **0.17.1 released** — the local chat UI works, and this is the last build anyone
   has to install by hand.
 - **Auto-update working**: the app checks daily, verifies a published SHA-256 before running
   anything, and never updates mid-request. Fixes reach volunteers without asking them.

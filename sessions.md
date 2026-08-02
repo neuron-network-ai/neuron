@@ -2499,12 +2499,44 @@ that the day it does, it is survivable.
 None of those three are built yet: the coordinator still opens `sqlite3.connect` directly
 (`models.py`), there is one VM in one region, and there is no Cloudflare anything.
 
-### Not done — and it gates the release
-The agent half of this ships **inside the .exe**, and `NEURON-Setup-0.17.0.exe` was built
-*before* this change. The installer on disk does **not** contain `coordinator_url` adoption.
-Since 0.17.0 has not been published to GitHub yet, nobody has that build — so the choice is a
-rebuild in place (the SHA-256 in `RELEASE_NOTES_v0.17.0.md` would change) or a bump to 0.17.1.
-Founder's call; nothing was rebuilt unasked.
+### Shipped as 0.17.1
+The agent half ships **inside the .exe**, and `NEURON-Setup-0.17.0.exe` was built before this
+change — so 0.17.0 cannot follow a move. **0.17.0 was already published** (I had assumed it
+was not; corrected on the founder's word and confirmed against the GitHub API — tag `v0.17.0`,
+public, published 10:59Z). Its release notes were therefore restored rather than repurposed,
+and 0.17.1 got its own.
+
+    dist/installer/NEURON-Setup-0.17.1.exe    216.7 MB
+    sha256  befeddd3c83dbe00cd987310c47e15fe8a7035ed32fe831139ca93c92c87ab71
+
+Four version strings had to move, not the three in the brief: `neuron.iss`,
+`config.AGENT_VERSION`, and **`updater.LOCAL_VERSION`**. That last one is what a running agent
+compares against; left at 0.17.0 while the coordinator advertised 0.17.1, every fresh 0.17.1
+install would have decided it was out of date and tried to update to itself, daily, forever.
+The same drift that had `AGENT_VERSION` sitting at 0.3.0 for fourteen versions.
+
+**Step 7 verified behaviourally, after a bogus first attempt.** Grepping the .exe for
+`adopt_coordinator_url` found nothing and proved nothing — PyInstaller compresses module
+bytecode into the PYZ, so no Python identifier is searchable there. The real check was to run
+the built binary against two throwaway coordinators on localhost with `LOCALAPPDATA`
+redirected: it registered with A, was told the address is now B, probed `B/node/<id>/ping`,
+wrote `coordinator` and `coordinator_previous` to config.json, and sent its **next** call
+(slice-info) to B. Whole path, in the artifact that ships, without touching production —
+unlike the 0.17.0 smoke test, which registered a real node.
+
+### Live now
+`/agent/version` returns 0.17.1 with the v0.17.1 download URL. `sha256` is still empty, so **no
+node will install anything** — that is rule 1 of the updater working, not a gap.
+
+### The remaining steps need a browser
+`gh` is not installed, so the upload could not be done from here:
+1. publish `dist/installer/NEURON-Setup-0.17.1.exe` as a GitHub release tagged **v0.17.1**,
+   notes from `RELEASE_NOTES_v0.17.1.md`;
+2. set `NEURON_AGENT_SHA256=befeddd3…ab71` in the VM's systemd unit and restart.
+
+After step 2, **0.17.0 installs upgrade themselves to 0.17.1** — 0.17.0 already contains the
+updater, so the auto-update path gets its first real use delivering the fix that makes a
+coordinator move survivable.
 
 ---
 
