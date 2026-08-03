@@ -3401,14 +3401,23 @@ Three decisions the brief did not specify:
 - **White, not transparent.** The brief allowed either. A transparent mark inherits whatever
   GitHub puts behind it, and dark green on a dark theme is the failure case; white is
   predictable on both.
-- **Symmetric Y, not the site header's directional driver → hub → peers.** Direction is legible
-  at 200px in a page header and gone at 40px in a repo list. The composition is also centred on
-  its own bounding box rather than on the hub, because three satellites in a Y are not symmetric
-  about their centre point and the mark otherwise sits low in the square.
+- **~~Symmetric Y, not the site header's directional driver → hub → peers.~~ Reversed on the
+  founder's call, and they were right.** The first version used a symmetric Y because it reads
+  better at 40px. It was more legible and it was the wrong call: `logo.svg`, `favicon.svg` and
+  the inline header mark all carry the driver → hub → two-peers arrangement, so a fourth,
+  different shape is not a variant of the logo, it is a second logo. An avatar that does not
+  match the site costs more than a small legibility gain buys.
 
-Checked at 40, 64, 100 and 160px, square **and** under a circular crop, since GitHub applies one
-on some surfaces. Furthest content sits at 77% of the radius, so nothing clips. The contact sheet
-used for that check was deleted rather than committed.
+  Redrawn from the hero SVG's own 48×48 coordinates so the four marks are one drawing. The
+  composition also means something and the symmetric version threw that away: the solid left
+  node is the driver — the only machine that ever sees readable text — the bright hub is largest
+  because it carries the most, and the two outlined circles are peers further down the chain.
+
+The composition is centred on its bounding box rather than on the hub, and auto-scaled so the
+furthest content lands at 78% of the radius. Checked at 40, 64, 100 and 160px, square **and**
+under a circular crop, since GitHub rounds avatars on some surfaces. At 40px the outlined peers
+reduce to small rings — tighter than the symmetric version, still recognisable, and the honest
+price of consistency. The contact sheet used for the check was deleted rather than committed.
 
 ---
 
