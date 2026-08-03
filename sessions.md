@@ -3666,8 +3666,8 @@ gitignored until arXiv submission, alongside `TOKENOMICS.md` and `blockchain/`. 
 
 `research/sessions_research.md` (local, gitignored) now holds the theory content; `sessions.md`
 keeps build history, technical decisions and infrastructure. Session 49 was the only entry that
-qualified — 47 (Android guide) and 48 (licence audit) are build history, and a search for ENSP
-found nothing anywhere in the log.
+qualified — 47 (Android guide) and 48 (licence audit) are build history, and the other research
+threads named in the brief appear nowhere in the log.
 
 Three things worth recording about how it was done:
 
@@ -3680,11 +3680,17 @@ in a build log. The theory, the numbers and the analysis moved out.
 **`research/` was already gitignored** (`.gitignore:56`), so step 3 of the brief needed no
 change. Verified with `git check-ignore -v` rather than by reading the file.
 
-**The leak check nearly produced a false alarm.** Grepping for `amb` matched "**amb**er" from
-the landing-page work, and `EMA` matched "r**ema**ins", "sch**ema**" and "**ema**il" — 19 hits
-that look like a leak until you ask for word boundaries, at which point there are zero. Both
-sets of false positives are legitimate build content that would have been wrongly moved. A
-case-insensitive substring grep is a hypothesis, not a finding.
+**The leak check nearly produced a false alarm, twice.** Grepping for `amb` matched
+"**amb**er" from the landing-page work, and one three-letter term matched inside "r**ema**ins",
+"sch**ema**" and "**ema**il" — 19 hits that look like a leak until you ask for word boundaries,
+at which point there are zero. Both sets are ordinary build content a careless sweep would have
+moved. A case-insensitive substring grep is a hypothesis, not a finding.
+
+**And the check caught the author.** The first draft of this very entry named a research term
+and an unpublished hypothesis in order to say they were *absent* — which would have published
+the existence of both in the public log. Verifying against the pushed file on GitHub rather
+than the local one is what surfaced it. Writing "we checked for X and found none" is itself a
+disclosure of X.
 
 ---
 
