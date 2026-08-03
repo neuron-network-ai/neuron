@@ -3586,8 +3586,46 @@ same thing as a standard "Open source licences" screen.
 **The bigger exposure is model weights, not code.** Qwen2.5 is Apache 2.0 and clean. Llama-family
 weights are *not* open source — the Llama Community Licence carries an acceptable-use policy, a
 monthly-active-user ceiling and naming requirements. Session 25 benchmarked Llama 3.3 70B, which
-is fine; *serving* one to users would place real obligations on the network. Recorded in the
-notices file so the decision is deliberate if it is ever taken.
+is fine; *serving* one to users would place real obligations on the network.
+
+### The weights hole was real, and it was an environment variable
+Documenting that in the notices file was not a solution. `coordinator/model_registry.py` read
+**`NEURON_EXTRA_MODELS`** — a JSON env var — and added whatever it found to the catalog with no
+licence field at all. The network could have begun serving Llama weights with no code change, no
+review and no record of the decision. That is precisely the "config change" the previous entry
+warned about, sitting in the repo.
+
+`license_refusal()` now gates it: every model must declare a licence, and anything outside
+`PERMITTED_LICENSES` is **skipped and logged loudly** rather than degraded to `ready:false` —
+a restricted model sitting in the catalog looking like a deployment problem is the failure mode
+to avoid. Absent and unrecognised licences are refused on the same path as restricted ones,
+because *"we did not check"* must not look like *"we checked and it is fine"*.
+
+**The catch worth having found:** the gate is not only about Llama. **Qwen2.5 is Apache 2.0 at
+0.5B/1.5B/7B/14B/32B and is NOT at 3B and 72B** — those carry the separate Qwen and
+Qwen-Research licences. The obvious growth move for this project is "same family, bigger model",
+which reads as a size change and is actually a licence change. `test_model_license_gate.py`
+pins that case by name. 9 tests, all passing; `test_model_tiers` (13) and `test_serving_model`
+(6) still green.
+
+One test bug worth recording because it produced a *passing-looking* helper:
+`importlib.reload` mutates the single module object in place, so restoring the environment in
+`finally` and reloading wiped the very catalog the caller was about to assert on. The helper
+returns a snapshot now.
+
+### pystray: reviewed, and deliberately left alone
+The ctypes `Shell_NotifyIcon` rewrite was considered and **rejected for now**. `agent/tray.py`
+uses pystray's callable menu labels, `enabled`/`visible` predicates, radio-checked submenus and
+separators — reproducing that on raw Win32 is ~400 lines of new, untested, platform-specific
+code in the agent's most visible component. It would also only cover Windows: on Linux/macOS
+NEURON does not redistribute pystray at all (it is commented out of `requirements.txt` and the
+user installs it themselves), so **no LGPL obligation exists there in the first place**.
+
+Trading a documented, satisfied obligation for a risky rewrite is a bad trade with the first
+stranger still pending. The obligation is met: LGPL-3.0 §4 wants the user to be able to relink
+against a modified library, and NEURON publishes the entire application as source under Apache
+2.0, with pystray's own LGPL text shipped in the bundle. Revisit when the ggml/Android rebuild
+touches packaging anyway — that is when the tray gets rewritten for other reasons.
 
 ---
 

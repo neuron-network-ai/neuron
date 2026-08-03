@@ -99,12 +99,25 @@ copyright is **separate** from the `llama-cpp-python` wrapper that vendors them:
 ## Model weights are licensed separately
 
 Model weights are **not** covered by any licence above, and are not redistributed by the
-installer — each node downloads its own slice from the upstream repository.
+installer — each node downloads its own slice from the upstream repository. But *serving*
+weights is distribution to end users, so a restricted licence binds the whole network
+rather than one machine.
 
-- **Qwen2.5** (the served model family) — Apache 2.0. No usage restrictions.
+**This is enforced in code, not by convention.** `coordinator/model_registry.py` requires
+every model to declare a licence and refuses any that is not in `PERMITTED_LICENSES`.
+An absent or unrecognised licence is refused exactly like a restricted one, because
+"we did not check" must not look like "we checked and it is fine". Before that gate,
+`NEURON_EXTRA_MODELS` was an environment variable — restricted weights could enter the
+catalog with no code change and no record. Adding one now takes a diff someone has to
+justify. Covered by `coordinator/test_model_license_gate.py`.
+
+- **Qwen2.5 at 0.5B / 1.5B / 7B / 14B / 32B** — Apache 2.0. This is what NEURON serves.
+- **Qwen2.5 at 3B and 72B** — the separate Qwen and Qwen-Research licences, *not* Apache
+  2.0. Reaching for a bigger Qwen looks like a size change and is actually a licence
+  change; the gate refuses these.
 - **Llama-family models** — the Llama Community Licence, which is *not* an open-source
-  licence: it carries an acceptable-use policy, a monthly-active-user ceiling, and naming
-  and attribution requirements. NEURON does not serve one. Adding one would place real
-  obligations on the network and needs a deliberate decision, not a config change.
+  licence: acceptable-use policy, a 700M monthly-active-user ceiling, a required "Built
+  with Llama" attribution, and a naming rule for derivatives. Refused by the gate.
+  Benchmarking one locally is fine; serving one to users is a decision with obligations.
 
 © 2026 NEURON Labs, Rotterdam
