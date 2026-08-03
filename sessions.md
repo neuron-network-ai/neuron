@@ -3032,6 +3032,60 @@ sense of the word the framing rules were never about.)
 
 ---
 
+## Session 44 (2026-08-03) — a landing page, and the CORS hole it depended on
+
+### The live stats would have shown four dashes
+Checked before writing any HTML: `/status` returned **no `Access-Control-Allow-Origin` header**
+and `main.py` had no CORS middleware at all. A browser on `github.io` fetches it, gets a 200, and
+then refuses to let the page read the body — so the whole "live network" panel would have sat at
+`—` with nothing in the UI explaining why. Worth finding by testing rather than by launching.
+
+`CORSMiddleware` added, deliberately narrow, and each choice is a real one:
+- **named origins, never `*`.** `/status` is public, but middleware is app-wide, and a wildcard
+  invites any page on the internet to use a visitor's browser as a client against endpoints that
+  are not public.
+- **`allow_credentials=False`.** With named origins it would let a page send a visitor's cookies;
+  the privileged endpoints authenticate on headers a web page cannot know, and that stays true
+  only while nothing is attached automatically.
+- **GET only.** Nothing on the landing page writes.
+
+`config.CORS_ORIGINS` (env `NEURON_CORS_ORIGINS`) defaults to the Pages origin plus localhost.
+Deployed to the VM with both files backed up first. Verified both directions, which is the part
+that matters: `Origin: https://neuron-network-ai.github.io` → `Access-Control-Allow-Origin`
+echoed back; `Origin: https://evil.example` → **no header at all**. `/agent/version` still serves
+0.18.0 with the right hash, so the restart cost nothing.
+
+### `docs/index.html`
+One file, no framework, no external request of any kind — the favicon is an inline SVG data URI
+rather than a fetch, so the page discloses nothing to a third party just by being opened. Dark
+theme, CSS grid, renders single-column on a 375px viewport with no horizontal scroll (checked,
+not assumed). Live stats every 30s.
+
+Two things the brief did not ask for and the page has anyway, because a public front door is
+exactly where this project's honesty either holds or does not:
+- **The NRN paragraph says it has no cash value**, no exchange, no sale. Every other document
+  says so; a landing page that implied earnings would contradict the README two clicks away.
+- **The health line explains an incomplete chain in words.** The panel currently shows 21/28,
+  and "21/28" means nothing to a newcomer — so when `network_healthy` is false the page says the
+  chain is incomplete and the network cannot serve a full request until it is. A failed fetch
+  says the coordinator could not be reached rather than leaving stale numbers looking current.
+
+Rendered against the real endpoint before commit: 2 nodes, 21/28, 38 requests, 25.81 NRN, amber
+dot, correct incomplete-chain text.
+
+### The URL in the brief cannot exist
+`https://neuron-network-ai.github.io` is an **organisation** site and requires a repository named
+literally `neuron-network-ai.github.io`. This repo is `neuron`, so Pages serves it at
+`https://neuron-network-ai.github.io/neuron/`. Both currently 404, and the bare root always will
+until such a repo exists. CORS is unaffected either way — an Origin is scheme + host and never a
+path — so the entry already covers the project path.
+
+**Pages is not enabled and could not be.** `gh` is not installed and the API needs auth this
+session does not have; `GET /repos/.../pages` returns 404, confirming it is off. Left for the
+founder: Settings → Pages → Source "Deploy from a branch" → `main` / `/docs`.
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load

@@ -81,6 +81,16 @@ AGENT_DOWNLOAD_URL = os.environ.get(
 # binary pushed to every volunteer's machine is the worst thing this project could ship.
 AGENT_SHA256 = os.environ.get("NEURON_AGENT_SHA256", "")
 
+# Origins allowed to read this API from a browser. The public landing page is served from
+# GitHub Pages, which is a different origin, so it needs naming here to display live numbers.
+# Comma-separated via NEURON_CORS_ORIGINS. Note an origin is scheme+host+port and never a path,
+# so the entry below covers every page on that host, project sites included.
+# Kept as an explicit list rather than "*" — see the middleware in main.py for why.
+CORS_ORIGINS = [o.strip() for o in os.environ.get(
+    "NEURON_CORS_ORIGINS",
+    "https://neuron-network-ai.github.io,http://localhost:8080,http://127.0.0.1:8080",
+).split(",") if o.strip()]
+
 # --- stranger-NAT relay (Session 12) ---------------------------------------- #
 # A node behind NAT registers with behind_nat=true; the coordinator assigns it a
 # public port on the relay from the pool and stores its endpoint as the relay's, so

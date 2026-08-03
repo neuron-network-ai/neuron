@@ -249,6 +249,29 @@ app = FastAPI(title="NEURON Coordinator", version="0.1", lifespan=lifespan)
 # Login for the whole network lives here, not on each agent (coordinator/auth.py).
 app.include_router(auth.router)
 
+# --- CORS, so the public landing page can show live network numbers --------- #
+# The GitHub Pages site is a different origin, so without this a browser fetches /status and
+# then refuses to let the page read the reply. Deliberately narrow:
+#
+#   - **named origins, never `*`.** The data on /status is already public, but this middleware
+#     applies to every route, and a wildcard invites any page on the internet to use a visitor's
+#     browser as a client against endpoints that are not.
+#   - **allow_credentials stays False.** Combined with a wildcard it is refused by browsers
+#     anyway, and combined with named origins it would let a page send a visitor's cookies. The
+#     coordinator's privileged endpoints authenticate with headers a web page has no way to know,
+#     and that stays true only while nothing is sent automatically.
+#   - **GET only.** Nothing on the landing page writes.
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=config.CORS_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET"],
+    allow_headers=["*"],
+    max_age=3600,
+)
+
 
 # --- basic per-IP rate limit (Session 16 — rough DDoS guard) ---------------- #
 import collections  # noqa: E402

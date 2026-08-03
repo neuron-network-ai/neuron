@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NEURON — distributed AI inference on ordinary machines</title>
+<meta name="description" content="NEURON splits large AI models across ordinary computers so they can run models none of them could run alone. Open source, no GPU required.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#129504;</text></svg>">
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --line:#30363d;
+    --fg:#e6edf3; --muted:#8b949e; --accent:#4a9eff; --ok:#3fb950; --warn:#d29922;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--fg);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  .wrap{max-width:820px; margin:0 auto; padding:0 20px}
+  a{color:var(--accent)}
+  h1,h2{line-height:1.25; letter-spacing:-.02em}
+  h1{font-size:clamp(2.4rem,8vw,3.6rem); margin:0 0 .2em; font-weight:700}
+  h2{font-size:1.35rem; margin:2.6em 0 .6em; font-weight:650}
+  header{padding:72px 0 8px; text-align:center}
+  .tag{color:var(--muted); font-size:clamp(1rem,3.5vw,1.2rem); margin:0 auto 2em; max-width:34ch}
+  .btn{
+    display:inline-block; background:var(--accent); color:#06121f; font-weight:650;
+    padding:15px 30px; border-radius:9px; text-decoration:none; font-size:1.06rem;
+  }
+  .btn:hover{filter:brightness(1.1)}
+  .btn.alt{background:transparent; color:var(--fg); border:1px solid var(--line); font-weight:500}
+  .sub{color:var(--muted); font-size:.85rem; margin-top:14px}
+  .sub code{font-size:.78rem; word-break:break-all; color:var(--muted)}
+
+  .stats{
+    display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px;
+    margin:14px 0 6px;
+  }
+  .stat{background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px}
+  .stat b{display:block; font-size:1.7rem; font-weight:650; font-variant-numeric:tabular-nums}
+  .stat span{color:var(--muted); font-size:.82rem}
+  .live{color:var(--muted); font-size:.82rem; text-align:right; margin:0}
+  .dot{display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--muted);
+       vertical-align:middle; margin-right:5px}
+  .dot.on{background:var(--ok)} .dot.off{background:var(--warn)}
+
+  ul{padding-left:1.15em} li{margin:.3em 0}
+  .cols{display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:18px}
+  .card h3{margin:0 0 .35em; font-size:1rem}
+  .card p{margin:0; color:var(--muted); font-size:.9rem}
+  .note{border-left:3px solid var(--line); padding-left:16px; color:var(--muted); font-size:.92rem}
+  footer{margin:72px 0 56px; padding-top:24px; border-top:1px solid var(--line);
+         color:var(--muted); font-size:.85rem; text-align:center}
+  footer a{color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>NEURON</h1>
+    <p class="tag">Distributed AI inference — run on machines like yours.</p>
+    <a class="btn" href="https://github.com/neuron-network-ai/neuron/releases/download/v0.18.0/NEURON-Setup-0.18.0.exe">Download 0.18.0 for Windows</a>
+    <p class="sub">
+      207 MB · Windows will warn it is “unrecognised” — it is not code-signed yet.<br>
+      <code>SHA-256 dd33d317f92adb2ae5da27f46ac02912ba2106a66c4f21104b27ebd7345fb1a8</code>
+    </p>
+  </header>
+
+  <h2>The network, right now</h2>
+  <div class="stats">
+    <div class="stat"><b id="s-nodes">—</b><span>nodes online</span></div>
+    <div class="stat"><b id="s-layers">—</b><span>layers covered</span></div>
+    <div class="stat"><b id="s-reqs">—</b><span>requests served</span></div>
+    <div class="stat"><b id="s-nrn">—</b><span>NRN distributed</span></div>
+  </div>
+  <p class="live"><span class="dot" id="s-dot"></span><span id="s-when">connecting…</span></p>
+  <p class="note" id="s-health">
+    This is an early alpha and the network is small. These are live numbers, not projections —
+    including when they are unflattering.
+  </p>
+
+  <h2>How it works</h2>
+  <p>
+    An AI model is a stack of layers, and a big one needs more memory than any ordinary computer
+    has. NEURON splits that stack across several machines: yours holds a few layers, someone
+    else holds the next few. Together they run a model none of them could run alone.
+  </p>
+  <p>
+    <strong>Only your own machine ever reads what you type.</strong> It holds the part that turns
+    text into numbers and back again. Every other computer in the chain receives anonymous
+    numbers and has no way to read them — that is a property of how the work is split, not a
+    promise anyone has to keep.
+  </p>
+  <p>
+    While you are not using your computer, it helps run the network and earns <strong>NRN</strong>
+    for the work it contributes. NRN is a record of compute contributed — it has no cash value,
+    there is no exchange and no sale, and we would rather say so here than have you find out
+    later. Your node pauses the moment you touch the keyboard, and on battery.
+  </p>
+
+  <h2>What you need</h2>
+  <ul>
+    <li>Windows, Linux or macOS</li>
+    <li>4 GB or more of free RAM</li>
+    <li><strong>No GPU required</strong> — though an NVIDIA card with CUDA is used automatically if you have one</li>
+    <li>No crypto wallet</li>
+    <li>No payment details, and nothing personal collected</li>
+  </ul>
+
+  <h2>Install</h2>
+  <div class="cols">
+    <div class="card">
+      <h3>Windows</h3>
+      <p><a href="https://github.com/neuron-network-ai/neuron/releases/download/v0.18.0/NEURON-Setup-0.18.0.exe">Download the installer</a> — double-click, then open localhost:8080.</p>
+    </div>
+    <div class="card">
+      <h3>Linux &amp; macOS</h3>
+      <p><a href="https://github.com/neuron-network-ai/neuron/blob/main-full/INSTALL.md">Install from source</a> — Python 3.11+, four commands.</p>
+    </div>
+    <div class="card">
+      <h3>Developers</h3>
+      <p><a href="https://github.com/neuron-network-ai/neuron">The repository</a> — Apache 2.0, with the full engineering log.</p>
+    </div>
+  </div>
+
+  <h2>Network status</h2>
+  <p>
+    <a class="btn alt" href="https://neuronnet.duckdns.org/dashboard">Live network dashboard →</a>
+  </p>
+  <p class="note">
+    Node earnings and addresses are private — each operator sees their own numbers in the NEURON
+    app, authenticated with that node's own token. The public dashboard never shows them.
+  </p>
+
+  <footer>
+    Apache 2.0 · open source ·
+    <a href="https://github.com/neuron-network-ai/neuron">github.com/neuron-network-ai/neuron</a><br>
+    © 2026 NEURON Labs, Rotterdam
+  </footer>
+
+</div>
+
+<script>
+(function () {
+  var API = "https://neuronnet.duckdns.org/status";
+  var el = function (id) { return document.getElementById(id); };
+
+  function paint(d) {
+    var n = d.network || {}, s = d.stats || {};
+    el("s-nodes").textContent  = n.online_nodes != null ? n.online_nodes : "—";
+    el("s-layers").textContent = n.total_layers_covered != null
+      ? n.total_layers_covered + "/" + (n.total_layers != null ? n.total_layers : 28) : "—";
+    el("s-reqs").textContent   = s.total_requests_served != null ? s.total_requests_served : "—";
+    el("s-nrn").textContent    = s.total_nrn_distributed != null
+      ? Number(s.total_nrn_distributed).toFixed(2) : "—";
+
+    var healthy = n.network_healthy === true;
+    el("s-dot").className = "dot " + (healthy ? "on" : "off");
+    el("s-when").textContent = "updated " + new Date().toLocaleTimeString();
+    // Say what an incomplete chain means rather than showing a number nobody can interpret.
+    el("s-health").textContent = healthy
+      ? "Every layer is covered, so the network can serve requests right now. These are live numbers, not projections."
+      : "Not every layer is covered at the moment, so the chain is incomplete and the network cannot serve a full request until it is. These are live numbers, not projections — including when they are unflattering.";
+  }
+
+  function tick() {
+    fetch(API, { cache: "no-store" })
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(paint)
+      .catch(function () {
+        // Never leave stale numbers looking current: say the reading failed instead.
+        el("s-dot").className = "dot";
+        el("s-when").textContent = "could not reach the coordinator — numbers may be out of date";
+      });
+  }
+
+  tick();
+  setInterval(tick, 30000);
+})();
+</script>
+</body>
+</html>
