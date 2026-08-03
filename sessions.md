@@ -3524,6 +3524,73 @@ Nothing under `blockchain/` or `neuronscript_*` was touched.
 
 ---
 
+## Session 48 (2026-08-03) — the licence audit, because the grant is the thing worth protecting
+
+Founder's question — *if we adopt llama.cpp, can they later claim our software?* — answered no,
+and then checked properly rather than answered from memory. The audit found three real gaps,
+none of them the one that was asked about.
+
+### The answer to the actual question: no, and it is not close
+llama.cpp and ggml are **MIT**. Permissive, not copyleft: no share-alike, no reach-through, no
+assignment, and MIT → Apache 2.0 is the compatible direction. Nothing in MIT provides a
+mechanism by which an upstream author acquires rights in a combined work. The single condition
+is that the copyright and permission notice travel with any redistribution.
+
+**Which is where it stopped being hypothetical.** `packaging/neuron-agent.spec` already collects
+`llama_cpp`'s native libraries, and `dist/neuron-agent/_internal/llama_cpp` confirms
+`llama.dll` + `ggml*.dll` have shipped since 0.18.0. The repo had **no notices file at all**.
+
+### `tools/gen_notices.py` — generated, not written
+54 bundled distributions inventoried by reading every `*.dist-info` in the actual PyInstaller
+output: name, version, licence id, the real copyright line out of the bundled licence text, and
+the upstream URL. Written as a generator for the same reason `logo-512.png` was — a hand-typed
+licence list is wrong the first time a dependency moves. Three extraction bugs worth recording,
+because each produced *plausible* output:
+
+- **Apache-2.0 packages have no copyright line**, so the naive "first line starting with
+  Copyright" grabbed prose from the licence body — `accelerate`'s holder came out as
+  *"copyright notice that is included in or attached to the work"*. Fixed by requiring a real
+  4-digit year, which the Apache boilerplate and its `[yyyy]` template both lack.
+- **GPL/LGPL texts carry the FSF's copyright on the licence document itself**, so pystray's
+  holder came out as the Free Software Foundation rather than Moses Palmér. Filtered.
+- Where no copyright line exists at all, the generator now falls back to the declared `Author`
+  and **labels it `author:`** rather than presenting metadata as a copyright notice it did not
+  find. Honest beats tidy.
+
+### Three findings, in order of how much they matter
+- **pystray is LGPL-3.0** — the only copyleft-with-teeth component in the bundle, confined to
+  `agent/tray.py`. Not a disqualifier (NLnet funds copyleft happily), and compliance holds
+  because the whole application is published as source under Apache 2.0: anyone may substitute a
+  modified pystray and rebuild, which is what LGPL-3.0 §4 asks for. The zero-ambiguity option is
+  a ctypes `Shell_NotifyIcon` tray — the project already drives Win32 through ctypes in
+  `resource_guard.py`, so it would remove the dependency entirely. **Founder's call, flagged not
+  taken.**
+- **`tokenizers` shipped with no licence text whatsoever.** Apache-2.0 §4 requires the licence
+  to travel with the redistribution. `collect_all` carries most licences inside `dist-info` by
+  accident of packaging, not by design — so `copy_metadata` now names every bundled distribution
+  explicitly, and the spec says which entries exist for licence reasons rather than runtime ones.
+- **`certifi` and `tqdm` are MPL-2.0** — weak, file-level copyleft. Unmodified, so the obligation
+  is satisfied by shipping the text. No condition reaches NEURON's own code.
+
+### The grant claim that was not quite true
+`grant/nlnet_application.md` said **"Everything is Apache 2.0."** True of NEURON's own code,
+false of the bundle it ships — which contains MIT, BSD, MPL-2.0, LGPL-3.0, PSF and
+CNRI-Python. Corrected to name the third-party inventory. The risk to a grant was never the
+licence *choice* — every one of the 54 is OSI-approved and NLnet has no objection to any of
+them — it was the **inaccuracy**, which is exactly what a reviewer checks and cannot unsee.
+
+`LICENSE` and `THIRD_PARTY_NOTICES.md` now install next to the exe via `neuron.iss`, so the
+obligation is met by the artefact and not only by the repository. The Android app will need the
+same thing as a standard "Open source licences" screen.
+
+**The bigger exposure is model weights, not code.** Qwen2.5 is Apache 2.0 and clean. Llama-family
+weights are *not* open source — the Llama Community Licence carries an acceptable-use policy, a
+monthly-active-user ceiling and naming requirements. Session 25 benchmarked Llama 3.3 70B, which
+is fine; *serving* one to users would place real obligations on the network. Recorded in the
+notices file so the decision is deliberate if it is ever taken.
+
+---
+
 ## Known limits / next steps
 - **Throughput scales with nodes (single 3.2 → 2-node 4.6 → 3-node 6.2 tok/s), but
   sub-linearly** because the nodes are heterogeneous and node_a carries the fixed

@@ -184,3 +184,7 @@ sessions.md          full engineering log, session by session
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE). © 2026 NEURON Labs.
+
+The installer bundles third-party components that keep their own licences — all OSI-approved
+open source. Every one is inventoried in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md),
+generated from the shipped bundle by `tools/gen_notices.py`.

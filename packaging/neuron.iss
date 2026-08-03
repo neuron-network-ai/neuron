@@ -43,6 +43,11 @@ Name: "startup"; Description: "Start NEURON automatically when I sign in"; Group
 [Files]
 ; the whole PyInstaller onedir output (neuron-agent.exe + _internal\)
 Source: "..\dist\neuron-agent\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+; Licence obligations. NEURON's own terms, plus the notices for every bundled third-party
+; component — MIT, BSD and Apache-2.0 all require their text to travel with a redistribution,
+; and the installer IS a redistribution. Both are installed next to the exe and removed with it.
+Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
+Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; IconFilename: "{app}\{#AppExe}"

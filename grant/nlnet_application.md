@@ -70,8 +70,10 @@ themselves, on hardware they already own, without asking anyone's permission and
 central operator able to read, meter, or withdraw it.
 
 The funded work is specifically the decentralisation: today one machine decides routing and
-placement, and item 1 exists to remove it. Everything is Apache 2.0, and the engineering log —
-the measurements above and the failures behind them — is public.
+placement, and item 1 exists to remove it. All of NEURON's own code is Apache 2.0; the
+third-party components the installer redistributes are inventoried with their licences in
+`THIRD_PARTY_NOTICES.md`, all OSI-approved. The engineering log — the measurements above and
+the failures behind them — is public.
 
 It also reuses hardware that already exists rather than requiring new datacenters, though we are
 careful not to overclaim: inference draws real power, roughly 15–45 W above idle on a CPU. What

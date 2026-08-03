@@ -52,15 +52,35 @@ try:
 except Exception:
     pass
 
-# transformers checks installed versions via importlib.metadata — ship that metadata or it
-# raises at import. Distribution names (not import names) go here.
+# LICENCE COMPLIANCE, not a runtime need. The installer redistributes every bundled package,
+# and MIT/BSD/Apache-2.0 all require their licence text to travel with the redistribution.
+# `collect_all` happens to carry most of them inside *.dist-info, but not all — `tokenizers`
+# shipped 0.18.0 with no licence text at all. copy_metadata is what guarantees the dist-info
+# (licence included) lands in the bundle, so every distribution named here is deliberate.
+# THIRD_PARTY_NOTICES.md is generated FROM this bundle by tools/gen_notices.py — if a package
+# is added below without being in that file, regenerate rather than hand-editing.
+#
+# transformers additionally *needs* this at runtime: it checks installed versions via
+# importlib.metadata and raises at import without it. Distribution names (not import names).
 for dist in ("transformers", "torch", "tokenizers", "huggingface-hub", "safetensors",
              "accelerate", "numpy", "tqdm", "regex", "requests", "filelock", "packaging",
-             "pyyaml", "psutil", "fastapi", "starlette", "uvicorn", "itsdangerous", "authlib"):
+             "pyyaml", "psutil", "fastapi", "starlette", "uvicorn", "itsdangerous", "authlib",
+             # from here down: carried for the licence text, not for any runtime lookup
+             "certifi", "llama-cpp-python", "diskcache", "pystray", "pillow", "sympy",
+             "networkx", "anyio", "sniffio", "cryptography", "attrs", "click", "h2",
+             "jinja2", "markupsafe", "pydantic", "setuptools", "websockets",
+             "fake-useragent", "eth-account", "eth-keys", "eth-utils", "eth-abi", "rlp",
+             "hexbytes", "eth-hash", "eth-typing", "eth-rlp", "ckzg", "cytoolz", "toolz",
+             "pyunormalize", "bitarray", "parsimonious"):
     try:
         datas += copy_metadata(dist)
     except Exception:
         pass
+
+# The native side needs its own notice. llama.dll / ggml*.dll are built from llama.cpp/ggml,
+# whose MIT copyright ("The ggml authors") is SEPARATE from the llama-cpp-python wrapper that
+# vendors them — shipping only the wrapper's LICENSE.md leaves the upstream notice out.
+datas += [("../THIRD_PARTY_NOTICES.md", ".")]
 
 # transformers loads model classes lazily — force the Qwen2 model module (our model) in.
 hiddenimports += collect_submodules("transformers.models.qwen2")
