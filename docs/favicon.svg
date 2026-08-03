@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32"
+     role="img" aria-labelledby="neuron-favicon-title">
+  <title id="neuron-favicon-title">NEURON</title>
+  <!--
+    The same N-as-node-graph mark as logo.svg, redrawn rather than scaled: at 16px a
+    proportional reduction turns the strokes to grey mush. Everything here is heavier and the
+    padding is tighter, so the shape still reads in a browser tab.
+
+    No background rectangle — a transparent favicon sits correctly on a light or dark tab strip,
+    and #4A9EFF has enough contrast against both.
+  -->
+  <g fill="none" stroke="#4A9EFF" stroke-width="3.5" stroke-linecap="round"
+     stroke-linejoin="round" opacity="0.6">
+    <path d="M8 25 V8"/>
+    <path d="M8 8 L24 25"/>
+    <path d="M24 25 V8"/>
+  </g>
+
+  <circle cx="8"  cy="25" r="3.6" fill="#4A9EFF"/>
+  <circle cx="24" cy="25" r="3.6" fill="#4A9EFF"/>
+  <circle cx="24" cy="8"  r="3.6" fill="#4A9EFF"/>
+
+  <!-- the driver node -->
+  <circle cx="8" cy="8" r="5.4" fill="#00D4FF"/>
+</svg>

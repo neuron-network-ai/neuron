@@ -3103,6 +3103,37 @@ Note the Pages **API** still answers 404 anonymously even though the site is up:
 repository's Pages configuration needs auth, public repo or not. The site's own response code is
 the ground truth, not the API's.
 
+### A logo, from a coincidence that turned out to be structural
+`docs/logo.svg` (200×60) and `docs/favicon.svg` (32×32). The brief suggested "incorporate the
+letter N subtly within the node connections", and the N is not a pun here: **an N is exactly four
+vertices joined by three segments** — bottom-left, top-left, bottom-right, top-right — which is
+the shape of a NEURON chain. Each dot is a machine holding a slice; each line is activations
+crossing between them. The bright, larger dot is the driver, the one node that holds the
+embedding and output projection and the only one that ever sees readable text. It is drawn
+differently because it *is* different.
+
+No gradients and no filters — solid fills and opacity only, so it stays crisp at any size and
+renders identically everywhere. No brain, no chip, no robot.
+
+The favicon is **redrawn rather than scaled**: proportionally shrinking a 200px mark turns the
+strokes to grey mush in a tab. Heavier strokes, tighter padding, and no background rectangle so
+it sits correctly on a light or dark tab strip. At 16px the strokes land at 1.75px and the driver
+dot at 2.7px radius — comfortably above the point where a shape stops resolving.
+
+`index.html` now loads both, and the old inline data-URI emoji favicon is gone. The `<h1>` still
+exists, wrapping the image with `alt="NEURON"`, so the page keeps one heading for screen readers
+and search engines rather than losing it to an `<img>`. **The page still makes zero third-party
+requests** — both files are same-origin relative paths, verified by listing every absolute URL in
+the file: four links and the `/status` fetch, no asset loads.
+
+**Honest limit on the verification.** The logo was confirmed visually at full size in the
+rendered page. The 16px favicon was **not** seen rendered: the preview pane went unreliable —
+`navigate` timed out twice on a scratchpad path, then served a stale tab, and a fresh tab
+reported "no site open" after a successful navigate. So legibility at tab size rests on the
+geometry above, not on an image anyone looked at, and the real check is the browser tab once it
+is live. Both files were validated as well-formed XML with no external references, which is the
+part that can be checked properly from here.
+
 ---
 
 ## How to run

@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 60" width="200" height="60"
+     role="img" aria-labelledby="neuron-logo-title">
+  <title id="neuron-logo-title">NEURON</title>
+  <!--
+    The mark is the letter N drawn as a node graph, which is not a decorative pun: an N is
+    exactly four vertices joined by three segments — bottom-left, top-left, bottom-right,
+    top-right — and that is the shape of a NEURON chain. Each dot is a machine holding a slice
+    of the model; each line is activations crossing between them.
+
+    The bright, larger dot is the driver: the node that holds the embedding and the output
+    projection, and the only one in the chain that ever sees readable text. It is drawn
+    differently because it *is* different.
+
+    No gradients, no filters. Solid fills and opacity only, so it stays crisp at any size and
+    renders identically everywhere.
+  -->
+  <g fill="none" stroke="#4A9EFF" stroke-width="3" stroke-linecap="round"
+     stroke-linejoin="round" opacity="0.55">
+    <path d="M14 44 V16"/>
+    <path d="M14 16 L42 44"/>
+    <path d="M42 44 V16"/>
+  </g>
+
+  <!-- compute nodes -->
+  <circle cx="14" cy="44" r="4"   fill="#4A9EFF"/>
+  <circle cx="42" cy="44" r="4"   fill="#4A9EFF"/>
+  <circle cx="42" cy="16" r="4"   fill="#4A9EFF"/>
+
+  <!-- the driver: larger, brighter, ringed -->
+  <circle cx="14" cy="16" r="9"   fill="#00D4FF" opacity="0.16"/>
+  <circle cx="14" cy="16" r="5.5" fill="#00D4FF"/>
+
+  <text x="66" y="38"
+        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+        font-size="25" font-weight="700" letter-spacing="3" fill="#E6EDF3">NEURON</text>
+</svg>
