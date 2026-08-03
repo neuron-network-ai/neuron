@@ -3456,6 +3456,57 @@ Every setting in the table is written with what it **costs** the owner, not just
 slower charging, a warmer phone, your data allowance — because a contribution level chosen
 without that is not consent.
 
+### `agent/android/SAFETY_LIMITS.md` — the limits, and why each one is where it is
+Freedom to configure is not the same as freedom to damage the device. The second pass set the
+hardware rails, on the principle that **a phone which contributes for two years should be
+indistinguishable from one that never did**. Four decisions carry the file:
+
+- **Wait for 80% charge before contributing at all.** A phone charging 20→80% is already
+  dissipating the most heat it will produce all night — fast-charge losses land on the battery
+  itself. Compute on top of that stacks two heat sources at the worst possible moment. Waiting
+  for the trickle phase costs contributing hours and is the single most protective rule here.
+- **No `max` level on Android.** The desktop guard has one because a server has no owner, no
+  battery and usually a fan. Shipping it on a phone would mean offering a setting whose only
+  function is to wear the hardware out.
+- **Fail closed.** Unreadable sensor → pause. This inverts the desktop GPU rule in `gpu.py`
+  ("cannot tell" must never mean "pause") and the inversion is the point: on desktop, failing
+  closed silently empties the network; on a phone, failing open risks the device.
+- **Half the cores, 75% duty cycle.** The rest interval is what lets the case shed heat. A phone
+  held under 36 °C contributes more across a night than one that saturates, hits 38 °C in twenty
+  minutes and sits paused until morning.
+
+Thresholds: ease off at 36 °C, pause at 38 °C, resume at 34 °C (**4 °C hysteresis — resuming at
+the pause point oscillates, and every cycle is another heat spike**), stop for the session at
+41 °C, permanent disable at 45 °C or on any faulty `BATTERY_HEALTH_*`. Cold rail at 5 °C,
+because charging a lithium cell near 0 °C causes plating — permanent damage, and the rail no one
+thinks to write. Battery floor default 50%, hard minimum 30%. Wireless charging opt-in only: Qi
+runs 3–5 °C hotter at the back of the phone, which is where the battery is.
+
+**Android 8–9 have no `getCurrentThermalStatus()`** (API 29+). Rather than pretend, the client
+falls back to battery temperature alone with every threshold 1 °C lower, and says so on the
+settings screen. `WorkManager` constraints carry the rails the OS can enforce itself
+(`setRequiresCharging`, `UNMETERED`, `setRequiresDeviceIdle`), so they hold even if our service
+is killed.
+
+### The warning system — six tiers, and one the owner cannot clear
+W0 live state in the notification (never a silent stop — every pause names its reason and shows
+the temperature) → W1 consent dialogs before the fact, non-skippable for on-battery and wireless
+→ W2 live caution at 36 °C, plus a "check it isn't covered" prompt after 30 minutes warm → W3
+automatic stop → W4 24-hour lockout after three session stops in a day → **W5 permanent disable**
+on a battery-fault reading or 45 °C, which cannot be re-enabled from inside the app, because
+those two readings are the ones that precede a battery failure.
+
+**The physical-safety copy is the part that needed the most care**, because it is the only part
+a person has to act on: don't cover the phone, keep it out of cars and sun, a thick case traps
+heat, and stop charging immediately on a bulging back, a lifting screen, heat you can't hold, or
+any smell — a swollen cell is a fire risk whatever caused it. Acknowledged once at first run,
+five lines, not a wrapped EULA.
+
+**The cost is stated rather than hidden**: these limits mean roughly 4–6 contributing hours out
+of a 10-hour charge session, on half the cores, at 75% duty. NEURON's whole proposition is that
+idle devices contribute at no cost to their owners — a phone with a degraded battery a year in
+falsifies that, and no throughput number buys it back.
+
 **The claims it makes that the network must keep.** Two are load-bearing and worth naming so
 they are not quietly broken later:
 
