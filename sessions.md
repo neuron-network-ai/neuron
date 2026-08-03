@@ -3307,6 +3307,33 @@ Session 45 caught light-on-dark. The same audit on the new light theme caught th
   Self-hosting two woff2 files in `docs/` would keep the typefaces and the property; the offer
   stands.
 
+### The hero pill, cut on a commercial call
+"No new hardware manufactured" removed from the hero, asked for as a marketing decision rather
+than an accuracy one. Three reasons, and only the third is about honesty:
+
+1. **Every job it could do was already done by something beside it.** The h1 says "idle
+   machines", the credits box says "hardware that already existed", the sub-line handles the
+   setup objection, and the live stats directly beneath supply the proof. It was the third
+   statement of the same idea, placed above the headline, for a reader who did not yet know what
+   the product was.
+2. **Hero density costs conversion.** Mark → headline → button is the shortest path to the only
+   action on the page. Nothing was put in its place; an empty slot beats a decorative one.
+3. **It was the one line inviting an argument.** A lone environmental badge on a page making no
+   other energy claim provokes "what about the electricity?", and the page cannot answer —
+   `whitepaper.md` §10 can (15–45 W above idle, 200–400 W on a GPU node, *less* efficient per
+   token than a datacenter GPU; what is avoided is the embodied cost, not the power), but that
+   is a sentence with a counterweight, not a chip. This project's competitive asset is that it
+   does not overclaim, which makes an unsupported badge a liability wearing a benefit's clothes.
+
+The now-dead `.pill` rule was deleted with it, and the 1.25rem of vertical rhythm it carried was
+given back to `.logo-wrap`, so the hero spacing did not silently collapse.
+
+**Two requests this session were already satisfied and were not applied twice:** the install-flow
+block (third paste; live and correct — 4 steps, 3 connectors, 1 pill row, no leftover cards) and
+the nested `/status` field fix (done in the previous commit; verified no stale flat names remain
+in either the working file or the deployed page). Re-running either would have duplicated a
+section rather than fixed anything.
+
 ---
 
 ## Known limits / next steps
