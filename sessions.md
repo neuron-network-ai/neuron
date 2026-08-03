@@ -3336,6 +3336,61 @@ section rather than fixed anything.
 
 ---
 
+## Session 46 (2026-08-03) — the Pavilion, and a limitation that had not been true for days
+
+### SSH was never broken — the username was wrong
+Five sessions of "the Pavilion is unreachable over SSH" rested on trying `ubuntu`, `homeadmin`,
+`optin`, `neuron` and `pavilion`. The account is **`raman`**, which appeared the moment the
+founder pasted a shell prompt: `raman@raman-HP-Pavilion-Laptop-15-eh3xxx`. `id_ed25519` was
+authorised for it the whole time. The evidence had been on screen for two sessions — the failure
+was `Permission denied (publickey,password)`, which says *authentication*, and a reboot was
+proposed to fix it. Reading the error would have been cheaper than guessing usernames.
+
+### `git pull` could never have worked
+`~/neuron` has no `.git`. It was deployed by `scp` in Session 7 and has been updated by file copy
+ever since, so every instruction in this log telling someone to `git pull` on a remote node has
+been wrong for as long as those nodes have existed.
+
+### The wire codec was already deployed
+Verified by hash rather than by belief:
+
+| file | repo | Pavilion | |
+|---|---|---|---|
+| `wire_codec.py` | `ed5f1a7c…` | `ed5f1a7c…` | identical |
+| `tunnel_client.py` | `5451818a…` | `5451818a…` | identical |
+| `neuron_driver.py` | `3561a955…` | `3561a955…` | identical |
+| `common.py` | `50a0d7c3…` | `5170e962…` | differs — Pavilion lacks the S42 GPU device code |
+
+`wire_codec.py` is byte-identical, carries `i8h` and both `negotiate()` and `preference()`, and
+`common.py` references it six times. `common.py` also does `import wire_codec` at module level,
+which means PyInstaller's dependency graph bundles it into every packaged build — so node_a has
+it too. **The codec is on every node in the network, and has been since around 30 July.**
+
+Session 21 said "Not deployed", Session 26 repeated it, and it was then carried into
+`whitepaper.md` twice and into the 0.18.0 release notes, where it was published. It was reported
+to the founder as an outstanding blocker as recently as this session. Nobody checked; the claim
+propagated because it was written down.
+
+Corrected in `whitepaper.md` §5 and §11 and in `RELEASE_NOTES_v0.18.0.md`, and deliberately
+**not** corrected into an overclaim: deployed is not demonstrated. The chain is missing layers
+21–27, so no request has crossed it since, and the 74%-of-wall-clock wire figure has not been
+re-measured. The honest statement is "present on every node, benefit unproven in production".
+The published GitHub release still carries the old wording — the repo file is the source copy.
+
+### Not done, deliberately
+`common.py` on the Pavilion is one version behind (no Session 42 device resolution). It was left
+alone: the GPU path is inert on a CPU machine, the wire protocol is unchanged by it, and the two
+versions interoperate — so nothing requires restarting a live production node to sync it.
+`relay_auth.py` is absent there and that is correct; the only mention is inside a comment string
+in `tunnel_client.py`, never an import.
+
+**Method note worth keeping.** Three claims collapsed in one session — unreachable host, `git
+pull`, undeployed codec — and all three were checked by hash, error text or `ls` in under a
+minute each. A documented limitation is a hypothesis with good PR; it decays like anything else,
+and this one had been false for five days while being repeated in a published whitepaper.
+
+---
+
 ## Known limits / next steps
 - **Throughput scales with nodes (single 3.2 → 2-node 4.6 → 3-node 6.2 tok/s), but
   sub-linearly** because the nodes are heterogeneous and node_a carries the fixed

@@ -185,8 +185,9 @@ the driver carries the fixed head cost.
 
 **Where the time actually goes.** In a fully relayed run with Tailscale disabled — every hop
 across the public internet, which is the real stranger path — a 24-token answer took 45.5 s at
-0.53 tok/s: 33.6 s (74%) wire, 11.1 s compute across all three nodes. The codec's 4.25× is the
-obvious lever against that number and is **not yet deployed** to the remote nodes.
+0.53 tok/s: 33.6 s (74%) wire, 11.1 s compute across all three nodes. That measurement predates
+the wire codec, which is the obvious lever against it. The codec **is** now on every node, but
+the run has not been repeated — see section 11.
 
 **For models that fit on one machine, distribution is the wrong tool.** The local llama.cpp
 engine measures 27.9 tok/s on Qwen2.5-1.5B and 7.8 tok/s on Qwen2.5-7B (Q4_K_M, 16 cores).
@@ -342,8 +343,12 @@ presently worth, which is why NEURON is positioned as compute-barter and not as 
 - **The CPU pipeline is slower per token than a GPU datacenter.** Physics, not a bug, and
   acceptable: distribution buys capacity and aggregate throughput. For models that fit on one
   machine, NEURON runs them locally instead.
-- **The wire codec is not deployed** to the remote nodes, so that 74%-of-wall-clock wire cost is
-  still being paid in full.
+- **The wire codec is deployed but unexercised.** Earlier drafts of this paper said it was not
+  deployed; that was wrong, and the error survived several revisions. `wire_codec.py` is present
+  and byte-identical on the remote node, and `common.py` imports it at module level so every
+  packaged build carries it. What cannot yet be claimed is the benefit: the chain is incomplete,
+  so no request has run across it since, and the 74%-of-wall-clock wire figure has not been
+  re-measured. Deployed is not the same as demonstrated.
 - **The GPU execution path has never run.** The device resolution, the shard move onto CUDA and
   the VRAM-aware layer assignment described in section 4 are written and covered by tests, but
   every machine in this project is CPU-only — the installed torch is a `+cpu` build — so no line

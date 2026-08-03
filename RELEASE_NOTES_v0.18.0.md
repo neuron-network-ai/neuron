@@ -40,9 +40,13 @@ to hear whether it worked.
 If it misbehaves, you can force the old behaviour by setting the environment variable
 `NEURON_DEVICE=cpu` before starting the agent. Your node keeps working either way.
 
-**The wire codec is still not deployed to the remote nodes.** An earlier draft of these notes
-claimed it was; it is not. Activations between machines are still sent at full size, so the
-4.25× bandwidth reduction that codec gives is not yet in effect on the live network.
+**On the wire codec.** An earlier draft of these notes claimed it was deployed; a later one
+claimed it was not. Checked properly on 3 August: it **is** on every node — `wire_codec.py` is
+byte-identical on the remote machine, and `common.py` imports it at module level so every
+packaged build ships it. What is still true is that the benefit is unproven in production: the
+network is missing layers 21–27, so no request has crossed the chain to exercise it, and the
+4.25× has not been re-measured live. (This file is the source copy; the notes already published
+with the v0.18.0 release still carry the older wording.)
 
 ## Still true, and worth repeating
 
