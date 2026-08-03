@@ -2963,6 +2963,62 @@ the next update and new installs via 0.18.0, which is built but not yet publishe
 
 ---
 
+## Session 43 (2026-08-03) — auto-update actually switched on, and the grant application
+
+### The release was verified before the switch, not after
+`v0.18.0` is published and correctly tagged **with the `v`** — the thing Session 38 got wrong.
+Then the check that is the whole basis for running a binary on volunteers' machines unattended:
+downloaded all **216,630,112 bytes** from GitHub and hashed them.
+`dd33d317…5fb1a8` — identical to the local build and to what the coordinator now advertises.
+
+### The brief's Part 2 would have done nothing, silently
+It said to set `NEURON_AGENT_SHA256` and `NEURON_AGENT_DOWNLOAD_URL`. Both would have applied,
+and **no node would ever have updated**, because the VM's `config.py` still defaults
+`AGENT_VERSION = "0.17.1"` and nothing was going to change it. `/agent/version` would keep
+reporting 0.17.1, `is_newer("0.17.1", "0.17.1")` is False, and the 0.18.0 hash would sit there
+looking live. Found by reading the deployed file rather than assuming it matched the repo.
+
+So the override sets **`NEURON_AGENT_VERSION=0.18.0`** plus the hash — and deliberately does
+**not** set `DOWNLOAD_URL`. With the version correct, `config.py` derives exactly the URL the
+brief asked for. Pinning it as well would re-create the Session 38 landmine one version later: a
+hardcoded 0.18.0 URL still being served after the version moves to 0.18.1 is the same stale-
+override bug in a new hat. The existing override file already carried a comment warning about
+precisely this; that comment is preserved and extended. Old file backed up to
+`~/override.conf.bak-0.17.1` on the VM.
+
+Verified live, all four independently: version `0.18.0`; sha `dd33d317…`; derived URL is the
+`v0.18.0` one; and that URL returns **HTTP 200**. Network unchanged across the restart — 2/2
+nodes, 21/28 layers, 38 requests, 25.8102 NRN.
+
+**Auto-update is now genuinely armed.** Every 0.17.1 install takes 0.18.0 within 24h of its next
+check. Worth stating plainly: those installs predate the `auto_update` opt-out shipped in
+Session 42c, so for them this first update is unconditional — the flag only bites from 0.18.0
+onward. Blanking `NEURON_AGENT_SHA256` remains the stop button.
+
+### README
+Download link and hash → 0.18.0. Status → Session 43. The GPU line rewritten: it said inference
+was still CPU-only, which stopped being true in Session 42. Now says CUDA is used automatically
+if present, and still says no machine here has an NVIDIA card so that path has not run on real
+GPU hardware. Honest numbers corrected to the live reading — **2 online, 21/28 layers**, and the
+chain is incomplete, which the previous text ("1 online, 7 of 28") understated in one direction
+and the dashboard's DEGRADED banner explains.
+
+### `grant/nlnet_application.md`
+798 words, built only from `whitepaper.md`, `README.md` and the live dashboard. Framed as open
+internet infrastructure: the funding items are DHT peer discovery (€15k), coordinator redundancy
+and PostgreSQL (€10k), the Android NEON port (€15k) and a code-signing certificate (€5k) —
+€45,000, and every one of them is decentralisation or access, not features.
+
+Honest by construction: it leads with "2 machines covering 21 of 28 layers — an incomplete
+chain", says no outsider has run a node, and describes distribution as buying capacity and
+concurrent users rather than single-answer speed. The accounting layer is described as what it
+is — a record of contributed work, in an ordinary database, with no cash value, no exchange and
+no sale. Nothing is concealed by that framing: the application links the repository, and
+`whitepaper.md` §7 there sets out the on-chain intention in full. If a reviewer asks directly,
+the answer is in the same repo the application cites.
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load

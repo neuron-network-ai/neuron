@@ -5,7 +5,10 @@ joins a network of ordinary computers that together run AI models too big for an
 
 ## Download
 
-**[⬇ NEURON-Setup-0.17.1.exe](https://github.com/neuron-network-ai/neuron/releases/download/v0.17.1/NEURON-Setup-0.17.1.exe)** (217 MB)
+**[⬇ NEURON-Setup-0.18.0.exe](https://github.com/neuron-network-ai/neuron/releases/download/v0.18.0/NEURON-Setup-0.18.0.exe)** (207 MB)
+
+SHA-256 `dd33d317f92adb2ae5da27f46ac02912ba2106a66c4f21104b27ebd7345fb1a8` — the same hash every
+installed agent checks before it will run an update.
 
 Windows installer — no technical knowledge needed. Double-click, then open
 **http://localhost:8080** and sign in with Google or GitHub.
@@ -51,9 +54,10 @@ network is for the case where it doesn't.
 This is an early alpha, and these are the real figures, not projections:
 
 - **Local engine:** 7.8 tok/s on the 7B model, 27.9 tok/s on 1.5B (measured, 16-core CPU, Q4_K_M).
-- **The network is tiny.** As of 2 August 2026: **2 machines registered, 1 online**, covering 7 of
-  28 layers. Live count on the [dashboard](https://neuronnet.duckdns.org/dashboard).
-- **Lifetime requests served: 38.** Total NRN paid out to nodes: 25.8.
+- **The network is tiny.** As of 3 August 2026: **2 machines registered, 2 online**, covering 21
+  of 28 layers — so the chain is still incomplete and the dashboard reads DEGRADED. Live count on
+  the [dashboard](https://neuronnet.duckdns.org/dashboard).
+- **Lifetime requests served: 38.** Total NRN paid out to nodes: 25.81.
 - **NRN has no cash value.** It is a record of compute contributed, nothing more. There is no
   exchange, no sale, and no promise that there will be one.
 - Supply is fixed at 1,000,000,000 NRN and the ledger is transfer-only — nothing mints.
@@ -127,18 +131,20 @@ split across the chain in proportion to layers held — a node holding `L` of 28
 
 ## Status
 
-**Session 41 complete** — the network is live and open to strangers. Coordinator at
+**Session 43 complete** — the network is live and open to strangers. Coordinator at
 [neuronnet.duckdns.org](https://neuronnet.duckdns.org) (dashboard at
 [/dashboard](https://neuronnet.duckdns.org/dashboard)). Install the agent and your machine
 registers itself, picks its own layer range, downloads only that slice, and is auto-verified
 within about a minute — no operator, no approval queue, no shared secret. NAT traversal is
 built in via the relay — no VPN, no port forwarding, no Tailscale. Just install and run.
 
-- Installer **0.17.1 released**, and **auto-update works**: the app checks daily, verifies a
-  published SHA-256 before running anything, and never updates mid-request.
+- Installer **0.18.0 released**, and **auto-update is live**: the app checks daily, verifies the
+  published SHA-256 before running anything, and never updates mid-request. Set
+  `auto_update: false` in your config if you would rather update by hand.
 - **Earnings have an owner**: each node registers an Ethereum address it proves it controls.
-- **NVIDIA GPUs are detected and respected** — a node reports its card and steps aside while
-  the GPU is busy. Inference itself is still CPU-only, so a GPU does not make a node faster yet.
+- **NVIDIA GPUs with CUDA are used automatically if present — no configuration needed.** The
+  node also steps aside while the GPU is busy. No machine in this project has an NVIDIA card, so
+  that path is written and tested but has not yet run on real GPU hardware.
 - **First stranger: pending.** Nobody outside the project has run it yet.
 
 Next: several stateless coordinators over a shared database (so it isn't one process), then
