@@ -3421,6 +3421,36 @@ price of consistency. The contact sheet used for the check was deleted rather th
 
 ---
 
+## Session 47 (2026-08-03) — the Android install guide, written before the APK exists
+
+`agent/android/ANDROID_INSTALL.md` — the install guide a phone owner would follow, linked from
+the README under Download as **"Android: see ANDROID_INSTALL.md (APK coming soon)"**.
+
+**The doc leads the build, and says so.** There is no Android client in this repository and no
+APK on the releases page. The guide names `NEURON-android-vX.X.X.apk` and the sideload path
+through Android's "install unknown apps" prompt, so the README link carries *(APK coming soon)*
+rather than reading as a live download. Written this way deliberately: the behaviour it promises
+is a specification for the client — charging + WiFi only, paused on mobile data, paused above
+38°C, paused while the screen is on — and those are the constraints the app has to meet, not a
+description of something already running.
+
+**The claims it makes that the network must keep.** Two are load-bearing and worth naming so
+they are not quietly broken later:
+
+- *"Your prompts never leave your device"* is stated with its reason — a phone is not a driver
+  node, so it only sees opaque activations. That holds only as long as phones are never assigned
+  the driver stage. If that ever changes, this sentence is wrong.
+- *"Your compute credit balance stays on the network ledger"* after uninstall — balance is tied
+  to the account, not the device. Consistent with the payout-address work from Session 32.
+
+**Honest expectations kept in the doc, not softened:** ~800 MB first download, small earnings
+while the network is small, compute credits with no cash value today, and an unsigned app that
+Android will warn about — the same disclosure the Windows installer carries.
+
+Nothing under `blockchain/` or `neuronscript_*` was touched.
+
+---
+
 ## Known limits / next steps
 - **Throughput scales with nodes (single 3.2 → 2-node 4.6 → 3-node 6.2 tok/s), but
   sub-linearly** because the nodes are heterogeneous and node_a carries the fixed

@@ -17,6 +17,8 @@ Two things to expect: Windows will say the installer is "unrecognized" (it isn't
 — the full source is in this repository), and the first start downloads **1.4–1.8 GB**, which is
 your share of the AI model. After that it just runs, and updates itself.
 
+Android: see [ANDROID_INSTALL.md](agent/android/ANDROID_INSTALL.md) (APK coming soon)
+
 On Linux or macOS, see [For developers](#for-developers-source-install) below.
 
 ## What you get
