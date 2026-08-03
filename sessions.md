@@ -3627,6 +3627,18 @@ against a modified library, and NEURON publishes the entire application as sourc
 2.0, with pystray's own LGPL text shipped in the bundle. Revisit when the ggml/Android rebuild
 touches packaging anyway — that is when the tray gets rewritten for other reasons.
 
+### `OUTREACH.md` ignored — and this one is actually clean
+Filed with the other pre-public docs in `.gitignore`. Worth the distinction the existing comment
+in that section makes: untracking `NEURON_COMPLETE_PROJECT.md`, `FIRST_STRANGER.md` and the rest
+in Session 42 stopped *future* commits but left every earlier version readable in the history of
+a public repo. `OUTREACH.md` was verified against `git log --all` and `rev-list --all --objects`
+before ignoring it — never committed on any branch, zero objects — so here the ignore really is
+the whole fix, which is not true of its neighbours in that list.
+
+**`main` fast-forwarded to `main-full`** — it was 115 commits behind with nothing of its own
+(`merge-base --is-ancestor` confirmed before pushing), so the sync is a fast-forward that
+rewrites nothing. `origin/HEAD` still points at `main-full`, which remains the working trunk.
+
 ---
 
 ## Known limits / next steps
