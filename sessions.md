@@ -3249,6 +3249,66 @@ ssh <node-c-host> "pkill -f '[n]ode_c.py'"
 
 ---
 
+## Session 45b (2026-08-03) — the merged page, and stats that would have shown four dashes
+
+The founder supplied a full merged landing page — light green, nav, hero, proof cards,
+comparison table, four-step install, dashboard link — which had taken essentially every
+correction raised against the earlier draft: the unsigned-installer warning, the "no cash value"
+statement, Petals as **partial** rather than ✗, "no single operator can withdraw access" instead
+of "uncensorable", and "No new hardware manufactured" instead of the Green AI badge. Better than
+what it replaced, so it was adopted whole rather than cherry-picked. Green is now settled.
+
+### The live stats were reading fields that do not exist
+The script reached for `d.nodes_online`, `d.layers_covered`, `d.requests_served`,
+`d.nrn_distributed`. The real payload nests everything under `network` and `stats` and names it
+differently — `online_nodes`, `total_layers_covered`, `total_requests_served`,
+`total_nrn_distributed`. Run against the live endpoint, **all four render `—`**.
+
+The dangerous part is not the wrong names, it is the failure mode: the request returns 200 and
+the JSON parses, so `.catch()` never fires and the caption underneath still says *"live numbers,
+not projections. Updated 15:47:12"* above four dashes. A page that fails loudly is fine; this one
+would have looked healthy while showing nothing. Fixed and checked against the real response:
+2, 21/28, 38, 25.81.
+
+Second fix in the same block: the status dot keyed off `nodes>0`, which is **green right now**
+with two nodes covering 21 of 28 layers — an incomplete chain that cannot serve a request. It
+keys off `network_healthy` instead, and the caption spells out what an incomplete chain means
+rather than leaving a newcomer to interpret "21/28".
+
+### Contrast, measured again — this time the other way round
+Session 45 caught light-on-dark. The same audit on the new light theme caught the mirror image:
+
+| | before | after |
+|---|---|---|
+| small grey text (`#9ca3af`) — sha, footer, notes | 2.54:1 | 4.83:1 |
+| green links, labels, ticks (`#16a34a`) | 3.30:1 | 5.02:1 |
+| white on the primary button | 3.30:1 | 5.02:1 |
+| the ✗ column in the comparison table (`#d1d5db`) | 1.50:1 | 4.83:1 |
+
+`#15803d` was already in the file as the button hover colour, so no new colour was invented. The
+✗ mattered most: it carries meaning in a table making claims about named competitors, and at
+`#d1d5db` it was nearly invisible.
+
+### Also this session
+- **`favicon.svg` was not linked** in the new head — a regression against Session 44. Restored.
+- **Logo assets were still blue** while the site went green. `logo.svg` and `favicon.svg` redrawn
+  to the header's mark (driver → hub → two peers) in green, so repo and site stop disagreeing.
+  The favicon is again redrawn rather than scaled.
+- **"No crypto wallet" removed** on instruction. The page now contains zero occurrences of
+  "crypto" or "wallet" — consistent with the compute-credits framing and the NLnet application.
+  The install-flow block supplied afterwards still contained that exact pill; it was left out
+  rather than silently reintroducing a phrase deleted minutes earlier.
+- **The four-step flow** replaced the plain step cards, with `#16a34a` moved to `#15803d`
+  wherever it carries small text or an icon, for the same 3.30:1 reason as the rest of the page.
+- **Google Fonts shipped**, having been requested twice. Recorded plainly because it is a real
+  trade: it is the page's only third-party request, so every visitor's IP and User-Agent reach
+  Google to fetch a typeface, on a site whose pitch is that nothing about them is collected.
+  Both families fall back to the system stack, so a blocked fetch costs nothing but the styling.
+  Self-hosting two woff2 files in `docs/` would keep the typefaces and the property; the offer
+  stands.
+
+---
+
 ## Known limits / next steps
 - **Throughput scales with nodes (single 3.2 → 2-node 4.6 → 3-node 6.2 tok/s), but
   sub-linearly** because the nodes are heterogeneous and node_a carries the fixed

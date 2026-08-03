@@ -2,35 +2,25 @@
      role="img" aria-labelledby="neuron-logo-title">
   <title id="neuron-logo-title">NEURON</title>
   <!--
-    The mark is the letter N drawn as a node graph, which is not a decorative pun: an N is
-    exactly four vertices joined by three segments — bottom-left, top-left, bottom-right,
-    top-right — and that is the shape of a NEURON chain. Each dot is a machine holding a slice
-    of the model; each line is activations crossing between them.
+    The wide lockup, matching the mark inlined in the site header so the repo and the site do
+    not disagree. A driver node feeds a hub, which fans out to two peers: each circle is a
+    machine holding a slice of the model, each line is activations crossing between them, and
+    the hub is largest because it carries the most.
 
-    The bright, larger dot is the driver: the node that holds the embedding and the output
-    projection, and the only one in the chain that ever sees readable text. It is drawn
-    differently because it *is* different.
-
-    No gradients, no filters. Solid fills and opacity only, so it stays crisp at any size and
-    renders identically everywhere.
+    Recoloured from the earlier blue version when the site moved to green. Solid fills and
+    strokes only — no gradients, no filters — so it stays crisp at any size.
   -->
-  <g fill="none" stroke="#4A9EFF" stroke-width="3" stroke-linecap="round"
-     stroke-linejoin="round" opacity="0.55">
-    <path d="M14 44 V16"/>
-    <path d="M14 16 L42 44"/>
-    <path d="M42 44 V16"/>
+  <g stroke="#15803d" stroke-linecap="round">
+    <line x1="16" y1="30" x2="22" y2="30" stroke-width="2.5"/>
+    <line x1="38" y1="27" x2="44" y2="17" stroke-width="2"/>
+    <line x1="38" y1="33" x2="44" y2="43" stroke-width="2"/>
   </g>
+  <circle cx="12" cy="30" r="6"   fill="#15803d"/>
+  <circle cx="30" cy="30" r="8"   fill="#22c55e"/>
+  <circle cx="47" cy="15" r="4.5" fill="#dcfce7" stroke="#15803d" stroke-width="2"/>
+  <circle cx="47" cy="45" r="4.5" fill="#dcfce7" stroke="#15803d" stroke-width="2"/>
 
-  <!-- compute nodes -->
-  <circle cx="14" cy="44" r="4"   fill="#4A9EFF"/>
-  <circle cx="42" cy="44" r="4"   fill="#4A9EFF"/>
-  <circle cx="42" cy="16" r="4"   fill="#4A9EFF"/>
-
-  <!-- the driver: larger, brighter, ringed -->
-  <circle cx="14" cy="16" r="9"   fill="#00D4FF" opacity="0.16"/>
-  <circle cx="14" cy="16" r="5.5" fill="#00D4FF"/>
-
-  <text x="66" y="38"
-        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
-        font-size="25" font-weight="700" letter-spacing="3" fill="#E6EDF3">NEURON</text>
+  <text x="66" y="39"
+        font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+        font-size="26" font-weight="700" letter-spacing="-0.5" fill="#166534">NEURON</text>
 </svg>

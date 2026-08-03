@@ -2,24 +2,21 @@
      role="img" aria-labelledby="neuron-favicon-title">
   <title id="neuron-favicon-title">NEURON</title>
   <!--
-    The same N-as-node-graph mark as logo.svg, redrawn rather than scaled: at 16px a
-    proportional reduction turns the strokes to grey mush. Everything here is heavier and the
-    padding is tighter, so the shape still reads in a browser tab.
+    Matches the mark used in the site header: a driver node feeding a hub, which fans out to
+    two peers. Each circle is a machine holding a slice of the model; the lines are activations
+    crossing between them. The hub is the largest because it carries the most.
 
-    No background rectangle — a transparent favicon sits correctly on a light or dark tab strip,
-    and #4A9EFF has enough contrast against both.
+    Redrawn rather than scaled from the 48px hero version — proportionally shrinking that one
+    turns the connectors to grey mush in a tab. Heavier lines, fewer of them, tighter padding.
+    No background rectangle, so it sits correctly on a light or dark tab strip.
   -->
-  <g fill="none" stroke="#4A9EFF" stroke-width="3.5" stroke-linecap="round"
-     stroke-linejoin="round" opacity="0.6">
-    <path d="M8 25 V8"/>
-    <path d="M8 8 L24 25"/>
-    <path d="M24 25 V8"/>
+  <g stroke="#15803d" stroke-width="2.6" stroke-linecap="round">
+    <line x1="8"  y1="16" x2="12" y2="16"/>
+    <line x1="21" y1="14" x2="25" y2="7"/>
+    <line x1="21" y1="18" x2="25" y2="25"/>
   </g>
-
-  <circle cx="8"  cy="25" r="3.6" fill="#4A9EFF"/>
-  <circle cx="24" cy="25" r="3.6" fill="#4A9EFF"/>
-  <circle cx="24" cy="8"  r="3.6" fill="#4A9EFF"/>
-
-  <!-- the driver node -->
-  <circle cx="8" cy="8" r="5.4" fill="#00D4FF"/>
+  <circle cx="5"  cy="16" r="4"   fill="#15803d"/>
+  <circle cx="16" cy="16" r="5.6" fill="#22c55e"/>
+  <circle cx="27" cy="6"  r="3.4" fill="#dcfce7" stroke="#15803d" stroke-width="2"/>
+  <circle cx="27" cy="26" r="3.4" fill="#dcfce7" stroke="#15803d" stroke-width="2"/>
 </svg>
