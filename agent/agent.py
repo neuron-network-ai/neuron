@@ -77,6 +77,11 @@ DEFAULT_CONFIG = {
     "slice_dir": "./model_slice/",
     "donation_mode": "idle", "idle_threshold_seconds": 60,
     "behind_nat": True, "log_level": "INFO",
+    # Check daily for a newer build, verify its published SHA-256, and install it. On by
+    # default because a stranger will not reinstall to pick up a fix, so a node that never
+    # updates keeps its shipped bugs for good. Set false and this node never even asks the
+    # coordinator about versions; read at startup, so it takes effect on the next start.
+    "auto_update": True,
     # Where this node's NRN goes if the ledger moves on-chain. Leave null and the agent
     # generates its own key (agent/payout_key.py) and binds it for you. Set it to your own
     # wallet address instead and the agent will NOT generate one -- bind it yourself with
@@ -913,9 +918,15 @@ class Agent:
 
     def update_loop(self):
         """Startup check, then every 24h. The whole point of the project reaching strangers:
-        they will not reinstall to pick up a fix, so fixes have to reach them."""
+        they will not reinstall to pick up a fix, so fixes have to reach them.
+
+        `auto_update` defaults to True — a node that never updates is a node running whatever
+        bugs it shipped with, forever. But this process downloads and executes a binary on
+        someone else's machine unattended, and an operator who would rather decide that for
+        themselves should not have to firewall us to do it."""
         from agent import updater
-        updater.update_loop(self.base, stop=self._stop, busy=self._serving_now)
+        updater.update_loop(self.base, stop=self._stop, busy=self._serving_now,
+                            enabled=self.cfg.get("auto_update", True))
 
     def run(self):
         self.setup()

@@ -8,5 +8,6 @@
   "donation_mode": "idle",
   "idle_threshold_seconds": 60,
   "behind_nat": true,
-  "log_level": "INFO"
+  "log_level": "INFO",
+  "auto_update": true
 }

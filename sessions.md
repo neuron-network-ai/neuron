@@ -2929,6 +2929,40 @@ coordinator is the only reliable isolation.
 
 ---
 
+## Session 42c (2026-08-03) — an opt-out for auto-update, before it is switched on
+
+Small, and deliberately landed *before* `AGENT_SHA256` is set: once the network is auto-updating
+and strangers are on it, adding a per-node opt-out means shipping it through the very mechanism
+some of them wanted to decline. Cheaper now than retrofitting onto installs already in the field.
+
+`auto_update` (default **true**) in `agent/config.json` and `DEFAULT_CONFIG`. `Agent.update_loop`
+passes it to `updater.update_loop(..., enabled=...)`, which logs and returns when false.
+
+Three choices worth recording:
+- **The flag is injected, not read from disk.** `updater.py` already takes `busy` as a callable
+  "passed in rather than imported so the updater carries no dependency on the node server" — the
+  same reasoning applies here, since config lives in `%LOCALAPPDATA%` for a frozen install and
+  next to the script for a checkout. The updater should not have to know which.
+- **Checked before the initial delay**, so a disabled node never waits 60s and never contacts
+  `/agent/version` at all. The test asserts that by making any HTTP call raise.
+- **Not applied to `check_once()` or the CLI.** An operator running
+  `python -m agent.updater --apply` by hand is asking for an update; a background setting should
+  not silently refuse a foreground request.
+
+Read once at startup, so a change takes effect on the next start — stated in INSTALL.md rather
+than left for someone to discover.
+
+`agent/test_updater.py` 28 → **34**. One of the six new cases was written wrong first and passed
+for the wrong reason: `check(..., calls == [] or True)` — an assertion with `or True` in it can
+only pass. Rewritten so the stubbed `check_once` ends the loop itself, which proves a check
+really ran rather than that the loop exited early for an unrelated reason. A fake green is worse
+than no test, and this one was mine.
+
+All **37** suites green by exit code. No installer rebuild: this reaches existing installs via
+the next update and new installs via 0.18.0, which is built but not yet published.
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load

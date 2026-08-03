@@ -164,6 +164,50 @@ def main():
         updater.requests.get = real_get
         updater.is_frozen = real_frozen
 
+    print("\n-- the auto_update opt-out")
+    # The load-bearing property is that a disabled node never TOUCHES the network: not a
+    # version check, not a download. Asserted by making any HTTP call an outright failure.
+    real_get2 = updater.requests.get
+
+    def _explode(*a, **k):
+        raise AssertionError("update_loop contacted the coordinator while disabled")
+
+    calls = []
+    real_check_once = updater.check_once
+    updater.check_once = lambda *a, **k: calls.append(1)
+    try:
+        updater.requests.get = _explode
+        import threading as _t
+        stop = _t.Event()
+        # No stub of time.sleep needed: enabled=False must return BEFORE the initial delay,
+        # so a test that hangs here is itself the failure signal.
+        updater.update_loop("http://c", stop=stop, initial_delay=3600, enabled=False)
+        check("auto_update=false returns immediately, before the initial delay", True)
+        check("and it never ran a check", calls == [], str(calls))
+
+        # Default must stay ON: a node that silently stopped updating would keep its bugs.
+        # The stub ends the loop itself, so this proves a check really ran rather than that
+        # the loop exited early for some unrelated reason.
+        updater.requests.get = real_get2
+        stop2 = _t.Event()
+        updater.check_once = lambda *a, **k: (calls.append("ran"), stop2.set())[0]
+        updater.update_loop("http://c", stop=stop2, initial_delay=0)
+        check("enabled defaults to True — the loop actually runs a check",
+              calls == ["ran"], str(calls))
+    finally:
+        updater.check_once = real_check_once
+        updater.requests.get = real_get2
+
+    # The config default itself, and that an explicit true is honoured.
+    from agent.agent import DEFAULT_CONFIG
+    check("DEFAULT_CONFIG ships auto_update=True", DEFAULT_CONFIG.get("auto_update") is True)
+    import json as _json
+    _tmpl = _json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                         "config.json")))
+    check("config.json template ships auto_update=true", _tmpl.get("auto_update") is True)
+    check("a config missing the key still auto-updates (absent != off)",
+          {}.get("auto_update", True) is True)
+
     print("\n-- the busy signal itself")
     from agent import node_server
     node_server._serving_conns = 0

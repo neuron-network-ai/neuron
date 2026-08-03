@@ -206,12 +206,29 @@ def check_once(base, busy=None, dest_dir=None, exit_after=True):
     return "installing" if apply_update(path, exit_after=exit_after) else "install-failed"
 
 
-def update_loop(base, stop=None, busy=None, interval=CHECK_SECONDS, initial_delay=60):
+def update_loop(base, stop=None, busy=None, interval=CHECK_SECONDS, initial_delay=60,
+                enabled=True):
     """Check shortly after startup, then every `interval` seconds.
 
     The initial delay lets registration, the slice download and the node server settle; an
     update racing startup would be the least useful possible moment to restart.
+
+    `enabled` is the operator's `auto_update` setting, passed in rather than read from disk for
+    the same reason `busy` is: this module stays free of any dependency on where config lives,
+    which differs between a frozen install (%LOCALAPPDATA%) and a source checkout.
+
+    Checked before the initial delay, so a node with auto-update off never waits and never
+    contacts the coordinator about versions at all. It is read once, at startup — changing the
+    setting takes effect the next time the agent starts, which INSTALL.md says plainly.
+
+    Deliberately NOT applied to `check_once()` or the CLI below: an operator who explicitly runs
+    `python -m agent.updater --apply` is asking for an update by hand, and a background setting
+    should not silently refuse a foreground request.
     """
+    if not enabled:
+        log.info("auto-update disabled (auto_update=false) — this node will not check for or "
+                 "install new versions; update it yourself by installing a newer build")
+        return
     if stop is not None:
         if stop.wait(initial_delay):
             return

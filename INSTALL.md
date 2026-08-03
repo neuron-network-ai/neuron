@@ -49,4 +49,11 @@ short message; sign that in your wallet and pass it back with `--signature`. You
 never leaves your wallet. (Changing an address later needs a signature from the old one — that
 way, someone who copies your config file still can't redirect your earnings.)
 
+**Automatic updates.** The agent checks once a day for a newer build, verifies its published
+SHA-256 before running anything, and never updates while your node is mid-request. It is on by
+default, because otherwise a fix never reaches you. To disable automatic updates, set
+`auto_update: false` in `%LOCALAPPDATA%\NEURON\config.json` (on Linux/macOS,
+`~/.local/share/NEURON/config.json`) and restart the agent — it is read at startup. With it off,
+your node never contacts the network about versions at all, and updating is up to you.
+
 **Remove everything:** `python agent/uninstall.py`
