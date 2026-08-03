@@ -3141,9 +3141,51 @@ remaining check costs the founder one glance at their own browser tab; if the ma
 
 ---
 
-## How to run
+## Session 45 (2026-08-03) — the install flow, and a light-theme snippet on a dark page
 
-**1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load
+The four-step flow (Download → Run → Sign in → Contribute), with icons, connectors, numbered
+captions and the six capability pills. It is a real improvement: the page previously explained
+onboarding in prose, and prose is the wrong shape for "what happens when I click this".
+
+Three things in the brief did not survive contact with the file, all recorded because each would
+have shipped a visible defect.
+
+**1. The section it said to replace does not exist.** "Replace the existing 'Join in four steps'
+step cards" — `docs/index.html` has no `.steps` grid and no step cards; `grep` returns zero. That
+markup is in a separate green mockup, not in the deployed page. Added as a new section between
+"How it works" and "What you need" instead, which is where the narrative wants it.
+
+**2. The colours are from a LIGHT mockup and would have been unreadable.** Measured rather than
+eyeballed, against this page's `#0d1117`:
+
+| element | supplied | contrast | |
+|---|---|---|---|
+| `.step-title` | `#1a2e1c` | **1.31:1** | near-black on near-black — invisible |
+| `.flow-pill` text | `#166534` | 2.65:1 | fails |
+| `.step-desc` | `#6b7280` | 3.91:1 | fails |
+
+WCAG AA wants 4.5:1. Pasted verbatim, all four step headings would have vanished. Six colour
+values remapped to the page palette; layout, icons, connectors, copy and the 600px breakpoint are
+untouched. After: title 16.02:1, description 6.15:1, number 6.87:1, pill 14.64:1, and the filled
+circle's glyph 6.85:1 — every pairing passes.
+
+**3. The Google Fonts `<link>` was dropped.** It would have been this page's only third-party
+request, on a site whose pitch is privacy — every visitor's IP handed to Google to fetch a
+typeface. That "zero external requests" property is verified and recorded in Session 44, so
+breaking it silently for Inter and Space Grotesk was not a trade worth making. The page stack is
+used instead. If those typefaces are actually wanted, self-hosting two woff2 files in `docs/`
+gets them with the property intact.
+
+Verified rendered at desktop and at 375px, where the media query hides the connectors and the
+steps reflow 2×2. External-URL audit re-run: still four links and the `/status` fetch, no asset
+loads.
+
+**Left alone deliberately:** the pills duplicate "What you need" almost exactly (No GPU / no
+crypto wallet / no payment details). The brief said keep everything else as it is, so both stay —
+but one of them is redundant, and "What you need" is the one carrying the GPU nuance the pills
+drop. Worth a decision rather than a silent deletion. Also still open: green vs blue for the
+whole page, which this snippet does not settle — it is light-green, matching neither the current
+blue page nor the dark-green mockup.
 on first connect.
 ```bash
 ssh <node-b-host> "cd ~/neuron && ./.venv/bin/python node_b.py --port 50999"

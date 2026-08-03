@@ -57,6 +57,43 @@
   footer{margin:72px 0 56px; padding-top:24px; border-top:1px solid var(--line);
          color:var(--muted); font-size:.85rem; text-align:center}
   footer a{color:var(--muted)}
+
+  /* --- install flow -------------------------------------------------------
+     Supplied against a LIGHT mockup. The six colour values are remapped to this
+     page's dark palette; layout, icons, connectors and copy are unchanged. The
+     originals were unusable here — #1a2e1c titles on #0d1117 measure 1.31:1,
+     where WCAG AA wants 4.5:1, so the four headings would have been invisible.
+     Fonts use the page stack rather than a Google Fonts <link>, which would have
+     been this page's only third-party request. */
+  .flow-wrap{padding:.5rem 0 0}
+  .flow-steps{display:flex; align-items:flex-start; justify-content:center; gap:0;
+              position:relative; flex-wrap:wrap}
+  .flow-step{display:flex; flex-direction:column; align-items:center; flex:1;
+             min-width:130px; max-width:170px; position:relative; z-index:1}
+  .step-circle{width:56px; height:56px; border-radius:50%; background:var(--panel);
+               border:2px solid var(--accent); display:flex; align-items:center;
+               justify-content:center; margin-bottom:12px; flex-shrink:0}
+  .step-circle svg{width:24px; height:24px; stroke:var(--accent); fill:none;
+                   stroke-width:2; stroke-linecap:round; stroke-linejoin:round}
+  .step-circle.last{background:var(--accent); border-color:var(--accent)}
+  .step-circle.last svg{stroke:#06121f}
+  .step-num{font-size:10px; font-weight:700; color:var(--accent); letter-spacing:1px;
+            margin-bottom:4px; text-align:center}
+  .step-title{font-size:15px; font-weight:700; color:var(--fg); margin-bottom:6px;
+              text-align:center}
+  .step-desc{font-size:12px; color:var(--muted); line-height:1.55; text-align:center}
+  .flow-connector{flex:0 0 40px; display:flex; align-items:flex-start; padding-top:27px;
+                  color:var(--accent); opacity:.45}
+  .flow-connector svg{width:40px; height:24px}
+  .flow-pills{display:flex; flex-wrap:wrap; gap:8px; justify-content:center;
+              margin-top:1.5rem; padding-top:1.5rem; border-top:1px solid var(--line)}
+  .flow-pill{background:var(--panel); border:1px solid var(--line); border-radius:20px;
+             padding:4px 14px; font-size:11px; font-weight:500; color:var(--fg)}
+  @media(max-width:600px){
+    .flow-connector{display:none}
+    .flow-step{min-width:140px}
+    .flow-steps{gap:22px}
+  }
 </style>
 </head>
 <body>
@@ -103,6 +140,61 @@
     there is no exchange and no sale, and we would rather say so here than have you find out
     later. Your node pauses the moment you touch the keyboard, and on battery.
   </p>
+
+  <h2>Join in four steps</h2>
+  <div class="flow-wrap">
+    <div class="flow-steps">
+      <div class="flow-step">
+        <div class="step-circle">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16l-4-4h3V4h2v8h3l-4 4z"/><path d="M4 18h16"/></svg>
+        </div>
+        <div class="step-num">01</div>
+        <div class="step-title">Download</div>
+        <div class="step-desc">Windows installer. Downloads only your layer slice — not the full model.</div>
+      </div>
+      <div class="flow-connector" aria-hidden="true">
+        <svg viewBox="0 0 40 24" fill="none"><path d="M4 12h32M28 6l8 6-8 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="flow-step">
+        <div class="step-circle">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg>
+        </div>
+        <div class="step-num">02</div>
+        <div class="step-title">Run</div>
+        <div class="step-desc">Picks its own layer range. No port forwarding, no VPN. Relay built in.</div>
+      </div>
+      <div class="flow-connector" aria-hidden="true">
+        <svg viewBox="0 0 40 24" fill="none"><path d="M4 12h32M28 6l8 6-8 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="flow-step">
+        <div class="step-circle">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        </div>
+        <div class="step-num">03</div>
+        <div class="step-title">Sign in</div>
+        <div class="step-desc">Google or GitHub. Account created instantly. No payment details.</div>
+      </div>
+      <div class="flow-connector" aria-hidden="true">
+        <svg viewBox="0 0 40 24" fill="none"><path d="M4 12h32M28 6l8 6-8 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="flow-step">
+        <div class="step-circle last">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+        </div>
+        <div class="step-num">04</div>
+        <div class="step-title">Contribute</div>
+        <div class="step-desc">Verified in ~60s. Earns compute credits. Pauses when you use your machine.</div>
+      </div>
+    </div>
+    <div class="flow-pills">
+      <span class="flow-pill">No GPU required</span>
+      <span class="flow-pill">No crypto wallet</span>
+      <span class="flow-pill">No port forwarding</span>
+      <span class="flow-pill">No payment details</span>
+      <span class="flow-pill">Spare capacity only</span>
+      <span class="flow-pill">Apache 2.0 open source</span>
+    </div>
+  </div>
 
   <h2>What you need</h2>
   <ul>
