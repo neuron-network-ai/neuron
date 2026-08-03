@@ -3080,9 +3080,28 @@ literally `neuron-network-ai.github.io`. This repo is `neuron`, so Pages serves 
 until such a repo exists. CORS is unaffected either way — an Origin is scheme + host and never a
 path — so the entry already covers the project path.
 
-**Pages is not enabled and could not be.** `gh` is not installed and the API needs auth this
-session does not have; `GET /repos/.../pages` returns 404, confirming it is off. Left for the
-founder: Settings → Pages → Source "Deploy from a branch" → `main` / `/docs`.
+**Pages could not be enabled from here** — `gh` is not installed and the API needs auth this
+session does not have. The founder enabled it: Settings → Pages → branch `main`, folder `/docs`.
+
+### Live, and verified from the real origin
+`https://neuron-network-ai.github.io/neuron/` returns **200**. The bare org root still 404s,
+exactly as predicted, and will until a repo named `neuron-network-ai.github.io` exists.
+
+The check that actually settles CORS is not curl with an `Origin` header — it is a browser on the
+real origin, because only that exercises the same-origin policy for real. Loaded the published
+page and read its DOM back: `origin: https://neuron-network-ai.github.io`, `path: /neuron/`, and
+the panel populated with **2 nodes, 21/28, 38 requests, 25.81 NRN**, timestamped and re-fetching.
+Zero console errors, so nothing was silently blocked. The dot is amber and the health line is the
+incomplete-chain text, which is the correct reading of a 21/28 network rather than a failure.
+
+All four outbound links return 200: the 0.18.0 installer, INSTALL.md, the repository and the
+dashboard. (One returned `000` on the first pass — a curl transport blip, not a 404. Worth
+re-running a failed probe before believing it; this session saw the same transient DNS failure
+take out a `git push` and two `/status` reads.)
+
+Note the Pages **API** still answers 404 anonymously even though the site is up: reading a
+repository's Pages configuration needs auth, public repo or not. The site's own response code is
+the ground truth, not the API's.
 
 ---
 
