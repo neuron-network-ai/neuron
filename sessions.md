@@ -3641,6 +3641,96 @@ rewrites nothing. `origin/HEAD` still points at `main-full`, which remains the w
 
 ---
 
+## Session 49 (2026-08-03) — AMB measured before it was built, and the measurement says no
+
+`research/AMB_THEORY.md` (Activation Momentum Buffering — predict the next activation from an
+EMA of past deltas, so a node can keep serving through an upstream failure without replicas)
+proposed its own decision gate: measure first, and if one-step prediction accuracy comes in
+under 40%, the idea needs revision. **It came in at 8.6%.** No AMB implementation was written.
+
+The theory doc is deliberately **not** in the repo — `research/` is gitignored until arXiv
+submission, on the same footing as `TOKENOMICS.md` and `blockchain/`. Only the measurement
+tool is committed, because it is useful independent of whether AMB survives.
+
+### `tools/measure_amb.py` — and the known-answer test that made it trustworthy
+Greedy-decodes 20 prompts (7 conversational / 7 code / 6 structured) through real
+Qwen2.5-1.5B-Instruct weights, fp32, recording the residual-stream activation at layers
+9, 14, 18 and 27 — the actual NEURON wire boundaries (node_a→node_c, node_c→node_b,
+node_b→head), plus layer 14 as a mid-slice control. 640 decode steps.
+
+For §5.3 it re-runs each decode step with the boundary activation **replaced** by the
+prediction, against a clone of the pre-step KV cache — so the substituted token attends to
+K/V that the *real* activations wrote for every earlier position. That is the actual failure
+semantics, and it is the part that could quietly have been wrong. Validated by substituting the
+**real** activation and requiring the logits back bit-for-bit: `KL = 0.00e+00`,
+`max|Δlogit| = 0.00e+00` at all four boundaries. A negative result is only worth anything if
+the harness would have shown a positive one.
+
+Two metrics the theory did not ask for, without which its own headline number is unreadable:
+a **HOLD baseline** (predict a_N+1 = a_N — momentum pinned to zero), and **delta capture**
+(`1 - ||pred-real|| / ||real-a_N||`, the fraction of the real change explained; ≤0 means
+momentum earns nothing over doing nothing).
+
+### The numbers
+| | layer 9 | layer 14 | layer 18 | layer 27 |
+|---|---|---|---|---|
+| §5.1 corr(a_N, a_N+1) | 0.559 | 0.630 | **0.673** | 0.548 |
+| §5.2 accuracy, k=1, α=0.9 | 2.2% | 10.2% | 17.0% | −1.6% |
+| HOLD, same conditions | 7.0% | 14.5% | 21.0% | 3.4% |
+| delta capture | −5.1% | −5.1% | −5.1% | −5.2% |
+| §5.3 same token emitted | 0.9% | 0.5% | 0.5% | 0.3% |
+| §5.4 empirical K (mean/max) | 1.00 / 1.12 | 1.00 / 1.07 | 1.15 / 1.35 | 0.79 / 1.33 |
+
+Gate (k=1, α=0.9, wire boundaries 9 and 18): **accuracy 8.6%, hold 13.1%, delta capture −5.1%.**
+
+### Three findings, in order of how much they matter
+**1. The momentum term is not weak — it is harmful.** Momentum lost to hold in **580 of 580**
+one-step predictions at layer 9, and 580 of 580 at layer 18. Not a wash, not noise: zero wins.
+The α sweep says the same thing structurally — accuracy rises monotonically with α across
+0.85 → 0.90 → 0.95 at every layer and every buffer depth, and α→1 *is* the hold predictor. The
+EMA is being asked to extrapolate a direction that does not persist, so every unit of momentum
+added is a unit of error added. §2.2 is the part that fails.
+
+**2. §5.1 and §5.2 set thresholds that cannot both be met.** This is the finding worth keeping.
+For vectors of equal norm, `||a-b|| = ||a||·√(2(1-cos))`, so the §5.2 metric is fixed by the
+§5.1 metric: cosine 0.56 *is* 6.1% accuracy. Measured against predicted, layer by layer:
+6.1/6.1, 14.2/13.9, 20.1/19.1, 5.3/4.9 — the identity holds to a percentage point. Running it
+backwards: **40% accuracy needs cosine ≥ 0.82, and 60% needs ≥ 0.92.** The theory asked for
+> 0.5 and expected > 0.7. Correlation 0.673 at layer 18 clears §5.1's bar comfortably and
+still only buys 20% accuracy. §5.1 passed; it was the wrong bar.
+
+**3. Speculative tokens would be garbage, not degraded.** §4.3 promised graceful degradation —
+"coherent and on-topic" prose, worse on code. Measured: the predicted activation produces the
+same token **0.3–0.9%** of the time, with KL(real‖spec) ≈ 14 nats. Conversational prompts
+scored **0.0%** at every boundary — the *best* case for smoothness was the worst case here.
+There is no failure window in which AMB buys time; the first speculative token derails the
+generation, and §4.4's self-correction has nothing to correct back toward.
+
+The mechanism is not mysterious. The residual stream at position N is dominated by the identity
+of token N. Consecutive tokens are different words, so consecutive activations are far apart —
+mean ‖a‖ at layer 9 is 44.3 and the mean one-step prediction error is 47.7. §2.1's example
+("'mat' resembles 'sat'") conflates *semantic* similarity with *vector* proximity; the
+measurement says the second does not follow from the first.
+
+### What is not measured, and is not claimed
+§5.5 is half-done and honestly labelled as such. The denominator is real — 304 ms/decode step
+on this box, batch 1, no network — but the recovery-time numerator needs a node actually dying
+against the live coordinator, which is Phase 4. The script prints required B against a range of
+assumed recovery times rather than inventing one.
+
+The Lipschitz numbers (§5.4) are the one part of the theory that held: K ≈ 1.0–1.15 per layer,
+max 1.35, so error does not explode through the stack — layer norm does what §3.5 said it would.
+That bound is sound. It is simply bounding an input error that is already the size of the
+signal.
+
+**Not done, deliberately:** no `common/amb.py`, no `AMBPredictor`, no integration. Phase 2 was
+gated on this measurement and the gate said stop. Any revision has to start upstream of the
+predictor — a smoothness that is not there cannot be recovered by a better extrapolator. If it
+is revisited, layer 18 is the least-bad boundary and depth helps monotonically to that point,
+which is a hint about *where* to look, not evidence that anything works.
+
+---
+
 ## Known limits / next steps
 - **Throughput scales with nodes (single 3.2 → 2-node 4.6 → 3-node 6.2 tok/s), but
   sub-linearly** because the nodes are heterogeneous and node_a carries the fixed
