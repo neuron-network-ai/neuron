@@ -3017,6 +3017,19 @@ no sale. Nothing is concealed by that framing: the application links the reposit
 `whitepaper.md` §7 there sets out the on-chain intention in full. If a reviewer asks directly,
 the answer is in the same repo the application cites.
 
+**Two edits after review.** Section 2 gained a sentence naming who is actually shut out —
+a researcher where these services are restricted, a developer who cannot afford per-token
+pricing — which is the concrete version of an otherwise abstract argument about access. The
+code-signing line became "certificate **and infrastructure review**": the same €5,000, but it
+now says a security review before wider distribution is part of the responsible step, which is
+honest about what shipping an unsigned binary to strangers actually requires.
+
+That takes the document to **821 words**, past the 800 it was written to. Left as-is rather than
+trimmed, since both additions are substantive and NLnet's form has no hard limit — but the
+number is recorded here so nobody assumes the constraint still holds. ("per-token pricing" trips
+a naive grep for `token`; it means text tokens, i.e. how the hosted APIs bill, and is the one
+sense of the word the framing rules were never about.)
+
 ---
 
 ## How to run

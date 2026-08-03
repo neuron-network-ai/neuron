@@ -13,7 +13,8 @@ capability sits with a handful of companies who can read what is sent to them, p
 choose, and withdraw it. Meanwhile the world already contains billions of general-purpose
 processors idling at a few percent of capacity. NEURON lets ordinary machines pool that spare
 capacity to run models none of them could run alone, so the capability does not depend on any
-single operator's permission.
+single operator's permission. A researcher in a country where these services are restricted, or
+a developer who cannot afford per-token pricing, has no practical alternative today.
 
 ## 3. What is your solution?
 
@@ -58,7 +59,7 @@ contributed, held in an ordinary database. It has no cash value, there is no exc
 | **DHT peer discovery (libp2p)** — machines find each other and form chains with no central service. This is what removes the coordinator from the critical path. | €15,000 |
 | **Coordinator redundancy + PostgreSQL** — replace the single SQLite instance with a replicated database and several stateless coordinators, so the network survives losing one machine. | €10,000 |
 | **Android agent (ARM NEON kernel)** — phones charging overnight are the most abundant idle hardware there is. Requires porting the compute kernel from AVX2 to NEON. | €15,000 |
-| **Code signing certificate** — the installer is unsigned, so Windows warns every newcomer that it is unrecognised. This is the single largest barrier to a non-technical person joining. | €5,000 |
+| **Code signing certificate and infrastructure review** — the installer is unsigned, so Windows warns every newcomer that it is unrecognised. A signed binary removes the single largest practical barrier to a non-technical person joining, and a security review before wider distribution is the responsible step alongside it. | €5,000 |
 | **Total** | **€45,000** |
 
 ## 5. Why does this advance the open internet?
