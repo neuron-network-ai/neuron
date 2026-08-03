@@ -3429,10 +3429,32 @@ the README under Download as **"Android: see ANDROID_INSTALL.md (APK coming soon
 **The doc leads the build, and says so.** There is no Android client in this repository and no
 APK on the releases page. The guide names `NEURON-android-vX.X.X.apk` and the sideload path
 through Android's "install unknown apps" prompt, so the README link carries *(APK coming soon)*
-rather than reading as a live download. Written this way deliberately: the behaviour it promises
-is a specification for the client — charging + WiFi only, paused on mobile data, paused above
-38°C, paused while the screen is on — and those are the constraints the app has to meet, not a
-description of something already running.
+rather than reading as a live download. Written this way deliberately: what it describes is a
+specification for the client, not a description of something already running.
+
+**The first draft hardcoded the behaviour, and that was wrong.** It listed charging + WiFi +
+screen-off as fixed rules the app enforces. The founder's correction: those are the owner's
+choices, not ours. Rewritten around the vocabulary `agent/resource_guard.py` already uses — the
+same four **contribution levels** as the desktop agent (idle / balanced / generous / max), so a
+phone and a laptop are configured with one concept rather than two.
+
+Three things the phone needs that the desktop guard has no equivalent for, now specified:
+
+- **`wifi_only`** (default on) with a **monthly mobile data cap** (default 2 GB) behind it.
+  Mobile data costs the owner real money, including the ~800 MB first download — an opt-in with
+  a cap is the only honest way to offer it.
+- **A battery floor** (default 40%, hard minimum 15%), which only bites at generous/max.
+- **Quiet hours** — a window where the phone never contributes whatever the level says.
+
+**What stayed non-negotiable, and why.** Battery temperature above 40 °C, battery below 15%,
+Android's own battery saver, and the <500 MB RAM rail apply at every level including max. Heat
+permanently degrades a phone battery, so that one is not the owner's to override — the doc says
+so in those words rather than hiding it. The 38 °C figure from the first draft was a pause
+*threshold* presented as a rule; as a rail it belongs at 40 °C.
+
+Every setting in the table is written with what it **costs** the owner, not just what it does —
+slower charging, a warmer phone, your data allowance — because a contribution level chosen
+without that is not consent.
 
 **The claims it makes that the network must keep.** Two are load-bearing and worth naming so
 they are not quietly broken later:
