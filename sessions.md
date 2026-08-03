@@ -3126,13 +3126,18 @@ and search engines rather than losing it to an `<img>`. **The page still makes z
 requests** — both files are same-origin relative paths, verified by listing every absolute URL in
 the file: four links and the `/status` fetch, no asset loads.
 
-**Honest limit on the verification.** The logo was confirmed visually at full size in the
-rendered page. The 16px favicon was **not** seen rendered: the preview pane went unreliable —
-`navigate` timed out twice on a scratchpad path, then served a stale tab, and a fresh tab
-reported "no site open" after a successful navigate. So legibility at tab size rests on the
-geometry above, not on an image anyone looked at, and the real check is the browser tab once it
-is live. Both files were validated as well-formed XML with no external references, which is the
-part that can be checked properly from here.
+**Honest limit on the verification.** The logo was confirmed visually — at full size, at reduced
+width on the live site, and it reads at both. The **16px favicon was never seen rendered**. The
+preview pane failed in three different ways: `navigate` timed out twice on a scratchpad path,
+then served a stale tab, then `javascript_tool` reported "no site open" twice immediately after
+a navigate that had just succeeded and screenshotted. So legibility at tab size rests on the
+geometry above, not on an image anyone looked at. Both files validate as well-formed XML with no
+external references, which is the part that could be checked properly from here.
+
+After the Pages rebuild all three assets serve correctly — `index.html` `text/html`, `logo.svg`
+and `favicon.svg` both **`image/svg+xml`** — and the published HTML references both. The
+remaining check costs the founder one glance at their own browser tab; if the mark reads muddy at
+16px, thickening `stroke-width` in `favicon.svg` is a one-line change.
 
 ---
 
