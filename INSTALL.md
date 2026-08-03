@@ -13,6 +13,10 @@ too big for any one computer. You earn **NRN** for that work.
 - **The network is small right now** (a handful of machines), so earnings are small. They grow
   as more people join.
 - Your node pauses the moment you touch your keyboard, and on battery.
+- **If your machine has an NVIDIA GPU**, NEURON detects it automatically and tells the network
+  it is there — and it pauses your node while the GPU is busy, so a game or a render is never
+  competing with it. Being honest about the current limit: inference itself still runs on your
+  CPU, so a GPU does not make your node faster yet. Nothing to install or configure either way.
 - First start downloads about **1.4 GB** and takes a few minutes.
 - Windows may warn the installer is "unrecognized" — it isn't signed yet. The source is public.
 

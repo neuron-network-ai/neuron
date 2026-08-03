@@ -318,8 +318,10 @@ presently worth, which is why NEURON is positioned as compute-barter and not as 
 
 - **Early alpha, v0.17.1.** The installer is Windows-only and **unsigned**, so SmartScreen warns
   that it is unrecognised. Code signing needs a certificate and is a pre-distribution step.
-- **The network is very small** — a handful of machines, all belonging to the project. As of
-  Session 36 the live coordinator reported 2 nodes online covering 21 of 28 layers. **No person
+- **The network is very small** — a handful of machines, all belonging to the project. The live
+  coordinator right now reports **2 nodes online covering 21 of 28 layers**, so the chain is
+  incomplete and `network_healthy` is `false`: one node holds 0–13, the other 14–20, and nothing
+  is serving 21–27. Lifetime totals are 38 requests and 25.81 NRN distributed. **No person
   outside the project has ever run a node.** That is the milestone that has not happened.
 - **NRN has no cash value.** No exchange, no sale, no promise of either. It is a record of
   compute contributed.

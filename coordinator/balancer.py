@@ -17,7 +17,26 @@ Model: node i does k_i layers at s_i ms/layer plus fixed cost H_i (head on the d
 
 Then round the fractional k_i to integers summing to L (>=1 each) by largest remainder.
 Pure Python, no torch — safe to import in the lightweight coordinator.
+
+**On GPUs.** Nodes now report `has_gpu` / `gpu_vram_gb`, and this solver uses them in exactly
+one honest way: as a tie-break when layers have to move, so a GPU machine collects them ahead
+of an equally-fast CPU machine. It deliberately does NOT treat a GPU as a speed multiplier —
+a node's speed is its MEASURED `ms_per_layer`, which already reflects whatever hardware it
+actually ran on, and multiplying a measured number by a guessed factor would double-count.
+VRAM as *capacity* is implemented but switched off; see GPU_EXECUTION below.
 """
+
+# May a node's VRAM be counted toward how many layers it can HOLD?
+#
+# No, and this must stay off until the pipeline can execute on the GPU. `common.py` builds
+# every shard into system RAM and there is no device selection anywhere in the inference path,
+# so a GPU node computes on its CPU and its VRAM holds nothing. Counting VRAM as capacity would
+# hand that node more layers than its system RAM can take and OOM-kill a volunteer's machine —
+# precisely the failure max_layers_for() was added to prevent.
+#
+# The arithmetic is written and tested so that enabling GPU execution is a one-line change here
+# rather than a re-derivation later. Flipping this without a CUDA path in common.py is a bug.
+GPU_EXECUTION = False
 
 
 def _apportion(raw, total, min_each=1):
@@ -50,17 +69,34 @@ def max_layers_for(node, gb_per_layer, headroom=0.75):
     `headroom` leaves a quarter of free RAM alone: these are machines somebody is using, and
     the resident figure excludes the KV cache, the transient fp32 cast in CastLinear, and
     the process itself.
+
+    A GPU node's VRAM is added only when GPU_EXECUTION is on — see the note at the top of this
+    module. While it is off, a GPU node is capped by system RAM exactly like any other node,
+    which is the truth about where its weights live.
     """
     free = node.get("ram_free_gb")
     if not free or not gb_per_layer:
         return None                     # unknown -> no constraint, same as before
-    return max(int((float(free) * headroom) / gb_per_layer), 1)
+    usable = float(free)
+    if GPU_EXECUTION and node.get("has_gpu") and node.get("gpu_vram_gb"):
+        usable += float(node["gpu_vram_gb"])
+    return max(int((usable * headroom) / gb_per_layer), 1)
+
+
+def _prefers_gpu(nodes):
+    """Sort key factory: among candidates that are otherwise equal, put GPU nodes first.
+
+    This is the whole of "GPU nodes are preferred for larger layer counts" — a tie-break, not
+    a weighting. It only ever changes WHICH of two equally-suitable nodes receives a layer that
+    had to move anyway, so on an all-CPU network (every network today) it is a no-op.
+    """
+    return lambda i: (0 if nodes[i].get("has_gpu") else 1)
 
 
 def solve(nodes, total_layers, gb_per_layer=None):
-    """nodes: list of {"node_id", "ms_per_layer", "head_ms"(optional), "ram_free_gb"(optional)}
-    in PIPELINE ORDER (driver first). Returns a list of assignments with contiguous layer
-    ranges and the predicted per-stage time.
+    """nodes: list of {"node_id", "ms_per_layer", "head_ms"(optional), "ram_free_gb"(optional),
+    "has_gpu"(optional), "gpu_vram_gb"(optional)} in PIPELINE ORDER (driver first). Returns a
+    list of assignments with contiguous layer ranges and the predicted per-stage time.
 
     `gb_per_layer` (when known) turns each node's free RAM into a hard cap on its layer
     count -- see max_layers_for. Without it the behaviour is exactly as before.
@@ -79,6 +115,7 @@ def solve(nodes, total_layers, gb_per_layer=None):
     # network genuinely cannot hold the model, `capacity_shortfall` says so rather than
     # returning a plan that OOM-kills a volunteer's machine.
     caps = [max_layers_for(n, gb_per_layer) for n in nodes]
+    gpu_first = _prefers_gpu(nodes)
     if any(c is not None for c in caps):
         caps = [c if c is not None else total_layers for c in caps]
         for _ in range(total_layers):
@@ -89,7 +126,8 @@ def solve(nodes, total_layers, gb_per_layer=None):
             if not room:
                 break                      # nowhere left to put it -- reported below
             src = max(over, key=lambda i: ks[i] - caps[i])
-            dst = min(room, key=lambda i: s[i])     # the fastest node with space
+            # fastest node with space; a GPU node wins a tie on speed
+            dst = min(room, key=lambda i: (s[i], gpu_first(i)))
             ks[src] -= 1
             ks[dst] += 1
 
@@ -102,6 +140,7 @@ def solve(nodes, total_layers, gb_per_layer=None):
             "layer_end": end,
             "layers": ks[i],
             "stage_ms": round(s[i] * ks[i] + H[i], 2),
+            "has_gpu": bool(n.get("has_gpu")),
         })
         start = end + 1
     return out

@@ -75,7 +75,7 @@ hiddenimports += ["sqlite3", "_sqlite3"]
 hiddenimports += ["common", "slice_downloader", "tunnel_client", "neuron_driver", "node_a",
                   "agent", "agent.agent", "agent.resource_guard", "agent.node_server",
                   "agent.tray", "agent.uninstall", "agent.local_chat",
-                  "agent.payout_key", "agent.bind_payout",
+                  "agent.payout_key", "agent.bind_payout", "agent.gpu",
                   "ui", "ui.app", "ui.oauth", "api", "api.openai_compat",
                   "safety", "safety.moderation", "rag", "rag.retriever",
                   "engine", "engine.local_gguf",

@@ -40,6 +40,12 @@ class RegisterBody(BaseModel):
     platform: str | None = None         # e.g. "Windows-11-10.0.26200"; with cores/ram_gb this
                                         # forms the coarse hardware signature a sybil signal
                                         # groups on. Optional: older agents omit it.
+    has_gpu: bool = False               # NVIDIA GPU detected (torch.cuda, else nvidia-smi).
+    gpu_vram_gb: float | None = None    # total VRAM; lets the balancer size a slice against
+                                        # the GPU's memory instead of only system RAM.
+    gpu_name: str | None = None         # e.g. "NVIDIA GeForce RTX 4070". Operator-only in
+                                        # /node/list — a card model is fingerprinting detail,
+                                        # like `platform`.
 
 
 class InferBody(BaseModel):
@@ -319,7 +325,8 @@ def register(body: RegisterBody, x_register_secret: str = Header(default=None),
         body.node_id, tailscale_ip, port, body.layer_start,
         body.layer_end, body.cores, body.ram_gb, token,
         ms_per_layer=body.ms_per_layer, head_ms=body.head_ms, trusted=trusted,
-        platform=body.platform)
+        platform=body.platform, has_gpu=body.has_gpu, gpu_vram_gb=body.gpu_vram_gb,
+        gpu_name=body.gpu_name)
     # Sybil SIGNAL, never a block. One machine registering several node_ids in a day is what a
     # sybil looks like -- and also what a legitimate operator running two nodes on a spare PC
     # looks like, and what two identical laptops look like, since the fingerprint is only
@@ -381,10 +388,13 @@ def node_list(x_register_secret: str = Header(default=None)):
     The hardware signature is operator-only for the same reason the addresses are: published
     against node ids it would let anyone group the roster by machine, which is precisely the
     correlation the private-earnings and private-address decisions exist to prevent. It is a
-    review signal, not public information."""
+    review signal, not public information. `gpu_name` joins it: a specific card model is
+    distinctive enough to correlate on, where the coarse `has_gpu`/`gpu_vram_gb` pair is no
+    more identifying than the `cores`/`ram_gb` already published."""
     show_addr = x_register_secret == config.REGISTRATION_SECRET
     hidden = ({"node_token"} if show_addr
-              else {"node_token", "tailscale_ip", "port", "hw_fingerprint", "platform"})
+              else {"node_token", "tailscale_ip", "port", "hw_fingerprint", "platform",
+                    "gpu_name"})
     nodes = [{k: v for k, v in n.items() if k not in hidden} for n in models.list_nodes()]
     return {"nodes": nodes}
 
@@ -758,7 +768,11 @@ def _balanced_plan():
     # the driver (carries lm_head, head_ms > 0) goes first, then the rest
     nodes.sort(key=lambda n: (0 if (n.get("head_ms") or 0) > 0 else 1, n["layer_start"]))
     bnodes = [{"node_id": n["node_id"], "ms_per_layer": n["ms_per_layer"],
-               "head_ms": n.get("head_ms") or 0.0} for n in nodes]
+               "head_ms": n.get("head_ms") or 0.0,
+               # GPU is a tie-break in the balancer, never a speed multiplier — a node's speed
+               # is the ms_per_layer it actually measured. See coordinator/balancer.py.
+               "has_gpu": bool(n.get("has_gpu")), "gpu_vram_gb": n.get("gpu_vram_gb")}
+              for n in nodes]
     return balancer.plan(bnodes, serving_model()["layers"])
 
 

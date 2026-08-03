@@ -127,16 +127,18 @@ split across the chain in proportion to layers held — a node holding `L` of 28
 
 ## Status
 
-**Session 36 complete.**
+**Session 41 complete** — the network is live and open to strangers. Coordinator at
+[neuronnet.duckdns.org](https://neuronnet.duckdns.org) (dashboard at
+[/dashboard](https://neuronnet.duckdns.org/dashboard)). Install the agent and your machine
+registers itself, picks its own layer range, downloads only that slice, and is auto-verified
+within about a minute — no operator, no approval queue, no shared secret. NAT traversal is
+built in via the relay — no VPN, no port forwarding, no Tailscale. Just install and run.
 
-- Network **live** at [neuronnet.duckdns.org](https://neuronnet.duckdns.org).
-- Installer **0.17.1 released** — the local chat UI works, and this is the last build anyone
-  has to install by hand.
-- **Auto-update working**: the app checks daily, verifies a published SHA-256 before running
-  anything, and never updates mid-request. Fixes reach volunteers without asking them.
-- **Auto-verification working**: peers verify a new node by quorum, no human in the path.
-- **Earnings have an owner**: each node registers an Ethereum address it proves it controls,
-  so balances can leave the coordinator's database intact.
+- Installer **0.17.1 released**, and **auto-update works**: the app checks daily, verifies a
+  published SHA-256 before running anything, and never updates mid-request.
+- **Earnings have an owner**: each node registers an Ethereum address it proves it controls.
+- **NVIDIA GPUs are detected and respected** — a node reports its card and steps aside while
+  the GPU is busy. Inference itself is still CPU-only, so a GPU does not make a node faster yet.
 - **First stranger: pending.** Nobody outside the project has run it yet.
 
 Next: several stateless coordinators over a shared database (so it isn't one process), then

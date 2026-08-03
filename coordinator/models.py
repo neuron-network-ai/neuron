@@ -30,6 +30,12 @@ CREATE TABLE IF NOT EXISTS nodes (
     node_token    TEXT NOT NULL,
     platform      TEXT,
     hw_fingerprint TEXT,
+    -- GPU capability, as reported by the node. Recorded so the balancer can size a slice
+    -- against VRAM rather than only system RAM. It is NOT a speed signal: the pipeline is
+    -- CPU-only today, and a node's real speed is its measured ms_per_layer.
+    has_gpu       INTEGER NOT NULL DEFAULT 0,
+    gpu_vram_gb   REAL,
+    gpu_name      TEXT,
     status        TEXT NOT NULL DEFAULT 'online',
     last_seen     REAL NOT NULL,
     registered_at REAL NOT NULL
@@ -147,6 +153,15 @@ def init_db():
         for col in ("platform", "hw_fingerprint"):               # Sybil signals
             if col not in cols:
                 c.execute(f"ALTER TABLE nodes ADD COLUMN {col} TEXT")
+        # GPU capability. Existing rows default to has_gpu=0 rather than NULL: an older agent
+        # that never reports the field is a node we have no GPU evidence for, and "no evidence"
+        # must behave as CPU-only everywhere downstream rather than as unknown-and-special.
+        if "has_gpu" not in cols:
+            c.execute("ALTER TABLE nodes ADD COLUMN has_gpu INTEGER NOT NULL DEFAULT 0")
+        if "gpu_vram_gb" not in cols:
+            c.execute("ALTER TABLE nodes ADD COLUMN gpu_vram_gb REAL")
+        if "gpu_name" not in cols:
+            c.execute("ALTER TABLE nodes ADD COLUMN gpu_name TEXT")
         if "trusted" not in cols:                                # S12 (open join)
             c.execute("ALTER TABLE nodes ADD COLUMN trusted INTEGER NOT NULL DEFAULT 0")
             # every pre-open-join node registered under the shared secret -> grandfather
@@ -217,6 +232,7 @@ def _node_dict(row, now=None):
     d = dict(row)
     d["status"] = _status(d["last_seen"], now)
     d["assigned_layers"] = [d["layer_start"], d["layer_end"]]
+    d["has_gpu"] = bool(d.get("has_gpu"))
     # proof-of-compute reputation (Session 16)
     p, f = d.get("challenges_passed") or 0, d.get("challenges_failed") or 0
     total = p + f
@@ -324,16 +340,20 @@ def hardware_fingerprint(cores, ram_gb, platform):
 
 def register_node(node_id, tailscale_ip, port, layer_start, layer_end, cores,
                   ram_gb, token, ms_per_layer=None, head_ms=None, trusted=False,
-                  platform=None):
+                  platform=None, has_gpu=False, gpu_vram_gb=None, gpu_name=None):
     now = time.time()
+    # GPU fields are deliberately NOT folded into hardware_fingerprint. Changing the
+    # fingerprint format would give every existing node a new signature, so nothing would
+    # match its own history and the sybil signal would go quiet for 24h at exactly the moment
+    # it looks like it is working. The fingerprint stays cores/RAM/OS.
     fingerprint = hardware_fingerprint(cores, ram_gb, platform)
     with _db() as c:
         c.execute(
             """INSERT INTO nodes (node_id, tailscale_ip, port, layer_start, layer_end,
                                   cores, ram_gb, ms_per_layer, head_ms, trusted, node_token,
-                                  platform, hw_fingerprint,
+                                  platform, hw_fingerprint, has_gpu, gpu_vram_gb, gpu_name,
                                   status, last_seen, registered_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 'online', ?, ?)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'online', ?, ?)
                ON CONFLICT(node_id) DO UPDATE SET
                    tailscale_ip=excluded.tailscale_ip, port=excluded.port,
                    layer_start=excluded.layer_start, layer_end=excluded.layer_end,
@@ -342,10 +362,14 @@ def register_node(node_id, tailscale_ip, port, layer_start, layer_end, cores,
                    head_ms=COALESCE(excluded.head_ms, nodes.head_ms),
                    platform=COALESCE(excluded.platform, nodes.platform),
                    hw_fingerprint=COALESCE(excluded.hw_fingerprint, nodes.hw_fingerprint),
+                   has_gpu=excluded.has_gpu,
+                   gpu_vram_gb=COALESCE(excluded.gpu_vram_gb, nodes.gpu_vram_gb),
+                   gpu_name=COALESCE(excluded.gpu_name, nodes.gpu_name),
                    trusted=excluded.trusted,
                    node_token=excluded.node_token, status='online', last_seen=excluded.last_seen""",
             (node_id, tailscale_ip, port, layer_start, layer_end, cores, ram_gb,
              ms_per_layer, head_ms, 1 if trusted else 0, token, platform, fingerprint,
+             1 if has_gpu else 0, gpu_vram_gb, gpu_name,
              now, now),
         )
         c.execute("INSERT OR IGNORE INTO ledger (node_id) VALUES (?)", (node_id,))

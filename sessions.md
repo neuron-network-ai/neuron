@@ -2655,6 +2655,111 @@ labelled planned, since the coordinator still opens `sqlite3.connect` directly i
 
 ---
 
+## Session 40–41 (2026-08-03) — GPU capability, grant docs, and one deploy that could not be done
+
+### The live network, read rather than assumed
+`/status`: **2 nodes online, 21 of 28 layers, `network_healthy: false`**, 38 lifetime requests,
+25.8102 NRN distributed. `/node/list` says which two, and it is not the pair the docs imply:
+
+    agent-optinovate-67e4eb   layers 0-13   16 cores  68 GB   verified
+    node-c-pavilion           layers 14-20   4 cores  12 GB   trusted
+
+So the Windows PC and the Pavilion. **The OptiPlex is not registered as a node at all**, which
+is exactly why 21-27 is uncovered and the chain is unhealthy. The whitepaper's figures were
+already right; what was wrong was the attribution — "as of Session 36" described the reading as
+historical when it is current. Fixed, with the uncovered range and the lifetime totals added.
+
+### The Pavilion deploy did NOT happen — no SSH access
+`100.79.125.112` pings (14-119 ms) and sshd answers, so the machine is up. But neither key on
+this laptop is authorised on it: `id_ed25519` and `oracle_coordinator` were both refused for
+`ubuntu`, `homeadmin`, `optin`, `neuron` and `pavilion` — ten attempts, all
+`Permission denied (publickey,password)`. `~/.ssh/config` has entries for the OptiPlex and a
+NUC, none for the Pavilion. This is Session 5's trap ("a brand-new node needs your SSH pubkey
+in its authorized_keys") still unresolved for this machine.
+
+Two consequences, both deliberate:
+- **The whitepaper still says the wire codec is not deployed**, in section 11 *and* section 5.
+  Removing that line was conditional on the deploy landing. It did not, so the claim stands.
+- The brief's `sudo systemctl restart neuron-agent` would not have worked anyway. Session 26
+  installed the agent as a **`systemd --user`** service with linger enabled, so the unit is
+  `systemctl --user restart neuron-agent`; the `sudo` form reports "Unit not found".
+
+To unblock: add this machine's `~/.ssh/id_ed25519.pub` to the Pavilion's `authorized_keys`, or
+run the two commands at the machine.
+
+### GPU support — built, and honest about where it stops
+`agent/gpu.py` (new): `detect_gpu()` prefers `torch.cuda` and falls back to `nvidia-smi`, so a
+machine with a card but a CPU-only torch build still reports its hardware; `gpu_utilization()`
+uses nvidia-smi only, because torch cannot see load from *other* processes and that is precisely
+the load a node must yield to. Reported at registration, stored on the node row (migration
+included), and `gpu_name` is operator-only in `/node/list` for the same reason `platform` is —
+a card model is distinctive enough to correlate a roster on. `has_gpu`/`gpu_vram_gb` stay public,
+being no more identifying than the `cores`/`ram_gb` already published.
+
+`resource_guard` gained a `gpu_ceiling` per donation mode: a machine can be CPU-idle while a
+game saturates the GPU, and the CPU meter cannot see it. The load-bearing property is the
+failure direction — **unreadable utilisation is not busy**. Most machines have no nvidia-smi,
+and treating "cannot tell" as "busy" would silently empty the network while looking like calm.
+
+**What was deliberately not done, and why it would have been a regression.** `common.py`
+materialises every shard into system RAM and selects no device anywhere in the inference path —
+grep confirms no `.cuda()`, no `device_map`. A GPU node therefore computes on its CPU. So:
+- VRAM does **not** raise a node's layer cap. The arithmetic is written and tested but gated
+  behind `balancer.GPU_EXECUTION = False`. Counting VRAM the pipeline cannot use would hand a
+  GPU node more layers than its system RAM holds and OOM-kill a volunteer's machine — the exact
+  failure `max_layers_for()` exists to prevent.
+- A GPU is **not** a speed multiplier. Speed is the measured `ms_per_layer`, which already
+  reflects whatever hardware did the work; multiplying it by a guessed factor double-counts.
+  "GPU nodes preferred" is implemented as a tie-break when two equally-fast nodes could receive
+  a layer that had to move anyway — a no-op on an all-CPU network, which is every network today.
+
+Making the GPU actually compute is a `common.py` change, and ROADMAP build rule 7 forbids
+touching that file without an explicit instruction. Raised rather than quietly done.
+
+**Tested on node_a, which turned out to have no GPU**: no `nvidia-smi`, torch is `2.4.1+cpu`,
+`cuda_available: False`. So the real-hardware run exercises the CPU-only path end to end (the
+path most volunteers take), and the GPU paths are covered by stubs. No GPU speedup is claimed
+anywhere, because none was measured and none is possible yet.
+
+Docs say the same thing in plain words: INSTALL.md and STRANGER_INSTALL.md tell an operator the
+card is detected and respected, then state outright that inference still runs on the CPU so it
+does not earn faster yet.
+
+### A bug my own test caught
+`detect_gpu()`'s docstring promised "never raises", and it did not: the promise rested on the
+two probe helpers guarding themselves. A test that made `_from_torch` raise took the whole
+function down — and registration depends on that promise, since a node must be able to join as
+CPU-only however creatively a GPU stack fails. Both probes are now wrapped at the call site.
+
+### README, CONTRIBUTING, CHANGELOG
+README's Status section on `main-full` replaced with the Session 41 text.
+
+**The other README fix had nothing to fix on this branch.** `main-full` does not contain
+"Nodes reach each other over Tailscale" — it has said "**No VPN, no port forwarding, no
+Tailscale**" since Session 26. That stale line, and "Session 7 complete", are on **`main`**,
+which `git log` shows is a strict ancestor **92 commits behind** `main-full`. (Session 35's note
+that the two share no common ancestor is now out of date — `git merge-base` returns `76e8e46`,
+which is `main`'s own HEAD.) So `main` is a stale pointer, not a divergent branch, and the clean
+fix is a fast-forward — a branch operation nobody asked for, so it was left alone and flagged.
+
+`CONTRIBUTING.md` and `CHANGELOG.md` added. The changelog's Unreleased section states the GPU
+limitation rather than listing the feature and stopping.
+
+### Tests — 37 green, by exit code
+19 coordinator (new `test_gpu_capability` 19 cases) + 17 agent (new `test_gpu` 22 cases) via
+`-m`, plus `packaging/test_app_entry.py` **run as a script**. That last one matters: `packaging/`
+has no `__init__.py` and `packaging` is also an installed third-party module, so `python -m
+packaging.test_app_entry` resolves to the wrong thing and reports `No module named` — a failure
+that is not real. My first draft of CONTRIBUTING.md put that exact broken loop in front of
+contributors; corrected, with the reason.
+
+Compatibility checked rather than assumed: `RegisterBody` sets no `extra="forbid"`, and Pydantic
+ignores unknown fields by default, so a 0.17.1+GPU agent registering against the **currently
+deployed** pre-GPU coordinator works — the fields are dropped until the coordinator is updated.
+None of this is deployed to the live coordinator.
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load

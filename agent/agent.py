@@ -43,6 +43,7 @@ if getattr(sys, "frozen", False):
 else:
     HERE = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, os.path.dirname(HERE))             # repo root
+from agent import gpu                                     # noqa: E402
 from agent import local_chat                               # noqa: E402
 from agent import resource_guard                          # noqa: E402
 from agent.node_server import NodeServer                  # noqa: E402
@@ -298,6 +299,18 @@ class Agent:
             # host:port. That is the whole of "a stranger can be in the pipeline".
             "behind_nat": self.use_relay(),
         }
+        # GPU capability. Reported so the coordinator can size a node's slice against VRAM
+        # instead of only system RAM. It does NOT mean this node computes on the GPU — the
+        # pipeline in common.py is CPU-only — so nothing here should be read as a speed claim.
+        try:
+            info = gpu.detect_gpu()
+            body["has_gpu"] = info["has_gpu"]
+            if info["has_gpu"]:
+                body["gpu_vram_gb"] = info["gpu_vram_gb"]
+                body["gpu_name"] = info["gpu_name"]
+        except Exception as e:              # detection must never block registration
+            log.debug("GPU detection failed, registering as CPU-only: %s", e)
+            body["has_gpu"] = False
         # Feeds coordinator/balancer.py. None on the first registration (the slice is not
         # loaded yet, so there is nothing to time); report_speed() re-registers with the real
         # figure once the node server is up, and the upsert COALESCEs so a later None never
@@ -341,9 +354,11 @@ class Agent:
         # (ticket refresh, restart, recovery) picks up a move without waiting for a beat.
         self.adopt_coordinator_url(data)
         standing = data.get("standing", "trusted")
-        log.info("registered as %s [%s], assigned layers %s (%d cores, %d GB, %s)",
+        gpu_note = (f", GPU {body['gpu_name']} {body['gpu_vram_gb']} GB"
+                    if body.get("has_gpu") else "")
+        log.info("registered as %s [%s], assigned layers %s (%d cores, %d GB%s, %s)",
                  body["node_id"], standing, data["assigned_layers"],
-                 body["cores"], body["ram_gb"], ip)
+                 body["cores"], body["ram_gb"], gpu_note, ip)
         if standing == "probationary":
             log.info("PROBATIONARY: serving challenges only — a verifier must confirm this "
                      "node (proof-of-compute) before it receives live requests or earns NRN")

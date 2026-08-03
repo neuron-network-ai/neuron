@@ -46,6 +46,13 @@ about a minute after it joins, and starts earning after that.
 
 ---
 
+**Got an NVIDIA graphics card?** NEURON finds it on its own — nothing to install or tick. It
+also steps aside while the card is busy, so playing a game or rendering a video won't have to
+fight it. Straight answer on what that gets you today: your card is recorded and respected, but
+the AI work still runs on your processor, so it doesn't make your machine earn faster yet.
+
+---
+
 **To stop:** close the terminal window, or press `Ctrl` and `C` in it.
 
 **To remove it completely:** `python agent/uninstall.py`
