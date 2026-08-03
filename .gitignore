@@ -51,6 +51,9 @@ coordinator/reconcile_log.json
 
 # --- private / pre-public docs (keep out of the public repo) ---
 TOKENOMICS.md
+# Unpublished research (AMB — Activation Momentum Buffering). Stays local until arXiv
+# submission; publishing it here first would be our own prior art against us.
+research/
 # Internal planning and strategy, untracked in Session 42. These hold the Oracle VM's IP, home
 # LAN addresses, founder-allocation and legal/budget notes — nothing that is a credential, but
 # none of it is the public story either. Untracking only stops future commits: every one of
@@ -59,6 +62,9 @@ NEURON_COMPLETE_PROJECT.md
 FIRST_STRANGER.md
 PETALS_NOTES.md
 distributed-ai-network-plan.html
+# Outreach targets and approach notes. Unlike the four above, this one was never committed on
+# any branch, so ignoring it is genuinely sufficient — there is no history to walk back.
+OUTREACH.md
 
 # --- blockchain work-in-progress (NRN ERC-20, migration, deploy) ---
 # Nothing here is deployed and nothing here is public yet. Holds a deploy key path,
