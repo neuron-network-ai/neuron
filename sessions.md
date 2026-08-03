@@ -2827,6 +2827,31 @@ Tailscale". Force-updated to `main-full` (`d912584 → 7b7c11c`, tagged
 `main-full`'s README needed no fix: it has carried the Session 41 status and "No VPN, no port
 forwarding, no Tailscale" since Session 26. The stale text only ever existed on `main`.
 
+### Four internal planning docs untracked
+`NEURON_COMPLETE_PROJECT.md`, `FIRST_STRANGER.md`, `PETALS_NOTES.md` and
+`distributed-ai-network-plan.html` removed from the index with `git rm --cached` (they stay on
+disk) and added to `.gitignore`, under the existing "private / pre-public docs" heading next to
+`TOKENOMICS.md`. Between them they carry the Oracle VM's IP, home LAN addresses
+(`192.168.1.10`), founder-allocation pointers, and the legal/budget/risk planning — no
+credential, no key, but not the public story either. Verified absent from both branches:
+`git ls-tree origin/main-full` and `origin/main` return nothing for all four, and
+`/blob/main-full/FIRST_STRANGER.md` is a 404.
+
+**What this does not do, and it matters: the files are still in the history.** `git rm --cached`
+removes them from the tip only. All four remain readable in every earlier commit of a 114-commit
+public repo — `git log --all -- FIRST_STRANGER.md`, or fetching the blob by SHA, still returns
+them to anyone. Actually un-publishing them needs a history rewrite (`git filter-repo`) plus a
+force push, and even then GitHub keeps orphaned blobs reachable by SHA until it garbage-collects,
+and any fork or clone taken before today keeps its own copy. That was not done here — it was out
+of scope for this change — so the correct description of the current state is "no longer shipped
+going forward", not "removed from the public repo".
+
+A caching trap, recorded because it nearly produced a false all-clear: the first verification
+fetch of the repo root still listed all four files. That was a 15-minute-cached copy of a page
+fetched earlier in the same session, not the live state. Ground truth came from `git ls-tree`
+against the freshly fetched remote refs. Verify a push against the refs, not against a page that
+may be served from cache.
+
 ---
 
 ## How to run
