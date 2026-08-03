@@ -75,6 +75,103 @@ HOT_TIMEOUT_S = 30
 
 
 # --------------------------------------------------------------------------- #
+# Execution device (Session 42)
+# --------------------------------------------------------------------------- #
+# Where a node's layers actually run. CUDA when the machine has it, CPU otherwise, and
+# `NEURON_DEVICE` overrides both (useful to force a GPU machine back onto CPU for an A/B).
+#
+# Two invariants hold the rest of the system together, and both are load-bearing:
+#
+#   1. **Every public interface stays CPU.** The stage functions take CPU tensors and return
+#      CPU tensors, exactly as before. Moving to the device happens inside them and the
+#      result is moved back. So `wire_codec`, `batching`, `junction_cache`, the relay and
+#      `security/proof_of_compute` are all untouched by this — none of them can receive a
+#      CUDA tensor and none of them had to learn about devices.
+#   2. **On a CPU-only machine nothing changes at all.** `Tensor.to()` returns *self* when the
+#      device and dtype already match, so every call added below is a no-op on CPU — not a
+#      copy, not a new tensor. That is what lets `selftest_shard.py` still prove bit-exactness.
+#
+# TF32 is disabled deliberately. On Ampere and later, cuBLAS will silently run fp32 matmuls at
+# ~10-bit mantissa precision, which drifts from the CPU result by ~1e-3. That is still inside
+# proof-of-compute's atol=0.05, but it eats a fifth of the honest/cheat budget for nothing —
+# and PoC's separation (honest ~1e-5, cheating ~25) is the mechanism that lets strangers earn.
+def _resolve_device():
+    override = os.environ.get("NEURON_DEVICE", "").strip()
+    if override:
+        try:
+            return torch.device(override)
+        except (RuntimeError, ValueError):
+            pass                      # a typo must not stop the node starting
+    try:
+        if torch.cuda.is_available():
+            return torch.device("cuda:0")
+    except Exception:
+        pass                          # a broken driver is a CPU node, not a crash
+    return torch.device("cpu")
+
+
+DEVICE = _resolve_device()
+
+if DEVICE.type == "cuda":
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = False     # see note above
+        torch.backends.cudnn.allow_tf32 = False
+    except Exception:
+        pass
+
+
+def device_name():
+    """Human-readable device string for logs, e.g. 'cuda:0 (NVIDIA GeForce RTX 4070)'."""
+    if DEVICE.type != "cuda":
+        return str(DEVICE)
+    try:
+        return f"{DEVICE} ({torch.cuda.get_device_name(DEVICE)})"
+    except Exception:
+        return str(DEVICE)
+
+
+def _to_device(t):
+    """Move a tensor onto the execution device. Identity on CPU-only machines."""
+    return t if t is None or t.device == DEVICE else t.to(DEVICE)
+
+
+def _to_cpu(t):
+    """Bring a tensor back to CPU for the wire. Identity on CPU-only machines."""
+    return t if t is None or t.device.type == "cpu" else t.cpu()
+
+
+def move_model_to_device(model, device=None):
+    """Move a *partially materialized* shard onto `device`, leaving meta tensors alone.
+
+    `model.to(device)` cannot be used here and the reason is specific: `load_model_shard`
+    builds the whole architecture on the `meta` device and materializes only this node's
+    layers, so most parameters are still meta. `.to()` walks all of them and raises
+    `NotImplementedError: Cannot copy out of meta tensor` on the first one it reaches.
+
+    Tied weights are re-tied afterwards. Replacing parameters one at a time breaks the
+    embedding/lm_head tie, and on a 152k-vocab model that silently doubles the largest single
+    allocation on the node — 0.9 GB of VRAM, on the exact machines least likely to have it
+    spare. `tie_weights()` restores the shared storage.
+    """
+    device = DEVICE if device is None else device
+    if device.type == "cpu":
+        return model                       # nothing to do, and no traversal cost
+    for mod in model.modules():
+        for name, p in list(mod.named_parameters(recurse=False)):
+            if p is not None and p.device.type != "meta":
+                setattr(mod, name, torch.nn.Parameter(p.data.to(device),
+                                                      requires_grad=False))
+        for name, b in list(mod.named_buffers(recurse=False)):
+            if b is not None and b.device.type != "meta":
+                mod.register_buffer(name, b.to(device), persistent=False)
+    try:
+        model.tie_weights()
+    except Exception:
+        pass                               # models without tied weights simply have none
+    return model
+
+
+# --------------------------------------------------------------------------- #
 # Model loading
 # --------------------------------------------------------------------------- #
 def load_model(model_id=MODEL_ID):
@@ -156,7 +253,10 @@ def load_model_shard(lo, hi, embed=False, norm=False, head=False, model_id=MODEL
     model.load_state_dict(sd, strict=False, assign=True)
     if head or embed:
         model.tie_weights()   # points lm_head at the (real) embedding weight
-    return tok, cast_linears(model), n
+    model = move_model_to_device(cast_linears(model))
+    print(f"[neuron] shard layers {lo}-{hi - 1} loaded on device: {device_name()}",
+          flush=True)
+    return tok, model, n
 
 
 class CastLinear(torch.nn.Module):
@@ -286,6 +386,10 @@ def _causal_mask(q, past_len, dtype, device):
 def _run_layers(model, layers, hidden, cache, past_len):
     # transformers 4.44.2 Qwen2: each attention computes rotary itself from
     # position_ids, so we only supply position_ids + cache_position here.
+    # The hidden state arrives from the wire on CPU; the weights live on DEVICE. Everything
+    # below (mask, position_ids, the K/V cache) then follows hidden.device, so this one move
+    # is what puts the whole layer stack on the GPU. No-op on a CPU-only machine.
+    hidden = _to_device(hidden)
     device = hidden.device
     q = hidden.shape[1]
     total = past_len + q
@@ -310,14 +414,19 @@ def first_stage(model, hi, token_ids, cache, past_len):
     # .to(DTYPE) so the hidden state is fp32 from the very first op even when the embedding
     # table is stored half-precision. Everything downstream -- the K/V cache, the wire, the
     # residual stream -- then stays fp32, and only the big weight matrices are half.
-    hidden = model.model.embed_tokens(token_ids).to(DTYPE)
-    return _run_layers(model, list(model.model.layers)[0:hi], hidden, cache, past_len)
+    hidden = model.model.embed_tokens(_to_device(token_ids)).to(DTYPE)
+    out = _run_layers(model, list(model.model.layers)[0:hi], hidden, cache, past_len)
+    return _to_cpu(out)
 
 
 @torch.no_grad()
 def mid_stage(model, lo, hi, hidden, cache, past_len):
-    """node_c (middle): layers[lo:hi]  ->  hidden [1, q, H]."""
-    return _run_layers(model, list(model.model.layers)[lo:hi], hidden, cache, past_len)
+    """node_c (middle): layers[lo:hi]  ->  hidden [1, q, H].
+
+    Returns a CPU tensor whatever device it computed on — the caller's next move is
+    `send_msg`, and the wire codec quantizes on CPU."""
+    out = _run_layers(model, list(model.model.layers)[lo:hi], hidden, cache, past_len)
+    return _to_cpu(out)
 
 
 @torch.no_grad()
@@ -325,7 +434,7 @@ def last_stage(model, lo, hidden, cache, past_len):
     """node_b (last): layers[lo:] + final norm  ->  normed hidden [1, q, H].
     No lm_head here — node_a owns the head (Session 3)."""
     hidden = _run_layers(model, list(model.model.layers)[lo:], hidden, cache, past_len)
-    return model.model.norm(hidden)
+    return _to_cpu(model.model.norm(hidden))
 
 
 @torch.no_grad()
@@ -336,8 +445,12 @@ def apply_lm_head(model, hidden):
     full model's GEMM shape exactly (slicing to [1,1,H] first would change the
     matmul shape and perturb the logits by ~1e-5). Decode passes q=1 anyway, so
     the hot path is unaffected; only prefill does the (one-time) full-width head.
+
+    `hidden` arrives from the last stage over the wire, i.e. on CPU, while lm_head lives on
+    DEVICE — the largest GEMM in the pipeline (152k x H) and so the one most worth running on
+    a GPU. Logits come back on CPU because the caller's next step is argmax + detokenize.
     """
-    return model.lm_head(hidden)[:, -1, :]
+    return _to_cpu(model.lm_head(_to_device(hidden))[:, -1, :])
 
 
 # --------------------------------------------------------------------------- #

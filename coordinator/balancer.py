@@ -28,15 +28,14 @@ VRAM as *capacity* is implemented but switched off; see GPU_EXECUTION below.
 
 # May a node's VRAM be counted toward how many layers it can HOLD?
 #
-# No, and this must stay off until the pipeline can execute on the GPU. `common.py` builds
-# every shard into system RAM and there is no device selection anywhere in the inference path,
-# so a GPU node computes on its CPU and its VRAM holds nothing. Counting VRAM as capacity would
-# hand that node more layers than its system RAM can take and OOM-kill a volunteer's machine —
-# precisely the failure max_layers_for() was added to prevent.
+# Yes, as of Session 42: `common.py` now resolves an execution device and moves a shard onto
+# CUDA when the machine has it, so a GPU node's weights genuinely live in VRAM. Before that
+# change this had to stay off — counting memory the pipeline could not use would have handed a
+# GPU node more layers than its system RAM could take and OOM-killed a volunteer's machine.
 #
-# The arithmetic is written and tested so that enabling GPU execution is a one-line change here
-# rather than a re-derivation later. Flipping this without a CUDA path in common.py is a bug.
-GPU_EXECUTION = False
+# Honest caveat carried from that session: the CUDA path is written but has never run, because
+# no machine in this project has an NVIDIA GPU. The first real GPU node is the test.
+GPU_EXECUTION = True
 
 
 def _apportion(raw, total, min_each=1):
@@ -70,16 +69,26 @@ def max_layers_for(node, gb_per_layer, headroom=0.75):
     the resident figure excludes the KV cache, the transient fp32 cast in CastLinear, and
     the process itself.
 
-    A GPU node's VRAM is added only when GPU_EXECUTION is on — see the note at the top of this
-    module. While it is off, a GPU node is capped by system RAM exactly like any other node,
-    which is the truth about where its weights live.
+    For a GPU node with GPU_EXECUTION on, capacity is its **VRAM**, not VRAM plus system RAM.
+    The weights live in one place or the other, never both — `common.py` moves the shard onto
+    the device — so adding the two would roughly double the true ceiling and put us straight
+    back into the OOM this function exists to prevent. A node with 8 GB of VRAM therefore
+    outranks one with 4 GB of free system RAM, which is the intended effect, but it does so on
+    an amount of memory that really exists.
+
+    A GPU node whose VRAM is *smaller* than its free RAM still gets the VRAM figure, because
+    that is where its layers will actually sit.
     """
     free = node.get("ram_free_gb")
-    if not free or not gb_per_layer:
+    gpu_ok = GPU_EXECUTION and node.get("has_gpu") and node.get("gpu_vram_gb")
+    if gpu_ok:
+        usable = float(node["gpu_vram_gb"])
+    elif free:
+        usable = float(free)
+    else:
         return None                     # unknown -> no constraint, same as before
-    usable = float(free)
-    if GPU_EXECUTION and node.get("has_gpu") and node.get("gpu_vram_gb"):
-        usable += float(node["gpu_vram_gb"])
+    if not gb_per_layer:
+        return None
     return max(int((usable * headroom) / gb_per_layer), 1)
 
 

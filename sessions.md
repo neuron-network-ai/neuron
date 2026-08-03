@@ -2760,6 +2760,75 @@ None of this is deployed to the live coordinator.
 
 ---
 
+## Session 42 (2026-08-03) — the GPU actually computes, and `main` stops lying
+
+Session 41 left a node able to *report* a GPU while computing on its CPU. This session gives the
+pipeline a device.
+
+### `common.py` — one device, resolved once
+`_resolve_device()` picks CUDA when `torch.cuda.is_available()`, CPU otherwise, with
+`NEURON_DEVICE` overriding both (which is how a GPU machine gets A/B'd back onto CPU). A typo in
+that variable and a broken driver both fall through to CPU rather than stopping the node — a
+volunteer's machine failing to *start* is worse than it running slowly.
+
+Two invariants keep the change from spreading:
+
+1. **Every public interface stays CPU.** `first_stage`/`mid_stage`/`last_stage`/`apply_lm_head`
+   take CPU tensors and return CPU tensors exactly as before; the move happens inside. So
+   `wire_codec`, `batching`, `junction_cache`, `relay.py` and `security/proof_of_compute.py` did
+   not have to learn what a device is, and none of them can be handed a CUDA tensor.
+2. **A CPU-only machine sees no change at all.** `Tensor.to()` returns *self* when device and
+   dtype already match, so every added call is a genuine no-op — not a copy.
+
+`move_model_to_device()` exists because `model.to(device)` cannot be used here, and the reason is
+specific: `load_model_shard` builds the full architecture on the `meta` device and materializes
+only this node's layers, so `.to()` hits `Cannot copy out of meta tensor` on the first foreign
+parameter. Walking modules and skipping meta tensors avoids that — but replacing parameters one
+at a time **breaks the embed/lm_head tie**, which on a 152k-vocab model silently doubles the
+largest single allocation on the node (~0.9 GB of VRAM, on exactly the machines least able to
+spare it). `tie_weights()` afterwards restores the shared storage.
+
+TF32 is disabled deliberately. cuBLAS will otherwise run fp32 matmuls at ~10-bit mantissa on
+Ampere+, drifting ~1e-3 from the CPU result. That is still inside proof-of-compute's `atol=0.05`,
+but it spends a fifth of the honest/cheat budget for nothing — and that separation (honest ~1e-5
+vs cheating ~25) is the mechanism that lets strangers earn at all.
+
+### `balancer.py` — VRAM replaces RAM, it does not add to it
+`GPU_EXECUTION` flips to `True`, now that the claim behind it is true. The load-bearing detail is
+that a GPU node's capacity is its **VRAM instead of** its system RAM. Summing them was the
+obvious move and is wrong: the weights live in one place, so 4 GB RAM + 24 GB VRAM would claim
+21 layers of room on a machine that has 24 GB in one place — reintroducing precisely the OOM
+`max_layers_for()` was written to prevent. A GPU whose VRAM is *smaller* than free RAM still
+gets the VRAM figure, for the same reason. `test_gpu_capability` asserts the non-summing
+directly rather than only asserting the happy number.
+
+### What is proven, and what is not
+**Not verified: the CUDA branch has never executed.** No machine here has an NVIDIA card and the
+installed torch is `2.4.1+cpu`, so `torch.cuda.is_available()` is `False` and not one line of the
+GPU path has run. The first real GPU node is the test, and no speedup figure is claimed anywhere.
+
+**Verified: it is inert on CPU.** `selftest_shard.py` → `max|delta| = 0.000e+00` and identical
+decoded tokens, so the bit-exactness proof the network rests on survives a `common.py` change.
+Full suite **37/37 green by exit code**.
+
+One trap worth recording: the first run of the suite showed **29 failures**, all
+`ModuleNotFoundError`. Bare `python` on this box is a 3.14 install with none of the deps; the
+project venv is `.venv` (3.11.9). The suites were fine. Run them as `.venv\Scripts\python.exe -m
+<module>`, never as bare `python`.
+
+### `main` was three sessions stale, and is not any more
+Session 41 recorded `main` as a strict ancestor 92 commits behind, with merge-base `76e8e46`.
+That was wrong — `git merge-base origin/main origin/main-full` returns **nothing**. `main` was an
+**orphan** branch holding one squashed commit (`d912584`, 25 July) with no shared history at all,
+which is why it still advertised "Session 7 complete" and "Nodes reach each other over
+Tailscale". Force-updated to `main-full` (`d912584 → 7b7c11c`, tagged
+`backup/main-before-force-2026-08-03` first). Both stale lines are gone from the live repo.
+
+`main-full`'s README needed no fix: it has carried the Session 41 status and "No VPN, no port
+forwarding, no Tailscale" since Session 26. The stale text only ever existed on `main`.
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load

@@ -145,6 +145,18 @@ time, accounting for the fixed `lm_head` cost on the driver.
 and tracks token positions itself. Prefill runs the whole prompt; each decode step ships one
 hidden-state vector per hop.
 
+**GPU nodes.** A node detects an NVIDIA GPU (via `torch.cuda`, falling back to `nvidia-smi`)
+and reports it at registration, and the pipeline resolves an execution device at load time,
+moving its shard onto CUDA when one is present and falling back to CPU otherwise. Layer
+assignment is then VRAM-aware: a GPU node is sized by its VRAM rather than its system RAM,
+because that is where its weights sit — so 8 GB of VRAM outranks 4 GB of free system RAM, and
+GPU-capable nodes take larger layer counts. Every interface stays CPU-side: the stage functions
+take and return CPU tensors, so the wire codec, the relay and proof-of-compute are unchanged by
+this. Two deliberate constraints: TF32 is disabled, because its ~1e-3 drift from CPU arithmetic
+would eat into the tolerance proof-of-compute uses to separate honest work from cheating; and a
+node also yields while its GPU is busy, so a game or a render is never competing with it. **This
+path is written and unverified — see section 11.**
+
 ---
 
 ## 5. Real Results
@@ -332,6 +344,13 @@ presently worth, which is why NEURON is positioned as compute-barter and not as 
   machine, NEURON runs them locally instead.
 - **The wire codec is not deployed** to the remote nodes, so that 74%-of-wall-clock wire cost is
   still being paid in full.
+- **The GPU execution path has never run.** The device resolution, the shard move onto CUDA and
+  the VRAM-aware layer assignment described in section 4 are written and covered by tests, but
+  every machine in this project is CPU-only — the installed torch is a `+cpu` build — so no line
+  of the CUDA branch has ever executed. What *is* proven is that it changes nothing on a CPU
+  machine: `selftest_shard.py` still reports `max|delta| = 0.000e+00` against the unsharded
+  model. The speedup a GPU node would bring is therefore unmeasured, and no figure is claimed
+  for it. The first real GPU node is the test.
 - **No legal review.** Neither the content policy nor the token economics has been read by a
   lawyer. Under EU MiCA that review is required before public transferability, and it gates
   mainnet.

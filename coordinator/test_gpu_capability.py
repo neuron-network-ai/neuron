@@ -105,25 +105,41 @@ def main():
     finally:
         config.DB_PATH = real_db
 
-    # ---------- balancer: VRAM is NOT capacity while the pipeline is CPU-only ----------
-    check("GPU_EXECUTION is off (the pipeline has no CUDA path)",
-          balancer.GPU_EXECUTION is False)
+    # ---------- balancer: VRAM is capacity now that common.py can execute on CUDA ----------
+    check("GPU_EXECUTION is on (common.py resolves a device and moves the shard)",
+          balancer.GPU_EXECUTION is True)
 
     gpu_node = {"node_id": "g", "ms_per_layer": 10.0, "ram_free_gb": 4.0,
                 "has_gpu": True, "gpu_vram_gb": 24.0}
-    check("VRAM does not raise the layer cap while GPU_EXECUTION is off",
-          balancer.max_layers_for(gpu_node, gb_per_layer=1.0) == 3)   # 4 GB * 0.75 / 1
+    check("a GPU node is sized by VRAM (24 * 0.75), not by system RAM",
+          balancer.max_layers_for(gpu_node, gb_per_layer=1.0) == 18)
+
+    # The load-bearing one: VRAM must REPLACE system RAM, not add to it. Summing them would
+    # claim 21 layers of room on a machine that has 24 GB in one place, and OOM it.
+    check("VRAM is not added to system RAM",
+          balancer.max_layers_for(gpu_node, gb_per_layer=1.0)
+          != int((4.0 + 24.0) * 0.75))
+
+    small_vram = {"node_id": "g2", "ram_free_gb": 32.0, "has_gpu": True, "gpu_vram_gb": 4.0}
+    check("a GPU smaller than system RAM still caps at VRAM (that is where layers sit)",
+          balancer.max_layers_for(small_vram, gb_per_layer=1.0) == 3)
+
+    check("8 GB of VRAM outranks 4 GB of free system RAM",
+          balancer.max_layers_for({"has_gpu": True, "gpu_vram_gb": 8.0}, gb_per_layer=1.0)
+          > balancer.max_layers_for({"ram_free_gb": 4.0}, gb_per_layer=1.0))
 
     real_flag = balancer.GPU_EXECUTION
     try:
-        balancer.GPU_EXECUTION = True
-        check("with GPU execution on, VRAM adds capacity (4 + 24) * 0.75",
-              balancer.max_layers_for(gpu_node, gb_per_layer=1.0) == 21)
+        balancer.GPU_EXECUTION = False
+        check("with GPU execution off, a GPU node falls back to system RAM",
+              balancer.max_layers_for(gpu_node, gb_per_layer=1.0) == 3)
     finally:
         balancer.GPU_EXECUTION = real_flag
 
     check("a CPU node is unaffected by the GPU arithmetic either way",
           balancer.max_layers_for({"node_id": "c", "ram_free_gb": 4.0}, gb_per_layer=1.0) == 3)
+    check("a node reporting neither RAM nor VRAM is unconstrained, as before",
+          balancer.max_layers_for({"node_id": "u"}, gb_per_layer=1.0) is None)
 
     # ---------- balancer: a GPU is a tie-break, never a speed multiplier ----------
     equal = [{"node_id": "cpu", "ms_per_layer": 10.0},

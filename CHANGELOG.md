@@ -16,10 +16,19 @@ This project is early alpha. NRN has no cash value, and the network is a handful
 - **A node yields while its GPU is busy.** Each donation mode gained a `gpu_ceiling`, so a
   machine whose CPU looks idle while a game or a render saturates the GPU now pauses. Machines
   with no `nvidia-smi` are unaffected: unreadable utilisation never counts as busy.
-- **Not in this change, and worth stating:** inference still runs on the CPU. `common.py`
-  selects no device, so a GPU node computes exactly like a CPU one. VRAM-as-capacity is
-  implemented in the balancer but gated off behind `balancer.GPU_EXECUTION`, because counting
-  VRAM the pipeline cannot use would over-assign layers and OOM a volunteer's machine.
+- **Inference can now run on the GPU.** `common.py` resolves an execution device once at import
+  (CUDA when present, CPU otherwise, `NEURON_DEVICE` overrides both) and moves a node's shard
+  onto it. Every stage still takes and returns CPU tensors, so the wire codec, the relay,
+  batching and proof-of-compute are untouched. TF32 is left off on purpose: its ~1e-3 drift from
+  CPU arithmetic would spend a fifth of the tolerance proof-of-compute uses to tell honest work
+  from cheating.
+- **VRAM is now capacity.** `balancer.GPU_EXECUTION` is on, and a GPU node is sized by its VRAM
+  *instead of* its system RAM — not the sum of the two, which would claim roughly double the
+  memory that exists and cause the exact OOM the cap was written to prevent.
+- **Unverified, and stated plainly:** no machine in this project has an NVIDIA GPU and the
+  installed torch is a `+cpu` build, so **the CUDA branch has never executed**. What is proven
+  is that it is inert on a CPU machine — `selftest_shard.py` still reports
+  `max|delta| = 0.000e+00` against the unsharded model. No speedup figure is claimed.
 - `CONTRIBUTING.md` and this file added; README status refreshed.
 
 ## v0.17.1
