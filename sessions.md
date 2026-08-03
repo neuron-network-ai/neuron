@@ -2854,6 +2854,81 @@ may be served from cache.
 
 ---
 
+## Session 42b (2026-08-03) — verification pass, 0.18.0 built, and a node I knocked offline
+
+Picked up after the GPU work was committed in another window. This entry is the independent
+re-verification the founder asked for, plus the installer build, plus one real mistake.
+
+### Verified rather than assumed
+- Working tree clean; `origin/main-full` and `origin/main` both at `d962fe4`. The `main` sync
+  was done in the other window, so the curated snapshot `d912584` is gone — it had been my
+  recommendation NOT to force-push, but that is now settled and there is nothing to undo.
+- GPU code intact: `common.py` resolves `DEVICE`, `balancer.GPU_EXECUTION` is `True`,
+  `device_name()` returns `cpu` on this machine.
+- **All 37 suites green by exit code**, and `selftest_shard.py` reports
+  `max|delta| = 0.000e+00` — the CUDA branch is genuinely inert on a CPU box.
+- `/agent/version` serves 0.17.1 with the correct sha and a 200 URL. An earlier read came back
+  empty and looked like an outage; it was a transient from firing parallel curls at a
+  rate-limited endpoint. Re-read before believing a blank response.
+
+### INSTALL.md was left stale by the GPU change
+It still told operators "inference itself still runs on your CPU, so a GPU does not make your
+node faster yet" — written in Session 41 when that was true, and false the moment `common.py`
+learned to move a shard onto CUDA. Rewritten to the honest current claim: CUDA is used
+automatically if present, *and* no machine here has an NVIDIA card so the path has never
+executed. A doc that overclaims and a doc that under-claims are the same bug.
+
+### Installer 0.18.0 — built, not published
+Three version strings bumped (`neuron.iss`, `config.AGENT_VERSION`, `updater.LOCAL_VERSION`);
+the download URL derives from `AGENT_VERSION`, so it follows. PyInstaller `--clean`, then Inno
+Setup:
+
+    dist/installer/NEURON-Setup-0.18.0.exe    206.6 MB (216,630,112 bytes)
+    sha256  dd33d317f92adb2ae5da27f46ac02912ba2106a66c4f21104b27ebd7345fb1a8
+
+**One bullet from the brief's release notes was not written, because it is false.** "Wire codec
+deployed to all nodes — activations now 4.25× smaller" — the codec is still not deployed; the
+Pavilion deploy has been blocked on SSH for two sessions. The release notes say so explicitly
+rather than omitting it, since an earlier draft did make the claim.
+
+Steps 9-11 (publish the release, point the coordinator's `AGENT_SHA256`/`DOWNLOAD_URL` at
+0.18.0) are **not done**, and doing 10 before 9 would be the Session 38 trap exactly: nodes
+handed a URL that 404s. `gh` is still not installed, so step 9 needs the founder's browser.
+There is a second reason to pause: switching auto-update on would push a **never-executed CUDA
+branch** to every install unattended.
+
+### The mistake: I knocked node_a off the network
+Killing `neuron-agent.exe` is a required build step (a running copy locks the files). The
+PowerShell check printed "no neuron-agent running" *after* the stop, which reads as "nothing was
+there" but is equally consistent with "killed it, then looked". `agent-optinovate-67e4eb`
+(layers 0-13) went offline in that window and the network fell from 21/28 layers to 7/28.
+
+Tried to restore it and made it briefly worse: started the *installed* app, whose
+`%LOCALAPPDATA%\NEURON\config.json` turns out to be stale — node_id `agent-optinovate`, pointed
+at the old raw-IP coordinator, and that account was one of the ten pruned in Session 38. It
+404'd on slice-info and was stopped again. **The config for `67e4eb` is not on this disk**; a
+recursive search found only a `test_uninstall_deregister.py` fixture that matched the string by
+coincidence (`coordinator: https://c.example`). So whatever runs that node runs it from
+somewhere this session could not see, and reviving it is the founder's to do — it is `offline`,
+not deregistered, so its identity, reputation and earnings are intact and it returns on restart.
+
+### The smoke-test trap, hit again after being written down
+Session 36 recorded: "the `--headless` run inherits `coordinator` from the default config, and
+an isolated `LOCALAPPDATA` isolates *state*, not the network." I set `LOCALAPPDATA` to a temp
+dir and `NEURON_COORDINATOR` to a dead address, and the run still registered a real node
+(`agent-optinovate-1a138a`) against production — `NEURON_COORDINATOR` is not what that path
+reads. Deregistered immediately (HTTP 200, `by: node`) and the roster verified clean. Knowing
+the trap was not enough; the env var has to actually be the one the code consults. A throwaway
+coordinator is the only reliable isolation.
+
+### Still blocked, unchanged
+- **Pavilion SSH** — `publickey,password`, no key accepted for any of five usernames. Needs a
+  pubkey appended at the machine.
+- **`gh` not installed** — Part 4 (repo description) and the 0.18.0 release publish both need it
+  or a browser.
+
+---
+
 ## How to run
 
 **1. Start the last stage (OptiPlex) and the middle stage (Pavilion).** Shards load

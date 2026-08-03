@@ -13,10 +13,13 @@ too big for any one computer. You earn **NRN** for that work.
 - **The network is small right now** (a handful of machines), so earnings are small. They grow
   as more people join.
 - Your node pauses the moment you touch your keyboard, and on battery.
-- **If your machine has an NVIDIA GPU**, NEURON detects it automatically and tells the network
-  it is there — and it pauses your node while the GPU is busy, so a game or a render is never
-  competing with it. Being honest about the current limit: inference itself still runs on your
-  CPU, so a GPU does not make your node faster yet. Nothing to install or configure either way.
+- **An NVIDIA GPU with CUDA is used automatically if available — no configuration needed.**
+  NEURON detects the card, runs your layers on it, and asks the network for a larger share of
+  the model to match the VRAM you have. Your node also steps aside while the GPU is busy, so a
+  game or a render is never competing with it. No GPU is fine: everything works on the CPU
+  exactly as before. One caveat worth stating — no machine in this project has an NVIDIA card,
+  so the GPU path is written and tested but has not yet run on real hardware. If you are the
+  first, `agent.log` will say `device: cuda:0`, and we would like to hear how it went.
 - First start downloads about **1.4 GB** and takes a few minutes.
 - Windows may warn the installer is "unrecognized" — it isn't signed yet. The source is public.
 
