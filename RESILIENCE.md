@@ -115,6 +115,30 @@ say so, and a driver that is told can move at a token boundary for free.
 
 ---
 
+### [R6] Losing a node leaves a coverage hole nothing closes automatically — 🔴 HIGH
+Observed live, 2026-08-04: the network sat at **21/28 layers, DEGRADED — chain incomplete**,
+with two healthy nodes online. No request could complete; every chat attempt failed. The cause
+was not capacity. Two nodes cover a 1.5B model comfortably (~6 GB total, and one of them has
+68 GB). The cause was that when the third machine left the chain **the survivors kept their old
+three-way assignments** — 0–13 and 14–20 — so layers 21–27 belonged to nobody.
+
+The existing self-heal (`main.py`, `[gap-heal]`) cannot fix this: it closes gaps by reassigning
+**true-idle surplus** nodes, and a shrunken network has no surplus by definition. Exactly the
+case where healing is most needed is the case it skips.
+
+`POST /network/rebalance` (admin, `require_register_secret`) does re-split across the nodes that
+are actually online, so the recovery exists — it just has to be triggered by a human who has
+first noticed. Nothing noticed. The failure surfaced as a user typing "hi" eight times.
+
+**Fix:** treat a coverage gap with zero idle surplus as a trigger for a full re-split of the
+online nodes, not a no-op. Related to [R2] but distinct: [R2] is "no spare machine to take
+over", this is "the machines present are not re-divided to cover what is missing".
+
+**Cross-cutting:** this is also the strongest argument for the founder's own suggestion of a
+health-check script shipped with the installer — layers covered, every node answering,
+coordinator reachable, wallet loads. A network that is silently unable to serve is worse than
+one that is visibly down.
+
 ## 3. The layered plan
 
 Ordered by dependency, not ambition. Each layer is useful alone and none of them requires the
