@@ -3694,6 +3694,19 @@ disclosure of X.
 
 ---
 
+## Session 51 (2026-08-04) — an analysis run, and nothing built
+
+Build-history entry only. An analysis script was written and run against the local model to test
+a proposed optimisation before committing to it. It did not clear the criteria set for it in
+advance, so **nothing was implemented**: no new module, no change to `common.py`, the wire, the
+coordinator or the agent. `selftest_shard.py` still passes.
+
+Nothing from this session is in the repo. Unlike Session 49 there is no public tool to explain,
+because the script lives in `research/`, which is gitignored. The method, the numbers and the
+analysis are in `research/sessions_research.md`.
+
+---
+
 ## Known limits / next steps
 - **Throughput scales with nodes (single 3.2 → 2-node 4.6 → 3-node 6.2 tok/s), but
   sub-linearly** because the nodes are heterogeneous and node_a carries the fixed
