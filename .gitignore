@@ -51,8 +51,8 @@ coordinator/reconcile_log.json
 
 # --- private / pre-public docs (keep out of the public repo) ---
 TOKENOMICS.md
-# Unpublished research (AMB — Activation Momentum Buffering). Stays local until arXiv
-# submission; publishing it here first would be our own prior art against us.
+# Unpublished research. Stays local until submission; publishing here first would be our
+# own prior art against us. Naming the contents in this file would defeat the purpose.
 research/
 # Internal planning and strategy, untracked in Session 42. These hold the Oracle VM's IP, home
 # LAN addresses, founder-allocation and legal/budget notes — nothing that is a credential, but
