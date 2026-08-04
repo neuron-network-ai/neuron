@@ -35,6 +35,43 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
 
 ## Problems & risks
 
+### [P23] 🔴 `prune_test_accounts.py` will sweep the first stranger's wallet — BLOCKS S12
+
+- **Symptom:** the founder's two OAuth wallets show `balance: 0.0` on the live coordinator while
+  `total_earned` survives intact (25.0 and 25.962). Not a bug and not a database loss — they
+  were deliberately swept by the Session 33–35 dev-account cleanup, when they genuinely were
+  dev wallets. `coordinator/test_prune_test_accounts.py` even fixtures their real balances
+  (24.295, 25.0). The money went to `__ecosystem__` as designed.
+- **The actual problem is forward-looking.** `classify()` prunes by prefix:
+
+  ```python
+  PRUNE_PREFIXES = (
+      ("node_a-cli-", "CLI test wallet from wallet-settlement development"),
+      ("w_",          "faucet-funded test wallet (OAuth wallet development)"),
+  )
+  ```
+
+  and `wallet_for_oauth()` mints **every** user wallet as `"w_" + secrets.token_hex(16)`. There
+  is no other format. So the rule that means "dev wallet" today means "every real user who ever
+  signs in" tomorrow. Run the script once after a stranger joins and it takes their 25 NRN
+  welcome grant, silently, and files it as a test account in the audit log.
+- **Why it was right when written and wrong now:** when the rule was added, the only `w_`
+  wallets in existence *were* the founder's. Open join (S12) changes that, and nothing in the
+  script notices the change.
+- **Mitigating for the moment:** the script is a manual `--execute` one-time repair, not a
+  routine, and it refuses to run while `__escrow__` is non-empty. So this is not firing today.
+- **Fix (decide before the first stranger, not after):** drop the blanket `w_` prefix so real
+  wallets fall through to `unclassified` — which the script already refuses to execute on — and
+  name the handful of genuine dev wallets with `--prune-also`. Alternative: gate the prefix
+  behind an explicit `--include-oauth-wallets` flag defaulting off. Either way
+  `test_prune_test_accounts.py` needs its expectations updated in the same change: three `w_`
+  fixtures move from `PRUNED` to `unclassified`, and the "already-empty prune target" case
+  needs a non-`w_` target.
+- **Restoring the founder's 49.3 NRN is a separate, optional decision.** The pre-sweep balances
+  are recoverable from `backups-offbox/neuron-20260802-115534.db`
+  (`w_ef7ca467…` 25.0, `w_d35c84dd…` 24.295). Not done automatically: moving balances on a live
+  ledger is the founder's call, not a repair to be applied silently.
+
 ### [P1] 🔴 Single-user speed vs. the Green AI thesis — HIGHEST
 - **Symptom:** the chat UI shows ~0.7–1.4 tok/s for one user; the headline 6.16 tok/s
   is *aggregate throughput* under concurrent load, not single-request speed.
