@@ -3707,6 +3707,96 @@ analysis are in `research/sessions_research.md`.
 
 ---
 
+## Session 52 (2026-08-04) — the safety net, finally tested with a real kill
+
+The question was: a volunteer closes their laptop mid-answer, and the user watching the stream
+gets a blank screen. What stops that?
+
+The answer turned out to be **already in the repo, and better than what was being designed to
+replace it.** `junction_cache.py` + `_reroute()` in `neuron_driver.py` cache every activation
+the driver sends into the chain, and on a dead peer fetch a fresh chain and replay the whole
+history as one block. NEURON's pipeline shape means there is exactly one junction to cache, so
+replaying it rebuilds *every* downstream node's KV cache. Recovery is exact, not approximate.
+
+**But it had never been run.** `test_junction_cache.py` says so in its own docstring: it is
+model-free and tests the recovery *bookkeeping*; replaying into a genuinely fresh chain "has to
+be proved on the real three nodes". No kill test existed anywhere in the repo. A safety net that
+has never been tested is indistinguishable from not having one, and everything else being
+planned rested on it.
+
+### `test_node_death.py` — 7/7
+Three real processes with real Qwen2.5-1.5B slices, the real wire protocol over real TCP, the
+real driver, and a real `TerminateProcess` on the middle node six tokens into a generation.
+
+```
+[2] middle node SIGKILLed after 6 tokens
+  PASS  node_c process is actually dead
+  PASS  request survived the death
+  PASS  a reroute actually happened
+  PASS  recovery is EXACT, not approximate
+  PASS  reroute is reported to the caller
+```
+
+**The load-bearing assertion is the fourth**, and it is the reason the test is worth having:
+the killed run is *token-identical* to an uninterrupted baseline, not merely "completed". A
+request that finishes with different text has not recovered — it has degraded silently, and the
+user cannot tell. That is the actual damage case. Recovery cost no measurable wall-clock
+(16.7 s killed vs 19.7 s baseline over 24 tokens).
+
+Only the coordinator's chain handout and billing settlement are stubbed, because both have
+their own tests (`test_replica.py`, `test_complete_auth.py`) and pulling FastAPI, SQLite,
+wallets and holds into this file would test those instead of the thing under test. Everything
+recovery actually depends on is real.
+
+Two design details confirmed by reading rather than assuming: `serve()` resets its cache on
+every `config`, and node_c opens its own fresh connection to node_b — so one reroute gives both
+downstream nodes clean caches, which is why a single replay block is sufficient.
+
+### `RESILIENCE.md` — the gap register, so it survives a context window
+New file, and the place to look before touching the driver, the junction cache or the agent's
+shutdown path. It records what already exists (so the next person does not redesign it), five
+numbered gaps, and a five-layer plan.
+
+The gaps, with [R1] now closed: **[R2]** there may be nowhere to reroute *to* — the router is
+replica-aware but three nodes with no middle-segment replica means recovery fails for lack of
+spare capacity, which closes by getting more nodes rather than by writing code. **[R3]** the
+driver holds the cache, so a server-side driver death drops every in-flight request (low
+severity for a self-hosted driver — if that machine died, the session died anyway).
+**[R4]** `MAX_REROUTES = 3` is a fixed count, so a long answer on a churning network can be
+killed by a counter rather than by a real problem; should be time- and progress-aware.
+**[R5]** planned withdrawal is treated as a crash — a node that is about to be reclaimed
+*knows*, and today it just vanishes and pays full replay cost.
+
+### The three proposed directions, assessed against the code
+**Farewell Protocol — adopt, with one change: announce, don't transfer.** The instinct is to
+hand KV state to a replacement. The driver can already rebuild any replacement from its own
+cache, so a node-to-node transfer buys nothing and adds a protocol, bandwidth and a trust
+surface — a malicious node could hand its successor poisoned state.
+
+**Preemptive reassembly — adopt, but conditional.** Continuously mirroring every request
+doubles wire traffic and node compute on a network where nodes earn per token; that is
+insurance paid on every request against a rare event. Trigger pre-warm on a degrading health
+signal instead. Worth noting: this *is* a prediction problem that works — node telemetry
+predicts departure well, even though nothing about the tensor contents predicts anything.
+
+**Hard-failure floor — mostly already built, one part rejected.** "Replay from the last good
+token, not from zero" is exactly what the junction cache does. But **the coordinator must not
+keep the token stream**: that stream is the user's prompt and the model's answer in plain text,
+and storing it centrally would contradict the project's position that no personal data is
+collected and that the claim is provable by reading the code. Recorded with the objection
+attached so it is not re-proposed without it.
+
+### The governing principle, written down
+**Stall beats degrade.** When replay is impossible, hold the stream and keep trying; a
+two-second pause in a streaming UI is nearly invisible and the user forgives it. Wrong tokens
+are permanent, undetectable by the reader, and are the actual reputational damage. Any fallback
+that lowers quality must be visible in the response metadata, never silent.
+
+`selftest_shard.py` ALL PASS (bit-exact prefill, cached generation matches);
+`test_junction_cache.py` 22/22.
+
+---
+
 ## Known limits / next steps
 - **Throughput scales with nodes (single 3.2 → 2-node 4.6 → 3-node 6.2 tok/s), but
   sub-linearly** because the nodes are heterogeneous and node_a carries the fixed
