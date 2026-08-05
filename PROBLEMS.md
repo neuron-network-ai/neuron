@@ -103,10 +103,37 @@ and the earlier entry asserted it without the log.
   as designed — but it means "install it on a work PC" is not a path to useful capacity, and the
   install guide should set that expectation.
 
-- **The new v0.18.0 install produced no log at all**, which is a separate failure: the agent
-  never started, consistent with Windows blocking the executable. See the code-signing item in
-  ROADMAP S16. A run that produces no log is indistinguishable from a run that never happened,
-  and the installer should verify the agent came up.
+- **v0.18.0 is a REGRESSION: 0.17 worked on this machine, 0.18 does not.** The log above is
+  0.17 -- it registered, downloaded, served heartbeats for days. 0.18 produced **no log at all**
+  and reportedly a 404. Two separate faults, and the first is what makes the second
+  undiagnosable.
+
+  **Why there is no log: `_setup_logging()` is called at `agent/agent.py:994`, inside `main()`,
+  and only after the config has been read** (`cfg.get("log_level")`). Every module-level import
+  (`from agent import gpu`, line 46, among them) and the whole config load run *before* any log
+  file exists. Any failure in that window is completely silent -- no file, no message, nothing
+  the owner can send. **This is the highest-value fix in this entry:** move file logging to the
+  first statement of `main()`, ahead of the config read, so a bad config gets logged instead of
+  swallowing itself. A run that produces no log is indistinguishable from a run that never
+  happened.
+
+  **Prime suspect for the crash: the GPU path, the substantive change in 0.18.** Its own release
+  notes say *"No machine in this project has an NVIDIA GPU ... it has never actually executed on
+  a GPU."* A work PC is exactly the machine likely to have one. `agent/gpu.py` guards its
+  `nvidia-smi` and torch calls and the import itself looks safe, so this is a suspect, not a
+  conclusion -- but it is the only substantive difference between the version that worked and
+  the version that does not.
+
+  **Second suspect: the in-place upgrade.** The release notes tell users to install over the top
+  and keep `%LOCALAPPDATA%\NEURON`, so 0.18 reads 0.17's config. A field 0.18 expects and 0.17
+  never wrote would throw during the config load -- before logging exists.
+
+  **The one action that identifies it:** run the installed 0.18 executable from a terminal
+  rather than the tray or service, so the traceback reaches stderr. Until logging moves earlier,
+  there is no other way to see this class of failure.
+
+  Windows blocking is real and separate (code-signing, ROADMAP S16), but it does not explain a
+  404 -- a blocked binary does not make HTTP requests.
 
 ### [P23] 🔴 `prune_test_accounts.py` will sweep the first stranger's wallet — BLOCKS S12
 
