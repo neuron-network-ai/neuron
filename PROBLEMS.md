@@ -35,6 +35,46 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
 
 ## Problems & risks
 
+### [P24] 🔴 A failed registration surfaces as a meaningless 404 — BLOCKS S12
+
+- **Observed 2026-08-05**, real install of v0.18.0 on a work PC that is not the founder's:
+  Windows blocked the installer, it installed anyway, then the agent "did not work — it was
+  giving 404". First genuine outside-machine install attempt, and it failed.
+- **The 404 is a symptom, not the fault.** Everything server-side is healthy and was verified
+  live: all 43 coordinator routes present, `/agent/version` 200, the published installer
+  download URL 200 (216 MB), `/network/model` 200, `/models` 200, and `/node/placement` 200 —
+  the last of which would have handed this very machine **layers 21–27, role `fill-gap`**, i.e.
+  the install that failed would have *repaired* the degraded network ([R6]).
+- **Mechanism, reproduced against the live coordinator:**
+
+  ```
+  /node/None/slice-info       -> HTTP 404
+  /node/null/slice-info       -> HTTP 404
+  /node//slice-info           -> HTTP 404
+  /node/not-a-node/slice-info -> HTTP 404
+  ```
+
+  `agent/config.json` ships `"node_id": null`. If `POST /node/register` does not complete, the
+  field stays null and the next call formats the URL as `/node/None/slice-info`, which 404s.
+  The agent proceeds to step two after step one failed, and reports the second step's error.
+- **Root cause is upstream:** registration never succeeded — most likely Windows
+  SmartScreen/Defender interfering, since the user reports being blocked. Registration itself is
+  open (`POST /node/register` with an empty body returns 422, not 401), so strangers are not
+  being refused.
+- **Two fixes, both needed:**
+  1. **Fail loudly at the failing step.** The agent must stop after a failed registration with
+     "could not register with the coordinator: <reason>", never continue with a null node_id.
+     A null id must be an assertion, not a URL segment. This is a small change and it is the
+     difference between a stranger filing a useful report and giving up.
+  2. **Windows blocking needs a code-signing certificate** — already named in ROADMAP S16 and
+     still unbought. Until then the install guide must tell people exactly what SmartScreen
+     looks like and how to proceed, or first-run failure is the default experience.
+- **To confirm the specific cause on that machine:** its `agent.log` will name the failing
+  registration call. Nothing else will.
+- **Wider point:** `neuron_doctor.py` checks the *network*. Nothing checks *this machine's own
+  agent* — did it register, does it hold a token, did its slice download. That is the natural
+  second half of the doctor and it is what would have answered this in one command.
+
 ### [P23] 🔴 `prune_test_accounts.py` will sweep the first stranger's wallet — BLOCKS S12
 
 - **Symptom:** the founder's two OAuth wallets show `balance: 0.0` on the live coordinator while
