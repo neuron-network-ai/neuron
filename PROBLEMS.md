@@ -35,45 +35,78 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
 
 ## Problems & risks
 
-### [P24] 🔴 A failed registration surfaces as a meaningless 404 — BLOCKS S12
+### [P24] 🔴 Strangers register fine, then sit PROBATIONARY forever — BLOCKS S12
 
-- **Observed 2026-08-05**, real install of v0.18.0 on a work PC that is not the founder's:
-  Windows blocked the installer, it installed anyway, then the agent "did not work — it was
-  giving 404". First genuine outside-machine install attempt, and it failed.
-- **The 404 is a symptom, not the fault.** Everything server-side is healthy and was verified
-  live: all 43 coordinator routes present, `/agent/version` 200, the published installer
-  download URL 200 (216 MB), `/network/model` 200, `/models` 200, and `/node/placement` 200 —
-  the last of which would have handed this very machine **layers 21–27, role `fill-gap`**, i.e.
-  the install that failed would have *repaired* the degraded network ([R6]).
-- **Mechanism, reproduced against the live coordinator:**
+**This entry replaces an earlier, wrong diagnosis.** The first version blamed a failed
+registration producing a null node_id and a `/node/None/slice-info` 404. The agent log from the
+machine disproves that: registration worked perfectly.
+
+```
+13:03:33 auto-placed on layers 10-18 (fill-gap: chain is missing layers 10-18)
+13:03:33 registered as agent-bhpc012104 [probationary], assigned layers [10, 18] (8 cores, 8 GB)
+13:03:35 downloading slice: layers 10-18 (~0.84 GB) ...
+13:05:50 node server started on port 50999
+13:05:50 relay tunnel started - reachable via 150.230.22.250:9001 (NAT-friendly)
+```
+
+Node id assigned, slice downloaded, server up, NAT relay up, then `heartbeat ok - active`
+continuously across three separate days. The join path works end to end. The 404 was a
+different, unlogged event; the null-node_id mechanism is real but was not what happened here,
+and the earlier entry asserted it without the log.
+
+- **What actually went wrong**, from the same log's third line:
 
   ```
-  /node/None/slice-info       -> HTTP 404
-  /node/null/slice-info       -> HTTP 404
-  /node//slice-info           -> HTTP 404
-  /node/not-a-node/slice-info -> HTTP 404
+  PROBATIONARY: serving challenges only - a verifier must confirm this node
+  (proof-of-compute) before it receives live requests or earns NRN
   ```
 
-  `agent/config.json` ships `"node_id": null`. If `POST /node/register` does not complete, the
-  field stays null and the next call formats the URL as `/node/None/slice-info`, which 404s.
-  The agent proceeds to step two after step one failed, and reports the second step's error.
-- **Root cause is upstream:** registration never succeeded — most likely Windows
-  SmartScreen/Defender interfering, since the user reports being blocked. Registration itself is
-  open (`POST /node/register` with an empty body returns 422, not 401), so strangers are not
-  being refused.
-- **Two fixes, both needed:**
-  1. **Fail loudly at the failing step.** The agent must stop after a failed registration with
-     "could not register with the coordinator: <reason>", never continue with a null node_id.
-     A null id must be an assertion, not a URL segment. This is a small change and it is the
-     difference between a stranger filing a useful report and giving up.
-  2. **Windows blocking needs a code-signing certificate** — already named in ROADMAP S16 and
-     still unbought. Until then the install guide must tell people exactly what SmartScreen
-     looks like and how to proceed, or first-run failure is the default experience.
-- **To confirm the specific cause on that machine:** its `agent.log` will name the failing
-  registration call. Nothing else will.
-- **Wider point:** `neuron_doctor.py` checks the *network*. Nothing checks *this machine's own
-  agent* — did it register, does it hold a token, did its slice download. That is the natural
-  second half of the doctor and it is what would have answered this in one command.
+  It was never promoted. Not once in the whole log. A probationary node serves no live
+  requests and earns no NRN, so the owner's experience is: installed it, it says it is running,
+  nothing ever happens, zero balance, forever.
+
+- **Root cause: `verify_service.py` is not running.** It is the operator-side service that
+  promotes probationary nodes, and `verify_service.log` stops dead at **2026-08-03 17:27**,
+  two days before this was investigated. Its final entries are all failures:
+
+  ```
+  2026-08-03 00:01:02 coordinator unreachable: 502 Bad Gateway .../node/list
+  2026-08-03 14:28:21 coordinator unreachable: Failed to resolve 'neuronnet.duckdns.org'
+  2026-08-03 17:27:47 coordinator unreachable: Failed to resolve 'neuronnet.duckdns.org'
+  ```
+
+  Every node it ever verified is `agent-optinovate-*` — the founder's own machines. It never
+  reached the outside one.
+
+- **This is the exact failure the verifier was written to prevent**, in its own words: *"a
+  stranger who joined at 3am sat at zero NRN until somebody noticed them. A network whose
+  onboarding requires the operator to be awake is a demo."* The service exists, it works, and
+  it died silently — so the network is back to being a demo and nothing said so. Same class as
+  [R6]: the information existed, nothing was watching it.
+
+- **Fixes, in order:**
+  1. **Restart the verifier and keep it up.** It has a systemd unit on Linux and is installed by
+     `agent/install.py`; on the founder's Windows box it is evidently not supervised. A service
+     whose death is invisible will die again.
+  2. **The doctor must check it.** `/status` already returns `probationary_nodes`. Any node
+     stuck probationary across more than a couple of verifier cycles means promotion is broken.
+     Added to `neuron_doctor.py` in the same change as this entry.
+  3. **The agent should say so.** After N heartbeats still probationary, log a WARNING naming
+     the situation ("still awaiting verification after 30 minutes — the network operator's
+     verifier may be down") rather than an indefinite calm `heartbeat ok - active`.
+  4. **Retry harder on transient coordinator errors.** 502 and DNS failures are expected on a
+     home connection; the verifier should back off and keep trying, not stop.
+
+- **Secondary finding from the same log:** the work PC ran at 76-100% CPU and repeatedly logged
+  `paused (cpu 91% > donation ceiling 85%) - not advertising availability`. Even fully verified,
+  a busy work machine would contribute rarely. Not a bug — the resource guard behaving exactly
+  as designed — but it means "install it on a work PC" is not a path to useful capacity, and the
+  install guide should set that expectation.
+
+- **The new v0.18.0 install produced no log at all**, which is a separate failure: the agent
+  never started, consistent with Windows blocking the executable. See the code-signing item in
+  ROADMAP S16. A run that produces no log is indistinguishable from a run that never happened,
+  and the installer should verify the agent came up.
 
 ### [P23] 🔴 `prune_test_accounts.py` will sweep the first stranger's wallet — BLOCKS S12
 

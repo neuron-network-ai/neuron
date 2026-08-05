@@ -118,6 +118,19 @@ def check_network(base, rep):
     else:
         rep.add(OK, "nodes eligible to serve", str(eligible))
 
+    # 3b. PROBATIONARY NODES. [P24]: a stranger registered, downloaded a slice, served
+    # heartbeats for three days and was never promoted, because the operator's verifier had
+    # been dead for two of them. The node looked healthy from every angle except this one.
+    prob = net.get("probationary_nodes", 0)
+    if prob:
+        rep.add(BAD, "nodes awaiting verification",
+                f"{prob} node(s) probationary -- they serve nothing and earn nothing "
+                f"until promoted",
+                "is verify_service.py running? A probationary node that never gets promoted "
+                "is a stranger who installed NEURON and got nothing. See PROBLEMS.md [P24].")
+    else:
+        rep.add(OK, "nodes awaiting verification", "none stuck probationary")
+
     # 4. Failover needs somewhere to go -- RESILIENCE.md [R2].
     if covered and total and covered >= total and eligible <= 2:
         rep.add(WARN, "spare capacity for failover",
