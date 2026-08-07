@@ -27,9 +27,11 @@ speed-weighted balancer and replica-aware placement are refinements layered on t
 
 Self-heal (added later): a SEPARATE state machine, self_heal()/heal_status(), living on the
 same MigrationController instance but never touching phase/target/plan/ready above. It closes
-a coverage GAP (a segment with zero online+eligible nodes and no replica) by reassigning true
-IDLE surplus nodes -- nodes that aren't covering, or tied to cover, any live segment -- never
-by taking capacity away from a segment that's already working. Deliberately kept separate from
+a coverage GAP (a segment with zero online+eligible nodes and no replica), preferring true IDLE
+surplus nodes -- ones that aren't covering, or tied to cover, any live segment -- so a working
+segment is never stripped to patch a broken one. When there is no idle node it falls back to
+re-splitting the model across everyone who is left ([R6]); that DOES move covering nodes, which
+is sound only because a gap means nothing can complete anyway. Deliberately kept separate from
 update() rather than folded in: update()'s target==serving branch unconditionally resets to
 steady every tick, which is exactly the state self-heal operates in, so anything stored via
 `phase` would be wiped before a heal could ever complete.
@@ -65,6 +67,11 @@ def plan_migration(nodes, layers, start=0):
     return plan
 
 
+def _assignment_key(plan):
+    """Identity of a plan for change detection: who serves what, not just who is involved."""
+    return {(a["node_id"], a["layer_start"], a["layer_end"]) for a in plan}
+
+
 class MigrationController:
     """Orchestrates one migration at a time. All timing is caller-supplied (`now`)."""
 
@@ -77,6 +84,7 @@ class MigrationController:
         self.heal_plan = []      # [{node_id, layer_start, layer_end}] closing the current gap
         self.heal_ready = set()  # node_ids that reported the heal slice downloaded
         self.heal_target = None  # {model_id, layers} -- always the CURRENT serving model
+        self.heal_mode = None    # "surplus" (idle node fills the gap) | "resplit" ([R6])
 
     def update(self, nodes, target, serving, now, apply_serving):
         """Advance the machine.
@@ -108,7 +116,7 @@ class MigrationController:
             self.phase = "preparing"
             # A real tier migration always wins -- abandon any in-flight self-heal rather than
             # let a stale heal assignment linger through a cutover it was never part of.
-            self.heal_plan, self.heal_ready, self.heal_target = [], set(), None
+            self._clear_heal()
 
         # Cutover when every planned node has the target slice ready.
         planned = {a["node_id"] for a in self.plan}
@@ -152,6 +160,9 @@ class MigrationController:
     def _reset(self):
         self.phase, self.target, self.plan, self.ready = "steady", None, [], set()
 
+    def _clear_heal(self):
+        self.heal_plan, self.heal_ready, self.heal_target, self.heal_mode = [], set(), None, None
+
     def status(self):
         planned = {a["node_id"] for a in self.plan}
         return {
@@ -164,7 +175,7 @@ class MigrationController:
         }
 
     # ----------------------------------------------------------------------- #
-    # Self-heal: close a coverage gap using true-idle surplus nodes only.
+    # Self-heal: close a coverage gap -- idle surplus first, full re-split as the fallback.
     # ----------------------------------------------------------------------- #
     def self_heal(self, nodes, serving, now, apply_layers):
         """Advance the self-heal machine. `nodes` is the SAME full roster update() already
@@ -178,7 +189,7 @@ class MigrationController:
         missing, covering_ids = router.covering_and_missing(nodes, serving["layers"])
         if not missing:
             if self.heal_plan:                      # the gap closed some other way (node came
-                self.heal_plan, self.heal_ready, self.heal_target = [], set(), None
+                self._clear_heal()
             return self.heal_status()
 
         elig_ids = {n["node_id"] for n in nodes
@@ -195,31 +206,58 @@ class MigrationController:
                 proposal, target_gap = candidate, (gap_start, gap_end)
                 break
 
+        # [R6] Nothing idle can close the gap. That is not the rare case -- it is the NORMAL
+        # case when a node LEAVES, because a shrunken network has no surplus by definition, so
+        # the one situation where healing matters most was the one this skipped. The survivors
+        # are still holding the ranges they were given when the network was bigger (0-13 and
+        # 14-20 of a 28-layer model, observed live 2026-08-04), so the departed node's layers
+        # belong to nobody and not one request can complete. Re-split the whole serving model
+        # across whoever is actually here instead.
+        #
+        # Reassigning nodes that ARE currently covering is safe precisely because `missing` is
+        # non-empty: the pipeline is already broken, so there is no working service to protect.
+        # The plan still goes through the same download-then-report-ready handshake as any other
+        # heal -- nothing cuts over until every planned node holds its new slice.
+        resplit = False
         if not proposal:
-            if self.heal_plan and not ({a["node_id"] for a in self.heal_plan} <= surplus_ids):
+            proposal = plan_migration(nodes, serving["layers"])
+            resplit = bool(proposal)
+
+        if not proposal:
+            if self.heal_plan and not ({a["node_id"] for a in self.heal_plan} <= elig_ids):
                 # what we were healing with is no longer available and nothing else fits either
-                self.heal_plan, self.heal_ready, self.heal_target = [], set(), None
+                self._clear_heal()
             return self.heal_status()
 
+        # Compare the full assignments, not just the node ids. The same node can be re-planned
+        # onto a DIFFERENT range from one tick to the next (the gap moved, or a surplus heal was
+        # superseded by a re-split); id-only comparison called that "unchanged" and kept serving
+        # the stale range out of assignment_for(), so a node would download and cut over to a
+        # slice the coordinator had already stopped intending.
         planned_ids = {a["node_id"] for a in self.heal_plan}
-        proposal_ids = {a["node_id"] for a in proposal}
-        node_dropped = self.heal_plan and not planned_ids.issubset(surplus_ids)
-        changed = proposal_ids != planned_ids or node_dropped
+        node_dropped = self.heal_plan and not planned_ids.issubset(elig_ids)
+        changed = _assignment_key(proposal) != _assignment_key(self.heal_plan) or node_dropped
         if changed:
             self.heal_plan = proposal
             self.heal_ready = set()
             self.heal_target = {"model_id": serving["model_id"], "layers": serving["layers"]}
+            self.heal_mode = "resplit" if resplit else "surplus"
 
         planned = {a["node_id"] for a in self.heal_plan}
         if planned and planned <= self.heal_ready:
             apply_layers(self.heal_plan)
-            self.heal_plan, self.heal_ready, self.heal_target = [], set(), None
+            self._clear_heal()
         return self.heal_status()
 
     def heal_status(self):
         planned = {a["node_id"] for a in self.heal_plan}
         return {
             "healing": bool(self.heal_plan),
+            # "surplus" = an idle node is being moved onto the gap; "resplit" = there was no
+            # idle node, so the whole model is being re-divided across the survivors ([R6]).
+            # Worth distinguishing in the log and on /network/gap-heal: a resplit means the
+            # network SHRANK, which is a different operational story from a newcomer landing.
+            "mode": self.heal_mode,
             "target": self.heal_target,
             "plan": [{"node_id": a["node_id"], "layers": [a["layer_start"], a["layer_end"]],
                       "ready": a["node_id"] in self.heal_ready} for a in self.heal_plan],

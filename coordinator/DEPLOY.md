@@ -90,6 +90,93 @@ sudo systemctl enable --now neuron-coordinator
 sudo systemctl status neuron-coordinator
 ```
 
+`Restart=always` covers a crash. It does **not** cover new code — that is the next section.
+
+---
+
+## 0b. Unattended updates (`coordinator/selfupdate.py`)
+
+`deploy.sh` requires the founder at their machine. That is how the [R6] self-heal fix sat
+written and tested while the live network stayed DEGRADED. This closes it: the VM installs a
+**published** version by itself, proves it healthy, and puts the old one back if it isn't.
+
+**Nothing happens until you publish.** No polling of git, no installing on a commit. The VM
+reads one static manifest and acts only when its version is higher than what it runs.
+
+### Install the timer *(on the VM, once)*
+
+```ini
+# /etc/systemd/system/neuron-coordinator-update.service
+[Unit]
+Description=NEURON coordinator self-update
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/neuron
+ExecStart=/home/ubuntu/neuron/.venv/bin/python -m coordinator.selfupdate --root /home/ubuntu/neuron
+```
+```ini
+# /etc/systemd/system/neuron-coordinator-update.timer
+[Unit]
+Description=Check for a published NEURON coordinator hourly
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target
+```
+
+It restarts the coordinator, so it needs that one sudo right and nothing else:
+
+```bash
+echo 'ubuntu ALL=(root) NOPASSWD: /bin/systemctl restart neuron-coordinator' \
+  | sudo tee /etc/sudoers.d/neuron-selfupdate
+sudo systemctl enable --now neuron-coordinator-update.timer
+sudo systemctl start neuron-coordinator-update.service   # run one now
+journalctl -u neuron-coordinator-update -n 50 --no-pager
+```
+
+Check what it would do without touching anything:
+
+```bash
+./.venv/bin/python -m coordinator.selfupdate --check
+```
+
+### Publish a release *(on your machine)*
+
+1. Bump `COORDINATOR_VERSION` in `coordinator/config.py` **in the same commit as the change**.
+   The updater verifies the version `/status` reports after restart, so a build whose code still
+   says the old number gets rolled back even though it was fine.
+2. ```bash
+   python packaging/publish_coordinator.py
+   ```
+   Builds `dist/neuron-coordinator-<version>.tgz` from the files **git tracks** (so gitignored
+   secrets — `node_tokens.json`, `nodes.local.json` — cannot end up in a public release asset),
+   hashes it, and writes `packaging/coordinator-latest.json`. It refuses to build if a module
+   under `coordinator/` is uncommitted, since that module would be missing from the archive and
+   the coordinator would fail to import.
+3. Upload the archive to the GitHub release **first**, then push the manifest. The manifest is
+   the trigger; pointing it at a URL that 404s just means the VM retries hourly and stays put.
+
+### What it does, in order
+
+1. Read the manifest. Not newer → stop. Unreachable → stop (never read as "up to date").
+2. Download and check SHA-256. No hash published, or a mismatch → **nothing is installed**.
+3. Snapshot the current code **and copy the database aside** to `.rollback/<timestamp>/`.
+4. Extract — confined to `coordinator/`, `relay_auth.py`, `common.py`; never `neuron.db`.
+5. Restart, then prove health: `/status` answers, reports **the version just installed**, and
+   `/wallet/faucet` + `/admin/identities` still return 401. A coordinator that serves with its
+   auth switched off is a failed update, not a passing one.
+6. Any failure → restore the snapshot, restart, re-check. Code is rolled back; the **database is
+   not**, because a schema migration is one-way and nothing here writes to it.
+7. If even the rollback will not come up, it says so loudly and keeps the snapshot. That is the
+   one state that still needs a human, and the exit code is non-zero only for that.
+
 ---
 
 ## 3. Point the network at the new coordinator

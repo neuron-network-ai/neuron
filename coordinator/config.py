@@ -81,6 +81,21 @@ AGENT_DOWNLOAD_URL = os.environ.get(
 # binary pushed to every volunteer's machine is the worst thing this project could ship.
 AGENT_SHA256 = os.environ.get("NEURON_AGENT_SHA256", "")
 
+# --------------------------------------------------------------------------- #
+# Coordinator self-update (see coordinator/selfupdate.py)
+# --------------------------------------------------------------------------- #
+# What this build IS. Reported on /status so an update can be CONFIRMED live rather than
+# assumed from "the process came back up". Bump it in the same commit as the change it ships.
+COORDINATOR_VERSION = os.environ.get("NEURON_COORDINATOR_VERSION", "0.19.0")
+# Where the updater reads what it SHOULD be running. Deliberately not an endpoint on this
+# coordinator: a coordinator that is broken cannot serve its own manifest, and a bad deploy that
+# could rewrite the manifest would remove the only signal saying it went wrong. A static file in
+# the repo means publishing is a git push and the source of truth outlives the server.
+COORDINATOR_MANIFEST_URL = os.environ.get(
+    "NEURON_COORDINATOR_MANIFEST_URL",
+    "https://raw.githubusercontent.com/neuron-network-ai/neuron/main/"
+    "packaging/coordinator-latest.json")
+
 # Origins allowed to read this API from a browser. The public landing page is served from
 # GitHub Pages, which is a different origin, so it needs naming here to display live numbers.
 # Comma-separated via NEURON_CORS_ORIGINS. Note an origin is scheme+host+port and never a path,

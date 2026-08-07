@@ -35,6 +35,66 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
 
 ## Problems & risks
 
+### [P25] 🟢 Every stranger was sent to the same layers, so the chain could never close — fixed (2026-08-07)
+
+**Observed live.** The dashboard read **21/28 layers, DEGRADED — chain incomplete** with four
+nodes online and three of them serving the *identical* range, layers 0–13:
+
+| node | layers | standing |
+|---|---|---|
+| agent-optinovate-67e4eb | 0–13 | verified |
+| agent-bhpc012104-5452f9 | 0–13 | probationary |
+| agent-bhpc012101-80c3fc | 0–13 | probationary |
+| node-c-pavilion | 14–20 | trusted |
+
+Layers 21–27 belonged to nobody. Four machines, three copies of one slice, and not a single
+request able to complete.
+
+**Cause — placement reasoned over the ELIGIBLE nodes only.** `suggest_placement` walked the
+chain from `build_chain`, which filters to `eligible` (trusted or proof-of-compute verified,
+`models.py`). That filter is correct for **routing** — an unverified node must not receive live
+traffic — and wrong for **placement**. A probationary node has already been handed a range and
+has already downloaded that slice; it is a real claim on that segment. Filtering it out made
+every newcomer invisible to the next one:
+
+1. Only the trusted node (14–20) was eligible, so the first gap read **0–13**.
+2. Stranger #1 asked, was told 0–13, registered — probationary, therefore invisible.
+3. Stranger #2 asked. The coordinator's view was *unchanged*. Told **0–13** again.
+4. Stranger #3, same. Nobody was ever offered 21–27.
+
+Then it froze: `ensure_placement` returns early whenever config already holds a range, so no
+node re-asked, and the answer written on first run was permanent.
+
+**Nothing self-corrected**, either. Self-heal only reassigns nodes that are eligible, online AND
+*true idle surplus*; here every eligible node was covering something, so surplus was empty and
+the sweep did nothing on every tick, forever — [R6] in `RESILIENCE.md`. The balancer meanwhile
+had a perfectly good split sitting on `/network/plan` (0–22 / 23–27, 2.8× better than an equal
+split) that only a human calling `POST /network/rebalance` would ever apply. Nobody was looking.
+
+**Fixed, three parts:**
+
+1. **Placement now reasons over every ONLINE node** (`router.placement_roster`), routing still
+   over eligible ones only. An unverified node's range counts as taken, so the next joiner is
+   sent somewhere useful. Regression test: three strangers joining a network whose only eligible
+   node holds 14–20 must close both gaps before anyone duplicates a slice.
+2. **`GET /node/placement?exclude=<node_id>`** answers "where would I go if I weren't already
+   here?", and a **probationary** agent asks it right after registering — moving if the answer
+   differs, then re-registering on the new range (once; `_replaced` bounds it). Free at exactly
+   that moment and no other: a probationary node serves no live traffic, so nothing is lost.
+   Self-stabilising, because a node whose range is genuinely needed is handed the same range
+   back. `--layers` sets `layers_pinned` and is never second-guessed.
+3. **[R6]** — a coverage gap with no idle surplus now triggers a full re-split instead of a
+   no-op. See `RESILIENCE.md`.
+
+Also fixed on the way: `_walk` did not clamp a gap to the model's layer count, so a node holding
+a range beyond `total` (what a migration onto a *smaller* model leaves behind until each node
+reloads) stretched the gap past the end of the model and self-heal planned a slice tens of layers
+too long.
+
+**Files:** `coordinator/router.py`, `coordinator/migration.py`, `coordinator/main.py`,
+`agent/agent.py`. **Tests:** `coordinator/test_placement.py`, `coordinator/test_migration.py`,
+`agent/test_replacement.py`.
+
 ### [P24] 🔴 Strangers register fine, then sit PROBATIONARY forever — BLOCKS S12
 
 **This entry replaces an earlier, wrong diagnosis.** The first version blamed a failed

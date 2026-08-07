@@ -235,10 +235,40 @@ def test_self_heal_cutover_persists_layers_when_ready():
     assert calls == [[{"node_id": "d", "layer_start": 10, "layer_end": 18}]]
 
 
-def test_self_heal_noop_when_no_surplus_available():
+def test_self_heal_resplits_when_no_surplus_available():
+    """[R6]: the survivors of a shrunken network hold their old ranges, so the departed node's
+    layers belong to nobody and there is no idle node to hand them to. Re-split across whoever
+    is left rather than sitting on a chain that cannot serve a single request."""
     c = mig.MigrationController()
     calls, apply = _heal_apply()
     nodes = [NL("a", 0, 9, head=True), NL("c", 10, 18, status="offline"), NL("b", 19, 27)]
+    st = c.self_heal(nodes, _serving28(), 0, apply)
+    assert st["healing"] is True and st["mode"] == "resplit"
+    # a and b split all 28 layers -- contiguous, complete, driver first
+    assert [p["layers"] for p in st["plan"]] == [[0, 13], [14, 27]]
+    assert calls == []                                # not until both report ready
+
+    st2 = c.self_heal(nodes, _serving28(), 1, apply)  # identical tick -> no replan, no churn
+    assert st2["plan"] == st["plan"] and calls == []
+
+
+def test_self_heal_resplit_cuts_over_when_every_node_is_ready():
+    c = mig.MigrationController()
+    calls, apply = _heal_apply()
+    nodes = [NL("a", 0, 9, head=True), NL("c", 10, 18, status="offline"), NL("b", 19, 27)]
+    c.self_heal(nodes, _serving28(), 0, apply)
+    assert c.mark_ready("a") is True and c.mark_ready("b") is True
+    st = c.self_heal(nodes, _serving28(), 1, apply)
+    assert st["healing"] is False and st["mode"] is None
+    assert calls == [[{"node_id": "a", "layer_start": 0, "layer_end": 13},
+                      {"node_id": "b", "layer_start": 14, "layer_end": 27}]]
+
+
+def test_self_heal_noop_when_nothing_is_eligible():
+    """Nobody left to re-split across: report no heal rather than raise or invent a plan."""
+    c = mig.MigrationController()
+    calls, apply = _heal_apply()
+    nodes = [NL("a", 0, 9, head=True, status="offline"), NL("b", 19, 27, eligible=False)]
     st1 = c.self_heal(nodes, _serving28(), 0, apply)
     st2 = c.self_heal(nodes, _serving28(), 1, apply)  # idempotent -- no crash, no assignment
     assert st1["healing"] is False and st2["healing"] is False and calls == []
@@ -252,8 +282,44 @@ def test_self_heal_never_reassigns_a_non_chosen_replica():
     nodes = [NL("a", 0, 9, head=True), NL("c", 10, 18, status="offline"),
             NL("b", 19, 27), NL("e", 19, 27)]
     st = c.self_heal(nodes, _serving28(), 0, apply)
-    assert st["healing"] is False                     # neither b nor e is "surplus"
+    # No surplus exists, so this falls through to a full re-split -- which is allowed to move
+    # b and e, because a gap means nothing is being served anyway. What must NOT happen is the
+    # surplus path treating the un-picked replica as idle and stealing it for 10-18 alone.
+    assert st["mode"] == "resplit"
+    assert [p["node_id"] for p in st["plan"]] == ["a", "b", "e"]
+    assert [p["layers"] for p in st["plan"]] == [[0, 9], [10, 18], [19, 27]]
     assert calls == []
+
+
+def test_self_heal_prefers_surplus_over_resplit():
+    """An idle node exists, so the working segments must be left exactly where they are."""
+    c = mig.MigrationController()
+    calls, apply = _heal_apply()
+    nodes = [NL("a", 0, 9, head=True), NL("c", 10, 18, status="offline"),
+            NL("b", 19, 27), NL("d", 99, 99)]
+    st = c.self_heal(nodes, _serving28(), 0, apply)
+    assert st["mode"] == "surplus"
+    assert st["plan"] == [{"node_id": "d", "layers": [10, 18], "ready": False}]
+
+
+def test_self_heal_replans_when_the_same_node_moves_to_a_different_range():
+    """Change detection is on the ASSIGNMENTS, not the node ids: the same node re-planned onto
+    a different range is a new plan, and any ready progress against the old one is void."""
+    c = mig.MigrationController()
+    calls, apply = _heal_apply()
+    nodes = [NL("a", 0, 9, head=True), NL("c", 10, 18, status="offline"),
+            NL("b", 19, 27), NL("d", 99, 99)]
+    c.self_heal(nodes, _serving28(), 0, apply)
+    assert c.heal_status()["plan"] == [{"node_id": "d", "layers": [10, 18], "ready": False}]
+    c.mark_ready("d")
+
+    # c comes back and b leaves: the gap d must fill is now 19-27, not 10-18.
+    moved = [NL("a", 0, 9, head=True), NL("c", 10, 18),
+            NL("b", 19, 27, status="offline"), NL("d", 99, 99)]
+    st = c.self_heal(moved, _serving28(), 1, apply)
+    assert st["plan"] == [{"node_id": "d", "layers": [19, 27], "ready": False}]
+    assert st["ready_count"] == 0                     # stale readiness discarded
+    assert calls == []                                # and no cutover onto the old range
 
 
 def test_self_heal_does_not_run_while_preparing():

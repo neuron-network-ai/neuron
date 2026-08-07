@@ -73,7 +73,9 @@ PEER_VERIFY_POLL_SECONDS = 60
 DEFAULT_CONFIG = {
     "coordinator": "https://neuronnet.duckdns.org",
     "node_id": None, "node_token": None, "model_id": None,
-    "layer_start": None, "layer_end": None,
+    # layers_pinned: set only by --layers. Left false, a probationary node may be re-placed by
+    # the coordinator when its slice turns out to duplicate someone else's.
+    "layer_start": None, "layer_end": None, "layers_pinned": False,
     "slice_dir": "./model_slice/",
     "donation_mode": "idle", "idle_threshold_seconds": 60,
     "behind_nat": True, "log_level": "INFO",
@@ -194,16 +196,62 @@ class Agent:
     # -- coordinator calls --------------------------------------------------- #
     def ensure_placement(self):
         """Zero-config open join (S20): if config has no layer range, ask the coordinator
-        where we fit (fills a gap, else replicates the last segment) and persist it."""
+        where we fit (fills a gap, else replicates the weakest segment) and persist it."""
         if self.cfg.get("layer_start") is not None and self.cfg.get("layer_end") is not None:
             return
-        r = requests.get(f"{self.base}/node/placement", timeout=15)
-        r.raise_for_status()
-        p = r.json()
+        p = self.ask_placement()
         self.cfg["layer_start"], self.cfg["layer_end"] = p["layer_start"], p["layer_end"]
         self._save()
         log.info("auto-placed on layers %d-%d (%s: %s)", p["layer_start"], p["layer_end"],
                  p.get("role"), p.get("reason"))
+
+    def ask_placement(self, exclude_self=False):
+        """GET /node/placement. `exclude_self` asks the coordinator to leave this node out of
+        the roster it reasons over — i.e. "where would I go if I weren't already here?"."""
+        params = {}
+        if exclude_self and self.cfg.get("node_id"):
+            params["exclude"] = self.cfg["node_id"]
+        r = requests.get(f"{self.base}/node/placement", params=params, timeout=15)
+        r.raise_for_status()
+        return r.json()
+
+    def reconsider_placement(self):
+        """Re-ask where this node belongs, and move if the answer changed. Returns True if the
+        configured range was replaced (the caller must then re-register).
+
+        Only ever called while PROBATIONARY, and that restriction is the whole safety argument:
+        a probationary node receives no live requests, so moving it costs the network nothing
+        and costs this machine one download. The range in config was decided at the instant we
+        first asked, from whatever the coordinator could see then — and an unverified node used
+        to be invisible to that view, so several machines joining around the same time were all
+        told to take the identical gap and the layers nobody took stayed uncovered for good
+        (three nodes on 0-13, 21-27 empty, live on 2026-08-07). Asking again with ourselves
+        excluded is self-stabilising: if this node's range is genuinely needed, the coordinator
+        sees the hole we would leave and hands the same range straight back, so a node that is
+        where it should be never moves and there is nothing to oscillate.
+        """
+        if self.cfg.get("layers_pinned"):
+            return False                      # operator ran --layers; never second-guess that
+        # Advice is a nicety; the registration that just succeeded is the real thing. Anything
+        # wrong with the answer -- unreachable coordinator, an older build that has no `exclude`
+        # and no range in the body, a garbled payload -- means stay put, not fail.
+        try:
+            p = self.ask_placement(exclude_self=True)
+            new = (int(p["layer_start"]), int(p["layer_end"]))
+        except (requests.RequestException, KeyError, TypeError, ValueError) as e:
+            log.debug("placement re-check unusable, keeping layers %s-%s: %s",
+                      self.cfg.get("layer_start"), self.cfg.get("layer_end"), e)
+            return False
+        cur = (self.cfg.get("layer_start"), self.cfg.get("layer_end"))
+        if new == cur or new[0] > new[1]:
+            return False
+        log.warning("layers %d-%d are redundant — this node is moving to %d-%d (%s: %s). "
+                    "The slice for the new range downloads now; nothing was being served from "
+                    "the old one, because a probationary node receives no live requests.",
+                    cur[0], cur[1], new[0], new[1], p.get("role"), p.get("reason"))
+        self.cfg["layer_start"], self.cfg["layer_end"] = new
+        self._save()
+        return True
 
     def measure_ms_per_layer(self, layer_start, layer_end, iters=6):
         """Time one decode-shaped forward pass through THIS node's own layers, in ms/layer.
@@ -281,7 +329,7 @@ class Agent:
         """
         return f"agent-{socket.gethostname().lower()}-{uuid.uuid4().hex[:6]}"
 
-    def register(self):
+    def register(self, _replaced=False):
         self.ensure_placement()
         ip = detect_tailscale_ip()
         if not self.cfg.get("node_id"):
@@ -364,6 +412,13 @@ class Agent:
         log.info("registered as %s [%s], assigned layers %s (%d cores, %d GB%s, %s)",
                  body["node_id"], standing, data["assigned_layers"],
                  body["cores"], body["ram_gb"], gpu_note, ip)
+        # A probationary node's placement is the one that can still be wrong AND still be fixed
+        # for free: wrong because it was chosen before the coordinator counted unverified nodes,
+        # free because nothing routes to us yet. Re-ask once, and if the answer moved, register
+        # again on the new range. `_replaced` bounds this to a single extra round trip -- the
+        # second registration never re-checks, so there is no way to loop.
+        if standing == "probationary" and not _replaced and self.reconsider_placement():
+            return self.register(_replaced=True)
         if standing == "probationary":
             log.info("PROBATIONARY: serving challenges only — a verifier must confirm this "
                      "node (proof-of-compute) before it receives live requests or earns NRN")
@@ -979,6 +1034,9 @@ def main():
     if args.layers:
         lo, _, hi = args.layers.partition("-")
         cfg["layer_start"], cfg["layer_end"], dirty = int(lo), int(hi), True
+        # An operator who names a range means it; the agent's own re-placement (which moves a
+        # probationary node off a redundant slice) must leave it alone.
+        cfg["layers_pinned"] = True
     if args.port:
         cfg["port"], dirty = args.port, True
     if args.node_id:

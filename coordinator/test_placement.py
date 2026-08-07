@@ -54,7 +54,10 @@ def main():
     check("complete chain -> replica of the scarcest (here: first) segment",
           p["role"] == "replica-balance" and [p["layer_start"], p["layer_end"]] == [0, S1 - 1])
 
-    # a probationary node covering the gap does NOT count as coverage -> still a gap
+    # A probationary node is invisible to ROUTING but visible to PLACEMENT. It cannot serve a
+    # request until it is verified -- so the chain is still incomplete -- yet it has already been
+    # given that range and has already downloaded that slice, so the next joiner must not be
+    # handed the same one.
     for n in models.list_nodes():         # reset (init_db is CREATE IF NOT EXISTS, not a wipe)
         models.delete_node(n["node_id"])
     reg("driver-a", 0, S1 - 1)
@@ -62,17 +65,64 @@ def main():
     register(RegisterBody(node_id="stranger-last", tailscale_ip="127.0.0.1", port=51000,
                           layer_start=S2, layer_end=N - 1, cores=4, ram_gb=8),
              x_register_secret=None)   # probationary
+    _chain, missing = router.build_chain()
+    check("probationary node does not count as routable coverage", missing == [(S2, N - 1)])
     p = router.suggest_placement()
-    check("probationary node doesn't fill the gap", p["role"] == "fill-gap")
+    check("...but its range is taken, so the next joiner is not sent there too",
+          p["role"] == "replica-balance" and [p["layer_start"], p["layer_end"]] != [S2, N - 1])
     models.record_attestation("stranger-last", True)   # verify it
+    check("after verification the chain routes end to end", router.build_chain()[1] == [])
     p = router.suggest_placement()
     check("after verification, chain complete -> replica-balance",
           p["role"] == "replica-balance")
+
+    # THE HERD ([P25], live 2026-08-07). Three strangers join a network whose only eligible node
+    # is the trusted one on 14-20. Placement used to reason over eligible nodes ONLY, so each
+    # newcomer was invisible to the next and all three were told "the first gap is 0-13": three
+    # copies of one slice, layers 21-27 covered by nobody, DEGRADED forever.
+    for n in models.list_nodes():
+        models.delete_node(n["node_id"])
+    reg("trusted-mid", 14, 20)
+    got = []
+    for i in range(3):
+        p = router.suggest_placement()
+        got.append((p["layer_start"], p["layer_end"]))
+        register(RegisterBody(node_id=f"stranger{i}", tailscale_ip="127.0.0.1", port=52000 + i,
+                              layer_start=p["layer_start"], layer_end=p["layer_end"],
+                              cores=4, ram_gb=8),
+                 x_register_secret=None)              # every one of them probationary
+    check("strangers close both gaps before anyone duplicates a slice",
+          set(got[:2]) == {(0, 13), (21, N - 1)})
+    check("only once every layer is claimed does the next one replicate",
+          got[2] in {(0, 13), (14, 20), (21, N - 1)})
+    covered = set()
+    for n in models.list_nodes():
+        covered |= set(range(n["layer_start"], n["layer_end"] + 1))
+    check("and between them the whole model is claimed", covered == set(range(N)))
+
+    # `exclude` = "where would I go if I weren't already here?" -- the question a node re-asks
+    # before deciding to move. It must be self-stabilising: a node whose range is needed is told
+    # to stay, or every restart would start a migration.
+    for n in models.list_nodes():
+        models.delete_node(n["node_id"])
+    reg("node_a", 0, S1 - 1)
+    reg("node_b", S1, S2 - 1)
+    reg("node_c", S2, N - 1)
+    p = router.suggest_placement(exclude="node_b")
+    check("excluding a node whose range is needed hands the same range back",
+          [p["layer_start"], p["layer_end"]] == [S1, S2 - 1])
+    reg("node_b2", S1, S2 - 1)                        # now node_b is a redundant duplicate
+    p = router.suggest_placement(exclude="node_b")
+    check("excluding a redundant node advises a different range",
+          [p["layer_start"], p["layer_end"]] != [S1, S2 - 1])
+    models.delete_node("node_b2")
 
     # endpoint returns total_layers + the placement fields
     out = node_placement()
     check("endpoint includes total_layers + role",
           out["total_layers"] == N and "role" in out and "layer_start" in out)
+    check("endpoint passes exclude through",
+          node_placement(exclude="node_a")["layer_start"] == 0)
 
     # ---- balanced replication is what turns added machines into concurrency ---- #
     # Regression for a real throughput bug: placement used to always advise "replicate the LAST

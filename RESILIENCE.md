@@ -115,7 +115,7 @@ say so, and a driver that is told can move at a token boundary for free.
 
 ---
 
-### [R6] Losing a node leaves a coverage hole nothing closes automatically — 🔴 HIGH
+### [R6] Losing a node leaves a coverage hole nothing closes automatically — 🟢 CLOSED (2026-08-07)
 Observed live, 2026-08-04: the network sat at **21/28 layers, DEGRADED — chain incomplete**,
 with two healthy nodes online. No request could complete; every chat attempt failed. The cause
 was not capacity. Two nodes cover a 1.5B model comfortably (~6 GB total, and one of them has
@@ -133,6 +133,26 @@ first noticed. Nothing noticed. The failure surfaced as a user typing "hi" eight
 **Fix:** treat a coverage gap with zero idle surplus as a trigger for a full re-split of the
 online nodes, not a no-op. Related to [R2] but distinct: [R2] is "no spare machine to take
 over", this is "the machines present are not re-divided to cover what is missing".
+
+**Done, 2026-08-07** (`coordinator/migration.py`). `self_heal` still prefers idle surplus — a
+working segment is never stripped to patch a broken one — but when nothing is idle it falls
+through to `plan_migration` over every online+eligible node, re-splitting the whole serving
+model. Reassigning nodes that *are* covering is sound only because the gap already means no
+request can complete; the guard is that this path runs only when `missing` is non-empty. It goes
+through the same download-then-report-ready handshake as any other heal, so nothing cuts over
+until every planned node holds its new slice, and `/network/gap-heal` now reports `mode`
+(`"surplus"` vs `"resplit"`) so the log distinguishes "a newcomer landed" from "the network
+shrank". The same sweep discovered the placement half of the story — see [P25] in `PROBLEMS.md`,
+where three machines were handed the identical layer range and 21–27 went unclaimed.
+
+**The delivery half.** This fix spent its first days written, tested and not running, because
+reaching production needed the founder at their machine — a network that heals itself but cannot
+receive the code that heals it is only half autonomous. `coordinator/selfupdate.py` closes that:
+the VM installs a *published* version on an hourly timer, proves it healthy (serving, reporting
+the version just installed, auth gates still returning 401) and restores the previous build if it
+is not. Publishing stays an explicit act, because with one coordinator and no redundancy an
+auto-pull from git would put every bad commit straight into production. See `coordinator/DEPLOY.md`
+§0b.
 
 **Cross-cutting:** this is also the strongest argument for the founder's own suggestion of a
 health-check script shipped with the installer — layers covered, every node answering,

@@ -90,6 +90,12 @@ def _walk(nodes, total, pick):
         if not candidates:
             later = [s for s in by_start if s > cursor]
             gap_end = (min(later) - 1) if later else (total - 1)
+            # Clamp: a node holding a layer_start at or beyond `total` must not stretch the gap
+            # past the end of the model. Reachable whenever a range outlives the model it was
+            # cut for -- a migration onto a SMALLER model leaves stale ranges behind until each
+            # node reloads. Unclamped, self-heal read the gap as (start .. that node's start - 1)
+            # and planned a slice tens of layers longer than the model has.
+            gap_end = min(gap_end, total - 1)
             missing.append((cursor, gap_end))
             cursor = gap_end + 1
             continue
@@ -140,13 +146,50 @@ def covering_and_missing(nodes, total, pick=None):
     return missing, covering_ids
 
 
-def suggest_placement(now=None, total=None):
+def _first_replica(replicas):
+    """Deterministic replica chooser, for placement only.
+
+    `pick` cannot change which segments exist or where the gaps are -- every replica tied at a
+    cursor shares the same `layer_end`, so the walk advances identically whoever is chosen --
+    and placement only ever reads segment boundaries. Using a fixed chooser instead of the
+    weighted-random routing one keeps the ADVICE reproducible: two nodes asking the same
+    question a second apart get the same answer, and the reason string doesn't shuffle.
+    """
+    return replicas[0]
+
+
+def placement_roster(now=None, exclude=None):
+    """Every ONLINE node -- eligible or not -- optionally minus one node id.
+
+    Routing must only ever use eligible nodes (`build_chain`); PLACEMENT must not. A
+    probationary node has already been handed a layer range and has already downloaded that
+    slice, so it is a real claim on that segment even though it cannot serve traffic yet.
+    Advising newcomers from the eligible-only view makes every unverified node invisible, and
+    the consequence is not subtle: on 2026-08-07 the live network had three machines all sitting
+    on layers 0-13 and layers 21-27 covered by nobody. Each had joined while only the trusted
+    node (14-20) was eligible, so each was told "the first gap is 0-13" -- the second and third
+    joiners could not see that the first had already taken it. Three downloads of the same slice,
+    a permanently incomplete chain, and DEGRADED on the dashboard.
+
+    `exclude` drops one node from the view, which answers a different and useful question: where
+    would this node be placed if it weren't already here? If its current range is genuinely
+    needed the walk without it shows a gap exactly there and the advice is unchanged, so a node
+    can safely re-ask without churning (see the agent's re-placement path).
+    """
+    return [n for n in models.online_nodes(now) if n["node_id"] != exclude]
+
+
+def suggest_placement(now=None, total=None, exclude=None):
     """Advise a JOINING node which layer slice to serve (Session 20 — zero-config open join).
 
-    A stranger shouldn't pick layer numbers. Policy: if the eligible chain has a coverage GAP,
-    fill the first one; otherwise the chain is complete, so replicate the segment that has the
-    FEWEST replicas today. Returns {layer_start, layer_end, role, reason}. Advisory only; the
-    node still registers normally. `total` = serving model's layer count.
+    A stranger shouldn't pick layer numbers. Policy: if the chain has a coverage GAP, fill the
+    first one; otherwise the chain is complete, so replicate the segment that has the FEWEST
+    replicas today. Returns {layer_start, layer_end, role, reason}. Advisory only; the node
+    still registers normally. `total` = serving model's layer count.
+
+    Computed over `placement_roster` -- ALL online nodes, not just the eligible ones routing
+    would use. See that function for why; the short version is that an unverified node's range
+    is still taken.
 
     This used to always replicate the LAST segment, which silently capped the whole network's
     throughput at one request at a time. A pipeline is only as parallel as its least-replicated
@@ -160,7 +203,8 @@ def suggest_placement(now=None, total=None):
     the front of the pipeline first, so a shortfall there throttles everything behind it.
     """
     total = total if total is not None else config.TOTAL_LAYERS
-    chain, missing = build_chain(now, total=total)
+    nodes = placement_roster(now, exclude)
+    chain, missing, _covering = _walk(nodes, total, _first_replica)
     if missing:
         start, end = missing[0]
         return {"layer_start": start, "layer_end": end, "role": "fill-gap",
@@ -171,7 +215,6 @@ def suggest_placement(now=None, total=None):
     # well-replicated while still being the slowest thing in the pipeline. With no
     # ms_per_layer data anywhere this reduces to the old count-based behaviour, since every
     # node then scores identically -- so an unmeasured network behaves exactly as before.
-    nodes = [n for n in models.online_nodes(now) if n.get("eligible")]
     by_seg = collections.defaultdict(list)
     for n in nodes:
         by_seg[(n["layer_start"], n["layer_end"])].append(n)

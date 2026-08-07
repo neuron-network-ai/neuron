@@ -211,11 +211,14 @@ async def health_loop():
                 # idle surplus nodes, only while no real tier migration is in flight (it's a
                 # no-op the instant update() below starts preparing one).
                 healing_before = _migration.heal_status()["healing"]
-                _migration.self_heal(models.list_nodes(), serving_model(), time.time(),
-                                     apply_gap_heal)
-                healing_after = _migration.heal_status()["healing"]
+                heal = _migration.self_heal(models.list_nodes(), serving_model(), time.time(),
+                                            apply_gap_heal)
+                healing_after = heal["healing"]
                 if healing_after and not healing_before:
-                    print(f"[gap-heal] coverage gap detected, reassigning idle node(s) "
+                    what = ("re-splitting the model across the remaining node(s) — nothing was "
+                            "idle to fill it" if heal["mode"] == "resplit"
+                            else "reassigning idle node(s)")
+                    print(f"[gap-heal] coverage gap detected, {what} "
                           f"(serving={serving_model()['model_id']})")
                 elif healing_before and not healing_after:
                     print(f"[gap-heal] coverage restored (serving={serving_model()['model_id']})")
@@ -393,13 +396,20 @@ def register(body: RegisterBody, x_register_secret: str = Header(default=None),
 
 
 @app.get("/node/placement")
-def node_placement():
+def node_placement(exclude: str = None):
     """Advise a joining node which slice to serve (zero-config open join, S20). No auth — a
     node calls this before it has a token; it is read-only and rate-limited by the middleware.
-    Includes the serving model_id so the node downloads the right model's slice."""
+    Includes the serving model_id so the node downloads the right model's slice.
+
+    `exclude` = a node id to leave out of the roster the advice is computed from. An ALREADY
+    registered node passes its own id to ask "where would I go if I weren't here?" — the answer
+    is its current range whenever that range is genuinely needed, so re-asking is safe and only
+    moves a node whose slice is redundant. No auth needed for it either: it reveals nothing
+    /node/list doesn't, and a caller passing someone else's id only gets worse advice for
+    itself."""
     sm = serving_model()
     return {"total_layers": sm["layers"], "model_id": sm["model_id"],
-            **router.suggest_placement(total=sm["layers"])}
+            **router.suggest_placement(total=sm["layers"], exclude=exclude)}
 
 
 @app.get("/node/list")
@@ -944,8 +954,13 @@ def _network_summary():
 
 @app.get("/status")
 def status():
+    # coordinator_version is what makes an unattended update verifiable. "The service came back
+    # up" is not the same claim as "the new code is running" -- a half-extracted tarball, a
+    # restart that raced the file swap, or a rollback that quietly succeeded all leave a
+    # perfectly healthy process serving the OLD build. selfupdate.py gates on this.
     network, _ = _network_summary()
-    return {"network": network, "stats": models.network_stats()}
+    return {"coordinator_version": config.COORDINATOR_VERSION,
+            "network": network, "stats": models.network_stats()}
 
 
 @app.get("/network/model")
