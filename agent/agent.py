@@ -434,9 +434,45 @@ class Agent:
                          headers={"X-Node-Token": self.cfg["node_token"]}, timeout=10)
         r.raise_for_status()
         try:
-            self.adopt_coordinator_url(r.json())
+            data = r.json()
         except ValueError:
-            pass                    # a ping that isn't JSON is still a successful heartbeat
+            return                  # a ping that isn't JSON is still a successful heartbeat
+        self.adopt_coordinator_url(data)
+        if data.get("want_logs"):
+            self.upload_log()
+
+    def upload_log(self):
+        """Send a redacted tail of agent.log to the coordinator, because it asked.
+
+        This log is the only account of what happened on this machine, and until now it existed
+        solely on this machine -- so diagnosing a stranger's node meant asking a human to open a
+        file and paste it ([P24]: three days of `heartbeat ok` while the node was doing nothing).
+        The coordinator cannot come and get it: this node is behind NAT, which is what the relay
+        exists to work around. So the coordinator raises a flag, the heartbeat carries it, and
+        the node pushes once and stops.
+
+        Redacted HERE as well as on arrival. The coordinator scrubs what it receives, but this
+        file belongs to the person running this machine, and "the server will clean it up" is not
+        a promise this end can verify. Whatever leaves does so already clean.
+
+        Never raises: an operator wanting to read a log must not be able to take a serving node
+        down, and a failed upload is worth strictly less than the node staying up.
+        """
+        try:
+            with open(LOG_PATH, "r", encoding="utf-8", errors="replace") as f:
+                body = f.read()
+        except OSError as e:
+            body = f"(this node could not read its own log at {LOG_PATH}: {e})"
+        try:
+            import logtail                              # repo root; bundled in the frozen app
+            body = logtail.clean_tail(body)
+            requests.post(f"{self.base}/node/{self.cfg['node_id']}/logs",
+                          headers={"X-Node-Token": self.cfg["node_token"]},
+                          json={"body": body}, timeout=30)
+            log.info("uploaded a %d-byte log tail at the coordinator's request",
+                     len(body.encode("utf-8")))
+        except requests.RequestException as e:
+            log.debug("log upload failed (%s) — will retry on the next heartbeat", e)
 
     @staticmethod
     def _normalize_url(url):

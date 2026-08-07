@@ -19,13 +19,21 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from coordinator import (auth, balancer, config, genesis, ledger, migration,
-                         model_registry, model_tiers, models, payout, router)
+                         model_registry, model_tiers, models, nodelogs, payout, router)
 import relay_auth
 
 
 # --------------------------------------------------------------------------- #
 # Request bodies
 # --------------------------------------------------------------------------- #
+class NodeLogBody(BaseModel):
+    body: str = ""              # a redacted tail of the node's agent.log
+
+
+class LogRequestBody(BaseModel):
+    nodes: list[str] = []       # empty = every node currently known
+
+
 class RegisterBody(BaseModel):
     node_id: str
     tailscale_ip: str
@@ -236,6 +244,8 @@ async def health_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     models.init_db()
+    nodelogs.init()          # its own tables; kept out of models.SCHEMA so log collection can be
+                             # removed in one file without a schema migration
     if genesis.seed_genesis():
         print("[coordinator] genesis buckets seeded (fixed-supply ledger, Phase 0)")
     genesis.verify_invariant()   # fail startup loudly rather than serve on a broken supply
@@ -477,7 +487,44 @@ def ping(node_id: str, _node=Depends(require_node_token)):
     instead of never."""
     models.touch_node(node_id)
     return {"status": "alive", "node_id": node_id, "last_seen": time.time(),
-            "coordinator_url": config.PUBLIC_URL}
+            "coordinator_url": config.PUBLIC_URL,
+            # And `want_logs`: the heartbeat is the only channel that reaches a node behind
+            # NAT, so anything the coordinator needs to ASK a node to do has to ride on it.
+            # Here it asks for a tail of agent.log -- see coordinator/nodelogs.py for why
+            # that is worth having and what is stripped from it.
+            "want_logs": nodelogs.wanted(node_id)}
+
+
+@app.post("/node/{node_id}/logs")
+def node_logs_upload(node_id: str, body: NodeLogBody, _node=Depends(require_node_token)):
+    """A node uploads a tail of its own log, because a heartbeat told it to.
+
+    Authenticated with that node's OWN token, so a node can only ever submit its own log and
+    nobody else can submit one on its behalf. Storing redacts and caps again — the agent already
+    did both, but the rules protect the person running that machine and a node is not the right
+    place to be the only enforcement of them."""
+    return nodelogs.store(node_id, body.body)
+
+
+@app.post("/admin/logs/request")
+def admin_logs_request(body: LogRequestBody, _=Depends(require_register_secret)):
+    """Ask nodes for a log tail. Empty list = every node currently known."""
+    ids = body.nodes or [n["node_id"] for n in models.list_nodes()]
+    return {"requested": nodelogs.request(ids)}
+
+
+@app.get("/admin/logs")
+def admin_logs_summary(_=Depends(require_register_secret)):
+    """Who has a log on file and how old it is — no bodies. A node MISSING from a request it
+    was asked for is itself the diagnosis: it is offline, or its agent is not running."""
+    return nodelogs.summary()
+
+
+@app.get("/admin/logs/{node_id}")
+def admin_logs_get(node_id: str, _=Depends(require_register_secret)):
+    """One node's stored log. Operator-gated: this is a file from somebody else's computer, and
+    the fact that it has been scrubbed of credentials does not make it public."""
+    return nodelogs.get(node_id) or {"node_id": node_id, "body": "", "uploaded_at": 0}
 
 
 @app.get("/node/verify-assignment")

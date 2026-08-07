@@ -44,7 +44,7 @@ say "shipping code"
 # tar-over-ssh rather than rsync: this is normally run from the founder's Windows box, where
 # Git Bash ships ssh/scp/tar but NOT rsync -- so an rsync-based deploy fails at the one moment
 # it matters. tar needs nothing that isn't already there on both ends.
-FILES=(coordinator relay_auth.py common.py)
+FILES=(coordinator relay_auth.py common.py logtail.py)
 EXCLUDES=(--exclude='__pycache__' --exclude='*.pyc' --exclude='neuron.db*'
           --exclude='test_*.py' --exclude='*.sh')
 if [ -n "$DRY" ]; then

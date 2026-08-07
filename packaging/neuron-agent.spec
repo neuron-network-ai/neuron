@@ -92,7 +92,7 @@ hiddenimports += collect_submodules("transformers.models.qwen2")
 # keeps serving, which is exactly how it reached a user. Declared now so it cannot silently go
 # missing again.
 hiddenimports += ["sqlite3", "_sqlite3"]
-hiddenimports += ["common", "slice_downloader", "tunnel_client", "neuron_driver", "node_a",
+hiddenimports += ["common", "logtail", "slice_downloader", "tunnel_client", "neuron_driver", "node_a",
                   "agent", "agent.agent", "agent.resource_guard", "agent.node_server",
                   "agent.tray", "agent.uninstall", "agent.local_chat",
                   "agent.payout_key", "agent.bind_payout", "agent.gpu",
