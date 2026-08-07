@@ -274,21 +274,74 @@ def test_self_heal_noop_when_nothing_is_eligible():
     assert st1["healing"] is False and st2["healing"] is False and calls == []
 
 
-def test_self_heal_never_reassigns_a_non_chosen_replica():
+def test_self_heal_surplus_path_never_moves_a_sole_cover():
+    """The surplus path may take idle nodes and redundant replicas, and nothing else.
+
+    b and e are tied replicas of 19-27, so exactly one of them is movable. `a` is the only node
+    holding 0-9 -- taking it would close the 10-18 gap by opening a 0-9 one, which is not a heal.
+    """
     c = mig.MigrationController()
     calls, apply = _heal_apply()
-    # b and e are TIED replicas of the last segment (19-27) -- whichever build_chain doesn't
-    # pick this call must still be excluded from surplus, not stolen to patch the 10-18 gap.
     nodes = [NL("a", 0, 9, head=True), NL("c", 10, 18, status="offline"),
             NL("b", 19, 27), NL("e", 19, 27)]
     st = c.self_heal(nodes, _serving28(), 0, apply)
-    # No surplus exists, so this falls through to a full re-split -- which is allowed to move
-    # b and e, because a gap means nothing is being served anyway. What must NOT happen is the
-    # surplus path treating the un-picked replica as idle and stealing it for 10-18 alone.
-    assert st["mode"] == "resplit"
-    assert [p["node_id"] for p in st["plan"]] == ["a", "b", "e"]
-    assert [p["layers"] for p in st["plan"]] == [[0, 9], [10, 18], [19, 27]]
-    assert calls == []
+    moved = {p["node_id"] for p in st["plan"]}
+    assert st["mode"] == "surplus"
+    assert len(moved & {"b", "e"}) == 1                # one of the pair, never both
+    assert "a" not in moved                            # never the sole cover of 0-9
+    assert calls == []                                 # nothing cut over yet
+
+
+def test_self_heal_moves_a_redundant_replica_instead_of_resplitting():
+    """The live 2026-08-07 layout: three machines on 0-13, one on 14-20, 21-27 empty.
+
+    No node is idle, so this used to fall straight through to a full re-split that moved all
+    four -- including the two serving correctly -- and a four-node plan only cuts over when the
+    slowest of four is ready. Two of the three on 0-13 are pure duplicates: moving them closes
+    the gap and leaves the working stages untouched.
+    """
+    c = mig.MigrationController()
+    calls, apply = _heal_apply()
+    nodes = [NL("a", 0, 13, head=True), NL("b1", 0, 13), NL("b2", 0, 13), NL("p", 14, 20)]
+    st = c.self_heal(nodes, _serving28(), 0, apply)
+    assert st["mode"] == "surplus"
+    moved = {p["node_id"] for p in st["plan"]}
+    assert moved == {"b1", "b2"}                       # the duplicates, never a sole cover
+    assert "a" not in moved and "p" not in moved       # working stages left alone
+    covered = set()
+    for p in st["plan"]:
+        covered |= set(range(p["layers"][0], p["layers"][1] + 1))
+    assert covered == set(range(21, 28))               # and between them they close the gap
+
+
+def test_self_heal_keeps_one_copy_of_a_replicated_segment():
+    """A replicated segment may give up its spares, never its last node."""
+    c = mig.MigrationController()
+    calls, apply = _heal_apply()
+    # b1/b2 both hold 19-27; one is spare, one must stay or 19-27 goes dark closing 10-18.
+    nodes = [NL("a", 0, 9, head=True), NL("c", 10, 18, status="offline"),
+            NL("b1", 19, 27), NL("b2", 19, 27)]
+    st = c.self_heal(nodes, _serving28(), 0, apply)
+    assert st["mode"] == "surplus"
+    assert [p["node_id"] for p in st["plan"]] == ["b2"]     # exactly one of the pair
+    assert st["plan"][0]["layers"] == [10, 18]
+
+
+def test_self_heal_replica_choice_is_stable_across_ticks():
+    """Which replica is kept must not flip between ticks -- a plan that churns discards every
+    node's partial download and never converges."""
+    c = mig.MigrationController()
+    calls, apply = _heal_apply()
+    nodes = [NL("a", 0, 13, head=True), NL("b1", 0, 13), NL("b2", 0, 13), NL("p", 14, 20)]
+    def assignment(plan):
+        return [(p["node_id"], p["layers"]) for p in plan]   # `ready` legitimately changes
+
+    first = c.self_heal(nodes, _serving28(), 0, apply)["plan"]
+    c.mark_ready(first[0]["node_id"])
+    again = c.self_heal(list(reversed(nodes)), _serving28(), 1, apply)   # same set, new order
+    assert assignment(again["plan"]) == assignment(first)   # same node -> same range
+    assert again["ready_count"] == 1                        # progress preserved, not reset
+    assert calls == []                                      # and no premature cutover
 
 
 def test_self_heal_prefers_surplus_over_resplit():

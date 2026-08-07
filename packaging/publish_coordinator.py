@@ -12,7 +12,7 @@ This builds the archive, hashes it, and writes `packaging/coordinator-latest.jso
 push anything — the two publishing steps are yours, deliberately, because they are the moment
 the change becomes live everywhere:
 
-    gh release upload v<version> dist/neuron-coordinator-<version>.tgz
+    gh release upload coordinator-v<version> dist/neuron-coordinator-<version>.tgz
     git add packaging/coordinator-latest.json && git commit && git push
 
 Order matters: upload the archive FIRST. The manifest is the trigger, so a manifest pointing at
@@ -145,8 +145,12 @@ def main(argv=None):
             f"The updater verifies the running version after restart, so a mismatch here "
             f"gets a perfectly good build rolled back. Bump config.py first.")
 
+    # `coordinator-v0.1.0`, not `v0.1.0`. The plain `v<x>` tags are the installer/agent releases
+    # (v0.18.0 and back); a coordinator tag in that namespace would sort in among them and read
+    # as an app release. The prefix keeps the two release lines legible in one list.
+    tag = f"coordinator-v{version}"
     url = (f"https://github.com/{args.repo}/releases/download/"
-           f"v{version}/neuron-coordinator-{version}.tgz")
+           f"{tag}/neuron-coordinator-{version}.tgz")
 
     if args.dry_run:
         print(f"version      : {version}")
@@ -171,7 +175,7 @@ def main(argv=None):
     print(f"sha256   {digest}")
     print(f"manifest {MANIFEST}")
     print("\nNow, in this order:")
-    print(f"  gh release create v{version} {archive} --generate-notes   # or `gh release upload`")
+    print(f"  gh release create {tag} {archive} --generate-notes   # or `gh release upload`")
     print(f"  git add {MANIFEST.relative_to(ROOT)} && git commit -m 'coordinator {version}' "
           f"&& git push")
     print("\nThe VM installs it within the hour, verifies it, and rolls back by itself if it "

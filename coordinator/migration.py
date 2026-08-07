@@ -37,6 +37,8 @@ steady every tick, which is exactly the state self-heal operates in, so anything
 `phase` would be wiped before a heal could ever complete.
 """
 
+import collections
+
 from coordinator import router
 
 
@@ -51,7 +53,12 @@ def plan_migration(nodes, layers, start=0):
     with in the first place).
     """
     elig = [n for n in nodes if n.get("status") == "online" and n.get("eligible")]
-    elig.sort(key=lambda n: (0 if (n.get("head_ms") or 0) > 0 else 1, n.get("layer_start", 0)))
+    # node_id breaks the tie last. Without it two nodes on the identical segment sort equal, so
+    # the plan followed whatever order the roster happened to arrive in -- and a plan that
+    # changes between ticks resets every node's readiness and throws away partial downloads,
+    # which on a network of machines that come and go means it can never converge.
+    elig.sort(key=lambda n: (0 if (n.get("head_ms") or 0) > 0 else 1,
+                             n.get("layer_start", 0), n.get("node_id", "")))
     n = len(elig)
     if n == 0 or layers <= 0:
         return []
@@ -192,9 +199,36 @@ class MigrationController:
                 self._clear_heal()
             return self.heal_status()
 
-        elig_ids = {n["node_id"] for n in nodes
-                   if n.get("status") == "online" and n.get("eligible")}
-        surplus_ids = elig_ids - covering_ids
+        elig = [n for n in nodes if n.get("status") == "online" and n.get("eligible")]
+        elig_ids = {n["node_id"] for n in elig}
+
+        # Movable capacity, in order of how little it disturbs:
+        #   IDLE     -- covering nothing at all. Free to move, always was.
+        #   SPARE    -- a REDUNDANT REPLICA: another node serves the byte-identical segment, so
+        #               moving this one costs no coverage either. Not previously counted, and
+        #               that omission is what made the live 2026-08-07 heal fragile. Three
+        #               machines sat on 0-13 and one on 14-20 with 21-27 empty; no node was
+        #               idle, so the only option left was a full re-split that moved ALL FOUR --
+        #               including the two that were serving correctly. Every planned node must
+        #               report ready before anything cuts over, so a four-node plan waits on the
+        #               slowest of four, and when one work PC dropped mid-download the plan was
+        #               invalidated and every partial download thrown away. Observed: 13 minutes,
+        #               0/4 ready, then back to square one.
+        #
+        # Two of those three were pure duplicates. Moving them closes the gap while leaving the
+        # nodes that are already serving completely alone -- fewer downloads, fewer machines to
+        # stay up, and no disturbance to a working stage.
+        by_seg = collections.defaultdict(list)
+        for n in elig:
+            by_seg[(n["layer_start"], n["layer_end"])].append(n)
+        spare_ids = set()
+        for members in by_seg.values():
+            if len(members) > 1:
+                # keep one; sort by node_id so the same node is kept on every tick and the plan
+                # does not churn between equivalent choices
+                spare_ids.update(m["node_id"]
+                                 for m in sorted(members, key=lambda m: m["node_id"])[1:])
+        surplus_ids = (elig_ids - covering_ids) | spare_ids
         surplus = [n for n in nodes if n["node_id"] in surplus_ids]
 
         # Try each gap in order; heal the first one a proposal can actually cover so an
@@ -206,7 +240,8 @@ class MigrationController:
                 proposal, target_gap = candidate, (gap_start, gap_end)
                 break
 
-        # [R6] Nothing idle can close the gap. That is not the rare case -- it is the NORMAL
+        # [R6] Nothing movable can close the gap -- no idle node, no redundant replica. That is
+        # not the rare case -- it is the NORMAL
         # case when a node LEAVES, because a shrunken network has no surplus by definition, so
         # the one situation where healing matters most was the one this skipped. The survivors
         # are still holding the ranges they were given when the network was bigger (0-13 and

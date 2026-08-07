@@ -248,7 +248,10 @@ async def lifespan(app: FastAPI):
         task.cancel()
 
 
-app = FastAPI(title="NEURON Coordinator", version="0.1", lifespan=lifespan)
+# version from config, not a literal: the hardcoded "0.1" here and COORDINATOR_VERSION would
+# drift apart on the first bump, which is exactly the trap CHANGELOG.md describes for the
+# agent's three-place version.
+app = FastAPI(title="NEURON Coordinator", version=config.COORDINATOR_VERSION, lifespan=lifespan)
 # Login for the whole network lives here, not on each agent (coordinator/auth.py).
 app.include_router(auth.router)
 

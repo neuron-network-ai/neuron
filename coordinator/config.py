@@ -86,7 +86,15 @@ AGENT_SHA256 = os.environ.get("NEURON_AGENT_SHA256", "")
 # --------------------------------------------------------------------------- #
 # What this build IS. Reported on /status so an update can be CONFIRMED live rather than
 # assumed from "the process came back up". Bump it in the same commit as the change it ships.
-COORDINATOR_VERSION = os.environ.get("NEURON_COORDINATOR_VERSION", "0.19.0")
+#
+# Its OWN number line, deliberately not the one in CHANGELOG.md. That one is the installer/agent
+# version (AGENT_VERSION, updater.LOCAL_VERSION, neuron.iss AppVersion — all three must agree),
+# it is at 0.18.0, and it moves when a volunteer's app changes. The coordinator is a different
+# artifact on a different machine with a different release cadence: sharing the sequence would
+# mean one number naming two things, and picking the next free value would announce an app
+# release that never happened. Starts at 0.1.0, matching the version the FastAPI app has
+# always reported. Coordinator releases are tagged `coordinator-v<version>` for the same reason.
+COORDINATOR_VERSION = os.environ.get("NEURON_COORDINATOR_VERSION", "0.1.0")
 # Where the updater reads what it SHOULD be running. Deliberately not an endpoint on this
 # coordinator: a coordinator that is broken cannot serve its own manifest, and a bad deploy that
 # could rewrite the manifest would remove the only signal saying it went wrong. A static file in
