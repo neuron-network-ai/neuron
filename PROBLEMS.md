@@ -1168,29 +1168,50 @@ and the earlier entry asserted it without the log.
   Consumer-CPU inference costs *more* energy per token than a datacenter GPU; the defensible
   claims are no-new-hardware, sovereignty, and privacy-by-architecture.
 
-### [P12] 🟡 Ledger MINTS per request + payout path is unauthenticated (economics integrity)
-> **PAYOUT-AUTH HALF RESOLVED (2026-07-25, Session 19).** `/infer` now issues a per-request
-> `complete_token` and records the chain it chose; `/complete` requires that token (wrong/missing →
-> 401) and **settles from the coordinator-recorded plan, never caller-supplied `node_ids`** — so a
-> completion can no longer mint NRN to an arbitrary node or to the unchosen replica, and third parties
-> can't forge/replay completions. `tokens_generated` is clamped to `max_tokens`. Test:
-> `coordinator/test_complete_auth.py` 13/13. **STILL OPEN:** the ledger still MINTS per request (no
-> user debit, no fixed-supply enforcement) — that is the economics rewrite in TOKENOMICS.md §11
-> (genesis buckets + wallets + debit + settle), deliberately deferred until after the first stranger.
+### [P12] 🟢 The ledger minted NRN and the payout path was unauthenticated — both fixed
 
-- `coordinator/ledger.py` creates 1.0 NRN out of nothing per completed request (node credit
-  at :35, and the 0.10 fee at :38-39 mints **unconditionally**, even for a 0-node chain) —
-  directly contradicts TOKENOMICS.md's fixed 1B supply ("all issuance from the emission
-  schedule, not open-ended minting"). No debit function exists anywhere ([P5] is the
-  user-side half of this).
-- `POST /infer/{id}/complete` (`coordinator/main.py:222-231`) has **no auth** and trusts
-  caller-supplied `node_ids` + `tokens_generated` — anyone who can reach the public cloud
-  coordinator can mint NRN to arbitrary registered nodes.
-- Price constant is duplicated (`coordinator/config.py:19` vs `api/openai_compat.py:45`) —
-  already drifted once; needs a single `GET /pricing` source.
-- **Fix designed (2026-07-25): TOKENOMICS.md §11** — genesis buckets + transfer-only
-  settlement + sum==1e9 invariant + authenticated /complete settling from the
-  coordinator-recorded pipeline plan. ~2-4 sessions.
+**Re-verified 2026-08-08 against the running code.** This entry described a system that no
+longer exists; it was left saying the ledger mints and `/complete` has no auth long after both
+were fixed. A stale security entry is its own hazard — it either causes work that is already
+done, or gets ignored on the day it matters.
+
+**Nothing is created from nothing any more.** `coordinator/ledger.py` settles by TRANSFER out
+of escrow — `models.transfer(ESCROW_LEDGER_ID, node_id, share)` for each node and
+`models.transfer(ESCROW_LEDGER_ID, COORDINATOR_LEDGER_ID, fee)` — so every payout moves NRN
+that already existed. `models.credit()` still exists but has **no production caller**: the only
+references left are test fixtures. `coordinator/test_escrow_conservation.py` is 40/40 including
+`the supply invariant holds`, and the live ledger reads exactly 1,000,000,000.0.
+
+**A user is now debited, not just the nodes credited** ([P5]'s half). `/infer` places a HOLD
+before dispatch; `settle()` charges `min(actual, hold_amount)` — never more than was held — and
+refunds the remainder to the payer. The entry's "no debit function exists anywhere" is obsolete.
+
+**`/complete` is authenticated and settles from the coordinator's own plan.** Four properties,
+all at `coordinator/main.py:700-715`:
+  * `/infer` issues a per-request `complete_token`; `/complete` requires it (`compare_digest`,
+    401 on mismatch), so a third party cannot forge a completion;
+  * settlement uses `req["plan_node_ids"]` — **the chain the coordinator recorded** — never the
+    caller-supplied `node_ids`, so a completion cannot pay an arbitrary node or an unchosen
+    replica;
+  * a second completion is refused 409, so it cannot be replayed;
+  * `tokens_generated` is clamped to `max_tokens`.
+  `coordinator/test_complete_auth.py` covers these.
+
+**The duplicated price constant is gone.** `PRICE_PER_1K_WEIGHTED` lives once in
+`coordinator/config.py` and `api/openai_compat.py` reads it from there. `NRN_PER_REQUEST`
+survives as a dead constant whose only remaining mention is a comment naming the bug.
+
+**What this means for a public repo, since it is the obvious question:** reading the source
+grants no ability to move NRN. There is no HTTP route to `models.transfer` at all — its callers
+are settlement, the fee, the refund and tests. Balances are moved by an operator over SSH.
+Security here rests on credentials and signatures, not on nobody reading the code, which is the
+only posture worth having.
+
+**Residual, and it is operational rather than protocol:** the register secret is the one
+credential that grants trusted standing AND overrides the payout-rebind check
+(`payout.require_rebind_authority`), so it is the single path to redirecting another node's
+earnings. Treat it as the crown jewel; rotate it if it is ever exposed. The economics rewrite
+itself (TOKENOMICS.md §11 genesis buckets) is **done**, not deferred.
 
 ### [P13] 🟡 Prefill path is UNMEASURED — blocks token pricing AND may be a UX killer
 - Per-chat-turn compute spans **3.2×** (28 vs 91 node-seconds) depending on whether prefill
