@@ -8,6 +8,168 @@ This project is early alpha. NRN has no cash value, and the network is a handful
 
 ## Unreleased
 
+- **Every node on every tier was cleared to hold twice what it can.** The tier table's
+  per-layer figure is computed at fp16, and its comment justified that with a claim about the
+  runtime that the runtime contradicts: weights are stored at **fp32** by default. So an 8 GB
+  machine on the 7B tier was cleared for 8 layers — 7.46 GB of weights against a 3.75 GB
+  budget. It stayed latent only because the network serves the 1.5B, where 28 layers is too few
+  for the cap to bind. The coordinator now scales the tier figure by the dtype a node actually
+  stores at, pessimistically by default and exactly once on every path. Nothing about what the
+  network serves today changes; what it will be cleared to serve as machines join does.
+- **Pausing a node now actually stops it taking work.** `NodeServer.paused` existed and was
+  never read: the agent never passed its own flag in, so the tray's Pause only skipped the
+  heartbeat and the coordinator kept routing live requests to the machine for up to ~90 seconds
+  while its owner believed it had stopped. A paused node now refuses **new** requests and
+  **finishes ones already in flight** — the user who asked first is not punished for someone
+  else's pause. The refusal is a named reply rather than a closed socket, because
+  `ConnectionRefusedError` is a `ConnectionError` and the driver cannot tell a slammed socket
+  apart from a dead machine; it would rebuild the chain, replay the junction cache and report
+  "a machine dropped out". A refusal by name reroutes cleanly and says what really happened.
+- **A migrating node no longer holds two model slices at once.** `reload()` loaded the new
+  slice while the old one was still referenced, peaking at ~150% of one slice on machines
+  picked because they had room for one. It now releases the old slice — and its batchers, which
+  close over it — before loading, with `empty_cache()` in the gap for a GPU node. Requests
+  arriving in that window get a named "reloading" refusal instead of an `AttributeError` from
+  inside a batcher. Stated plainly because it is a real trade: a load that fails now leaves the
+  node with no slice, where before it kept serving the old one.
+- **The pipeline follows its own device instead of assuming CPU.** Batching's auxiliary tensors
+  (KV padding, attention mask, position ids, cache positions) derive their device from the
+  activations; the batched stages return CPU tensors for the wire exactly as their unbatched
+  twins always did; the wire codec's Hadamard matrix follows its operand and every `.numpy()`
+  reaches CPU first. **Bit-identical on a CPU machine** — the batched-vs-sequential figure is
+  `4.530e-06` before and after, unchanged to the digit. Also: the node self-benchmark now calls
+  `torch.cuda.synchronize()`, without which a GPU node would have timed how fast it can queue
+  work and been handed nearly every layer in the network as a result.
+- **A tripwire on the one line that would turn all of this on.** `slice_downloader` still does
+  not move weights to a device, on purpose, and `test_device_path.py` fails if that changes —
+  naming what has to be verified on real hardware first, and failing too if VRAM is counted as
+  capacity while the loader leaves weights in system RAM. Those two facts are a pair; splitting
+  them is what produced the v0.18.0 OOM.
+- **A compute-device choice, decided at install and changeable from the tray.** The installer
+  now detects what the machine can actually use and writes `device: "cpu"` or `"gpu"` into the
+  config; the tray gains a **Compute device** dial (Automatic / CPU only / GPU) beside the
+  donation one. Because `common.DEVICE` is resolved once at import — and the agent imports
+  `node_server` → `common` at module level — the setting is applied *before* those imports, not
+  in `main()`, where it would have been read, saved, ticked in the menu and done nothing. A
+  change applies on restart, and the menu says so. **Choosing GPU on this build reports "GPU
+  selected — this build computes on CPU" rather than silently doing nothing.**
+- **Fresh installs now donate `balanced` instead of `idle`** — the node contributes while you
+  work, yielding above 50% CPU and on battery, rather than only when the machine is untouched.
+  Existing configs are not changed.
+- **Correction: v0.18.0's "Inference can now run on the GPU" and "VRAM is now capacity" were
+  wrong, and the second was a live hazard.** Those two entries are left below as published; this
+  is the correction. The build ships `torch 2.4.1+cpu` and a `llama-cpp-python` with no GPU
+  backend (`llama_supports_gpu_offload()` → `False`, no `ggml-cuda` in the package), and the
+  loader every volunteer node uses returns its slice **without moving it to a device**. So no
+  inference has ever run on a GPU. Because the weights were in system RAM while the coordinator
+  sized nodes by VRAM — with no OS reserve on that branch — a 12 GB card in an 8 GB machine was
+  eligible for **19 layers** of a 7B model. `balancer.GPU_EXECUTION` is now **off**, which
+  restores the pre-Session-42 sizing for every already-installed agent **on coordinator restart
+  alone, with no update required**. The v0.18.0 caveat blamed the absent test card; the cause
+  was packaging, and the capability had never executed once. See [P31].
+- **A reported VRAM figure is bounded, and a stale one expires.** `gpu_vram_gb` is the only
+  registration field that becomes a memory budget, and open join means it arrives with no
+  credential: it is now clamped to a believable range (and to `None` when it is not) — never
+  rejected, because a 422 over a cosmetic hardware field locks a volunteer out for a reason
+  nobody can see. A node that loses its card no longer keeps phantom VRAM forever.
+- **The local engine no longer claims an offload that cannot happen.** `n_gpu_layers` is
+  accepted and silently ignored by a llama.cpp build with no GPU backend, so the log said
+  "offloading every layer" while every layer ran on the CPU. The build capability is now checked
+  **before** the hardware, and `NEURON_GPU_LAYERS` is refused the same way — an override that
+  silently does nothing is the same bug with a manual trigger.
+- **A node prints where its weights actually are.** Every slice load logs `weights on cpu`
+  (or `cuda:0`), read off the loaded tensors rather than from the configured device. `INSTALL.md`
+  asked first-GPU volunteers to report a `device: cuda:0` line that comes from a code path the
+  agent never reaches, so it could not have appeared on any machine.
+- **The GPU-yield branch is tested.** `test_resource_guard.py` shelled out to the real
+  `nvidia-smi`, which on a machine with no card can only answer "no card" — so the `gpu_ceiling`
+  branch had zero coverage. It is stubbed now, with cases for a busy card, an unreadable one and
+  a probe that raises.
+- **A model upgrade can no longer hand a machine more layers than it can hold.** The network
+  promoted itself onto Qwen2.5-7B and split it evenly across nodes with 8 and 12 GB of total RAM
+  — ~4.5 GB of weights each, on machines someone is also using. The tier gate qualified that on
+  *aggregate* capacity ("3 nodes · 20 GB"), which says nothing about whether one machine can hold
+  one slice, and the partitioner had no memory awareness to catch it. Now: the split is fitted to
+  each node's reported RAM (or VRAM), a target no per-node partition can hold is refused outright
+  with the reason on the dashboard, and the tier ladder marks a model the network can afford but
+  cannot place as "won't fit" rather than "ready". The balancer's memory cap — written in Session
+  14 and never once applied to a real plan, because it read a field no node reports — is live.
+  See [P26] in `PROBLEMS.md`.
+- **The dashboards look like the rest of NEURON.** `/dashboard` and the private per-node page
+  were unstyled system-grey in Google's console palette, so following "Live network dashboard →"
+  from the site crossed a visible seam into what looked like a different product. Both now render
+  through `coordinator/theme.py`, which carries the landing page's palette, type and component
+  shapes. No web fonts are fetched: the page hard-refreshes every 5 seconds, and a font CDN
+  would make that a repeated third-party request from a page about a privacy-preserving network.
+- **The dashboard shows what the coordinator already knew.** A **layer coverage strip** naming
+  exactly which layers have no node — "21/28" said the chain was broken without saying where,
+  which is the one thing needed to fix it; `uncovered_layers` is now in `/status` too, and
+  `neuron_doctor.py` names the gap. Plus per-node GPU, measured ms/layer and proof-of-compute
+  record, aggregate cores/RAM/GPUs, tokens generated, the agent version, and a plain statement
+  when nodes are stuck awaiting verification. Node addresses, GPU model names and per-node
+  balances remain off the public page.
+- **The chat UI says what it is doing.** The wait before the first token — the defining moment
+  on a ~1 tok/s volunteer network — was a blinking cursor, indistinguishable from a hung page,
+  while the event carrying the assembled chain had already arrived and was being held until the
+  answer finished. It now shows live ("chain built across 3 machines · waiting for the first
+  token · 0:07") and explains why the first token is the slow one. Sending into a chain that
+  cannot answer is refused up front with the reason instead of costing a wait and an error.
+- **Recovery from a node dying is now visible as recovery, not as a failure.** A machine
+  dropping out mid-answer is rebuilt around and the answer continues token-identically, but the
+  stream pauses while a new chain is built and the conversation so far is replayed into it. That
+  pause used to look like a hang; the page now says "a machine dropped out — rebuilding the
+  chain and picking up where it left off". A completed answer that survived one records it
+  ("↻ recovered from 1 node drop") — the driver always tracked this and the UI was dropping it,
+  so surviving two node deaths looked identical to an uneventful request.
+- **A partial answer now survives the failure that ended it.** The error handler overwrote the
+  message body, deleting text the user had already received and paid for. What arrived is kept
+  and can be retried. The message no longer blames a node going offline — that case is
+  recovered; reaching the error path means recovery itself was exhausted, and it says so. An
+  answer that hits the 128-token cap says so instead of appearing to stop mid-sentence, and
+  offers to continue.
+- **Chat UI accessibility.** `aria-live` on the message thread (a screen reader previously got
+  silence for an entire generation), labels on icon-only controls, `prefers-reduced-motion`
+  support, and `100dvh` so the composer is not hidden behind a phone's address bar. Its palette
+  also moved off indigo onto the brand green, which fixed a Send button that was 2.9:1 in dark
+  mode — below AA — and a warning strip hardcoded to a near-white that ignored the dark theme.
+- **A node token can no longer leak out of its own dashboard.** The private page is reached at
+  `?token=<node token>`, so any outbound link handed that token to the destination in the
+  `Referer` header. It now carries no third-party links and declares `referrer: no-referrer`.
+- **The agent's config can no longer be left half-written.** `_save()` truncated the file and
+  then wrote it, with no explicit close — so anything that stopped the process mid-write left a
+  truncated `config.json`, and the next start died parsing it before logging existed. It now
+  writes a temp file, fsyncs, and renames atomically, keeping the previous copy; an unreadable
+  config is recovered from that copy rather than replaced with defaults, because `node_id` and
+  `node_token` are the node's claim on everything it has earned.
+- **Moderation no longer treats "we have no patterns for this language" as "clean".** The
+  blocklist was English-only against a multilingual model, and two bugs made fixing that
+  impossible: `\b` word boundaries never match inside scripts without spaces between words, and
+  the blocklist was read with the locale codepage so any non-ASCII term crashed the gate. Both
+  fixed, Chinese terms added for the existing categories, and unscreened requests are now
+  recorded so the coverage gap is measurable. See SAFETY.md for the honest limits.
+- **A startup failure can no longer be silent.** v0.18.0 was installed on a real machine and
+  produced no log file at all, which made the failure undiagnosable — a run that leaves no
+  trace is indistinguishable from one that never happened. Logging is now configured as the
+  first statement of `main()`, ahead of the config read that used to precede it, and the
+  module-level imports (torch among them), the config read and the frozen tray entry point
+  each record their own death to `agent.log` with the standard library alone. In windowed tray
+  mode, where there is no console, a crash also puts the log's location on screen. The log's
+  first line now names the version that wrote it.
+- **A config written by an older build no longer takes the agent down.** An in-place upgrade
+  reads the previous version's `config.json`; a key this build expects and that one never
+  wrote was a `KeyError` in the constructor, before anything was logged. Missing keys fall back
+  to the built-in defaults and are named in the log, not silently injected into the user's file.
+- **A node says when it is online and useless.** Every heartbeat now carries the node's
+  standing, so an agent that is still probationary — excluded from routing, earning nothing —
+  says so every 30 minutes instead of logging `heartbeat ok — active` indefinitely, and
+  announces its promotion when it comes. PROBLEMS.md [P24]: a stranger's node ran that way for
+  three days because the operator's verifier had died.
+- **The verifier survives the weather, and proves it is alive.** `verify_service.py` retries a
+  failed roster read within the cycle (a home connection produces 502s and DNS failures
+  routinely), escalates a sustained outage from WARNING to ERROR, and writes a periodic alive
+  line so that silence in its log means *dead* rather than *idle*. `neuron_doctor.py` fails
+  when that log stops growing, and `agent/verifier_keepalive.py` (installed via
+  `install.py --verifier-keepalive`) restarts it every five minutes if it is not running.
 - **NVIDIA GPU capability is detected and reported.** A node reports `has_gpu`, `gpu_vram_gb`
   and `gpu_name` at registration; the coordinator stores them, and the balancer prefers a GPU
   node when two candidates tie on measured speed. `gpu_name` is operator-only in `/node/list`,

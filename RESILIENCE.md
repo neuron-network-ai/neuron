@@ -145,6 +145,12 @@ until every planned node holds its new slice, and `/network/gap-heal` now report
 shrank". The same sweep discovered the placement half of the story — see [P25] in `PROBLEMS.md`,
 where three machines were handed the identical layer range and 21–27 went unclaimed.
 
+**Memory-aware since [P26].** Both heal paths now fit the split to what each machine can actually
+hold. A re-split is deliberately *not* refused when the survivors are over capacity — a gap means
+no request can complete, so the best available split beats no plan — but it reports
+`capacity_shortfall` on `/network/gap-heal` and in the log, because the real repair for "the
+machines left cannot hold this model" is a tier demotion onto a smaller one, not a heal.
+
 **The delivery half.** This fix spent its first days written, tested and not running, because
 reaching production needed the founder at their machine — a network that heals itself but cannot
 receive the code that heals it is only half autonomous. `coordinator/selfupdate.py` closes that:

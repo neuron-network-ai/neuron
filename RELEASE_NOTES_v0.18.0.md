@@ -1,5 +1,33 @@
 # NEURON v0.18.0
 
+> ## ⚠️ Correction — 2026-08-08
+>
+> **The "GPU support" section below is wrong, and it was wrong when it was published.** It is
+> left in place unedited because these notes were released; this block is the correction.
+>
+> **Nothing in 0.18.0 runs inference on a GPU.** The build ships `torch 2.4.1+cpu` and a
+> `llama-cpp-python` with no GPU backend compiled in (`llama_supports_gpu_offload()` is
+> `False`, and there is no `ggml-cuda` library in the package). On top of that, the loader a
+> volunteer node actually uses returns its slice without moving it to any device. A machine
+> with an NVIDIA card computes on its CPU, exactly like a machine without one.
+>
+> **One claim was worse than merely untrue.** "The coordinator also assigns GPU machines a
+> larger share of the model, sized against the VRAM you actually have" — it did, and because
+> the weights were in system RAM the whole time, that sizing could **overload a volunteer's
+> machine**. A 12 GB card in an 8 GB machine was eligible for 19 layers of a 7B model. This is
+> fixed on the coordinator, which means **it is already fixed for every installed 0.18.0 agent
+> — you do not need to update or reinstall anything.**
+>
+> **`agent.log` will never say `device: cuda:0`.** That line comes from a code path the agent
+> never reaches, so the request below could not have been answered by anyone. A node now prints
+> where its weights genuinely are on every load, as `weights on cpu`.
+>
+> Two things in that section **are** true: your node still steps aside while your GPU is busy,
+> and CPU machines are unaffected.
+>
+> The root cause was a capability that was built, never once executed, and then documented as
+> though it had been. Full detail in `PROBLEMS.md` [P31] and `sessions.md` Session 55.
+
 **Early alpha.** A small network (a handful of machines). It works, and it is honest about
 what it is. Download **NEURON-Setup-0.18.0.exe** below.
 

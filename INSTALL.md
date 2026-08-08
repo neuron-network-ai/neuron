@@ -13,13 +13,27 @@ too big for any one computer. You earn **NRN** for that work.
 - **The network is small right now** (a handful of machines), so earnings are small. They grow
   as more people join.
 - Your node pauses the moment you touch your keyboard, and on battery.
-- **An NVIDIA GPU with CUDA is used automatically if available — no configuration needed.**
-  NEURON detects the card, runs your layers on it, and asks the network for a larger share of
-  the model to match the VRAM you have. Your node also steps aside while the GPU is busy, so a
-  game or a render is never competing with it. No GPU is fine: everything works on the CPU
-  exactly as before. One caveat worth stating — no machine in this project has an NVIDIA card,
-  so the GPU path is written and tested but has not yet run on real hardware. If you are the
-  first, `agent.log` will say `device: cuda:0`, and we would like to hear how it went.
+- **Your GPU is not used. This build computes on the CPU, whatever card you have.** The
+  packages NEURON ships are CPU-only builds — `torch 2.4.1+cpu`, and a `llama-cpp-python` with
+  no GPU backend compiled in — so there is no code path that can reach a card, and a machine
+  with an RTX 4090 runs exactly like one without it. This is a **packaging** limitation, not a
+  missing feature and not a question of nobody having tested it: your card is detected and
+  reported, and it is ignored.
+
+  Earlier releases said the opposite. See the correction in `RELEASE_NOTES_v0.18.0.md`.
+
+  Two things that ARE true today: your node **steps aside while your GPU is busy**, so a game
+  or a render is never competing with it; and the node prints where its weights actually live
+  on every load — `weights on cpu` in the log, which is the line to check if you want to
+  confirm any of this rather than take our word for it.
+
+  There is a **Compute device** setting (tray menu, or `"device"` in your config: `auto`, `cpu`
+  or `gpu`). It is wired end to end and ready for a build that can use a card; today picking
+  `gpu` tells you plainly that this build computes on the CPU. Changes apply on restart.
+- **Your machine contributes while you work, not only when it is idle.** A fresh install
+  donates at the **balanced** level: it uses spare capacity up to 50% CPU, backs off above
+  that, and never runs on battery. Change it any time from the tray's **Donation level** menu —
+  `Idle` only contributes when you are away from the machine.
 - First start downloads about **1.4 GB** and takes a few minutes.
 - Windows may warn the installer is "unrecognized" — it isn't signed yet. The source is public.
 

@@ -63,6 +63,38 @@ It is a first line of defense appropriate for a small, pre-launch network — no
 trust & safety system. The `check_text()` function is written so a future classifier-based
 backend can slot in without changing any call site.
 
+### Language coverage — stated plainly, because it is a real hole
+
+The model NEURON serves is **Qwen2.5**, which is multilingual: a user can hold an entire
+conversation in Chinese, Russian, Hindi or Arabic and never touch English. The blocklist,
+however, only contains terms in the languages someone has actually written terms for —
+**today that is English and Chinese**. Every other language passes the gate untouched.
+
+That is a coverage gap, not a subtle one, and a phrase list can never close it: it would need
+every harmful phrasing in every language, which is not achievable by translation.
+
+What is done about it, short of a classifier:
+
+- **`check_text()` distinguishes "scanned and clean" from "we have nothing to scan this
+  with."** The result carries `script` and `screened`; `screened=False` means the text is in a
+  script the blocklist holds no terms for. Previously both cases returned an identical
+  "not blocked", so the share of traffic passing unexamined was not merely unmeasured, it was
+  unmeasurable.
+- **Unscreened requests are recorded locally** (`unscreened_script:<script>` in the driver's
+  moderation log, no snippet — it is not a violation), so the size of the gap is evidence
+  rather than assumption.
+- **Two mechanism bugs that made non-English coverage impossible are fixed** (2026-08-05).
+  `\b` word boundaries never match inside scripts that do not put spaces between words — a
+  Chinese term matched only when it stood completely alone, so it would pass a unit test and
+  fire on nothing real — and the blocklist was read with the locale codepage, so a single
+  non-ASCII term raised `UnicodeDecodeError` and took the whole gate down. Adding translated
+  terms before fixing those would have produced a filter that looked multilingual and was not.
+
+**What this means for a user in a language we do not cover:** the identity controls still
+apply in full (a real Google/GitHub account is required to get a node chain, and it can be
+banned), which is the enforceable layer regardless of language. The content layer is not
+equivalent, and this document is not going to imply otherwise.
+
 ---
 
 ## Repeat violations escalate against your wallet identity

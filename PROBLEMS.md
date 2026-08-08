@@ -35,6 +35,256 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
 
 ## Problems & risks
 
+### [P31] 🟡 GPU support was shipped, documented, and had never once executed — partly fixed (2026-08-08)
+
+**The capability announced in v0.18.0 does not exist in the binary that announced it.** Verified
+2026-08-08 against the installed package, not inferred:
+
+| claim | reality |
+|---|---|
+| `common.py` moves a shard onto CUDA | true, and **unreached**: `slice_downloader.py:299` returns `cast_linears(model)` with no device move, and `agent/node_server.py` uses that loader. `common.move_model_to_device` has **one caller repo-wide** (`common.py:256`), on the bench/verifier path. |
+| torch can use the card | `dist/neuron-agent/_internal/torch/version.py:4` is `2.4.1+cpu`, `cuda = None`. |
+| `local_gguf` offloads every layer | `llama_supports_gpu_offload()` → **False**; the package ships ggml-base/ggml-cpu/ggml/llama/mtmd and **no `ggml-cuda`**. `n_gpu_layers=-1` was accepted and silently ignored while the log said "offloading every layer". |
+| `agent.log` says `device: cuda:0` | comes from `common.device_name()`, whose only caller is `common.py:257` — **a line no agent can print**. `INSTALL.md` asked first-GPU volunteers to send it. |
+
+**The one that was a live hazard, not just a false claim.** `balancer.GPU_EXECUTION = True` sized
+a GPU node by VRAM, with **no OS reserve** on that branch while the RAM branch reserved 3 GB. The
+weights were in system RAM the whole time. A volunteer with a **12 GB card and 8 GB of RAM** was
+eligible for **19 layers** of Qwen2.5-7B — 8.9 GB at the tier's fp16 basis, ~17.7 GB at the fp32
+the runtime actually defaults to. That is the OOM `max_layers_for` exists to prevent, produced by
+the function that prevents it. `coordinator/test_gpu_capability.py:108-142` **asserted the harm**
+(24 GB ⇒ 18 layers), so the suite was green throughout.
+
+**Fixed (2026-08-08):**
+
+1. **`GPU_EXECUTION = False`.** Ships by **coordinator restart alone** — every already-installed
+   0.18 agent stops being over-assigned with no installer and no agent release.
+2. **`sane_vram_gb()` + `VRAM_OS_RESERVE_GB = 1.5`**, so re-enabling later is safe rather than a
+   second guess. `main.py` clamps the field at the registration edge — **to `None`, never a
+   rejection**, since a 422 over a cosmetic field is [P24]'s failure class.
+3. **VRAM/name follow `has_gpu`** in `models.py` instead of being COALESCEd, so a node that loses
+   its card stops carrying phantom VRAM forever.
+4. **The offload gate**, checked before the hardware probe and applied to `NEURON_GPU_LAYERS`
+   too — an override that silently does nothing is the same bug with a manual trigger.
+5. **`weights on <device>`** on every slice load, read off the loaded tensors, never from
+   `common.DEVICE`. The gap between configured intent and where the bytes actually are is what
+   let this survive a whole release, so the log now reports the bytes.
+6. **Corrections** in `RELEASE_NOTES_v0.18.0.md` (dated block, published text left intact),
+   `CHANGELOG.md`, `INSTALL.md`, and the five source comments that still said "CPU-only pipeline"
+   while `GPU_EXECUTION` was `True`.
+
+**Also fixed (2026-08-08, second pass):**
+
+7. **The device path now follows the activations**, so fixing the loader would no longer mean
+   crash-on-first-token. `batching.py`'s auxiliary tensors (KV padding, mask, position_ids,
+   cache_position) derive their device from `hidden`/`k`; the batched stages return CPU like
+   their unbatched twins in `common.py` already did — that divergence was the bug, since a real
+   chain serves through the batcher and never touches the unbatched path; `wire_codec.py`'s
+   Hadamard matrix follows its operand and every `.numpy()` reaches CPU first; and every
+   `send_msg` caller passes `common._to_cpu`, which fixes `common.py:474-482`'s legacy
+   `torch.save` **from the callers** without editing `common.py` (build rule 7).
+   **Provably inert on CPU:** `test_batching.py`'s batched-vs-sequential figure is `4.530e-06`
+   before the change and `4.530e-06` after, to the digit.
+8. **`torch.cuda.synchronize()` in the self-benchmark.** CUDA kernels are queued, not run, so
+   the old timing measured how fast a machine can *enqueue* work. A GPU node would have reported
+   an absurd `ms_per_layer`, and `balancer.solve` would have handed the fastest-looking machine
+   in the network nearly every layer — the same OOM by a second route, through the speed field
+   instead of the memory one.
+9. **A tripwire instead of a fix for the loader.** `slice_downloader.py:299` is deliberately
+   left alone and now carries a comment saying why; root `test_device_path.py` fails if it
+   starts moving weights, and says what must be verified on real hardware first. It also fails
+   if `GPU_EXECUTION` is switched on while the loader still leaves weights in system RAM —
+   those two facts are a pair, and splitting them is what caused this entry.
+
+10. **The fp32 sizing gap — every node on every tier was cleared for twice its real footprint.**
+    Not a GPU problem at all, and the largest of the lot. `model_tiers.gb_per_layer` is computed
+    at fp16 (2 bytes/param) and its comment justified that with "common.WEIGHT_DTYPE=fp16".
+    **That is false**: `common.py:62` reads `NEURON_WEIGHT_DTYPE` and defaults to **fp32**,
+    nothing in the agent or installer sets it, and `cast_linears` is a no-op at fp32. So an
+    8 GB machine on the 7B tier was cleared for 8 layers = **7.46 GB of weights against a
+    3.75 GB budget**. Latent only because the network serves the 1.5B, where 28 layers is too
+    few for the cap to bind. Fixed by `balancer.effective_gb_per_layer`, which scales the
+    tier's figure by `weight_bytes_for(node)` — pessimistic (fp32) by default, and honest for a
+    node once it reports `weight_dtype`. Deliberately NOT fixed by doubling the table: a
+    layer's size is a property of the MODEL, the dtype is a property of the NODE.
+    `coordinator/test_weight_dtype_sizing.py` 28/28.
+    - **What it revealed about the fleet:** the live trio (8/8/12 GB) holds **15 of the 28
+      layers** a 7B needs at fp32 and therefore cannot serve it. Two test fixtures asserted
+      that it could. They were resized to machines that genuinely fit rather than pinned to
+      fp16, because pinning would have preserved exactly the kind of false premise that caused
+      this entry. `test_migration` 49/49 and `test_model_tiers` 23/23 with no dtype pin.
+    - **No live impact from deploying it:** the network is on the 1.5B floor with one online
+      node, and the 7B already reads `feasible: false, placeable: false`. The fix changes what
+      the ladder will clear as machines join, not what is served today.
+
+**Still open:**
+- **Phase 4b — the loader itself.** One line, guarded by the tripwire above. It needs real GPU
+  hardware to verify, because "passes on CPU" is not "works on a GPU" and that distinction is
+  the whole subject of this entry.
+- **`selftest_shard.py`** compares a CPU `load_model()` against a CUDA `load_model_shard()` and
+  requires `diff == 0`, so **on a GPU box build rule 6 is unsatisfiable** as written.
+- **CUDA packaging.** With one installer, bundling a CUDA torch means every volunteer downloads
+  ~2.5 GB against today's 206.6 MB, and `updater.py` has a 600 s timeout, no resume, no
+  disk-space check and no rollback. `/agent/version` cannot express a per-capability build, and
+  NVIDIA redistributables are not covered by `tools/gen_notices.py` — a real licensing gap.
+- **The real lever is still unbuilt.** Decode is bandwidth-bound at ~30 GB/s on DDR against
+  360–1000 GB/s on a consumer card; 200B needs ~30–80 CPU machines or ~10 GPU ones. See [P30].
+
+**The process finding worth keeping.** Every individual caveat in Session 42 was honest — "the
+CUDA path has never run", "no speedup is claimed" — and the conclusion drawn from them was still
+wrong, because they all blamed the **absent test card** (a hardware gap, which reads as
+"untested") when the cause was **packaging** (which reads as "impossible"). "Written but
+unverified" and "cannot execute in this binary" are different claims, and only the second one
+tells you not to size a volunteer's memory by it.
+
+### [P30] 🔴 The fast engine cannot reach the models NEURON exists to serve
+
+`agent/node_server.py` runs **PyTorch fp32** (`load_slice_model`). `llama_cpp` appears only on
+driver/local paths — `local_gguf.py`, `local_chat.py`, `openai_compat.py`, `node_a.py`,
+`neuron_driver.py`, `ui/app.py`. The local engine only triggers when a machine can hold the
+**whole** model, and a 200B model never fits on anyone's machine by definition. **So the ~17×
+engine is structurally unreachable for exactly the models the network exists for.**
+
+Decode is memory-bandwidth bound; this project's own three benchmarks (1.5B, 7B, 70B — 47×
+apart) all imply ~30 GB/s, which is the DDR bus. Projected 200B across 80 machines: **~32
+s/token** on fp32, **~2-5 s/token** with llama.cpp-class kernels. `PIPELINE.md`'s stated
+ceiling of "80 hops ≈ 2.4 s/token" counts network traversals **only** — compute is ~15× that
+and dominates, so its steps 3 and 4 optimise the smaller term. The kernel decides 200B, not
+the split.
+
+**Blocked on a missing capability, verified 2026-08-07 against the installed package:**
+`llama-cpp-python` **0.3.34** does **not** expose `rpc_servers` on `Llama.__init__`, and offers
+no layer-range entry point — `Llama` is a whole-model abstraction. The routes are therefore:
+
+1. a llama-cpp-python build that exposes the RPC backend, or the standalone `rpc-server` binary
+   driven out-of-process;
+2. C++ against `ggml` directly, embedding llama.cpp and speaking NEURON's existing wire
+   protocol — which would also remove Python and PyTorch from volunteer machines entirely;
+3. stay on PyTorch for the network and accept ~32 s/token at 200B.
+
+Route 2 is the one worth doing: it owns the layer that is NEURON's (the wire protocol,
+placement, economics) and borrows the layer that is not (the kernel). **Do not write another
+matmul** — this repo has measured a hand-written AVX2 int8 kernel at **1.44×** against
+llama.cpp's ~17×, on the same CPU, in the same language.
+
+**GPU is the larger multiplier and is half-done.** `has_gpu`/`gpu_vram_gb`/`gpu_name` are in
+the coordinator schema, `agent/gpu.py` detects, and as of 2026-08-07 `local_gguf` offloads to
+VRAM. But the *network* path still cannot use a GPU, for the same reason above. With GPUs the
+arithmetic changes completely — 200B on ten RTX 3060s is ~3 tok/s on **8× fewer machines** than
+the CPU fleet — and network latency then becomes the bottleneck, which **flips `PIPELINE.md`'s
+build order**: the direct-reply and single-codec fixes stop being premature the moment the
+first GPU joins.
+
+### [P29] 🔴 A user who runs out of NRN has no way to get more
+
+`/infer` holds ~0.158 NRN before it dispatches, so a wallet below that is refused before a
+chain is built. The faucet is **one-time per wallet** (409 on re-claim) and gated on
+`is_oauth_wallet`. Node earnings land in a *separate* ledger row with no route into a user
+wallet. So the sequence for any real user is: sign in, get 25 NRN, spend it over ~158
+messages, and then the product stops permanently with no action available.
+
+Hit on 2026-08-07 by the founder's own two wallets — both at `balance 0.0` with `total_earned`
+25.0 and 25.962. Unblocked by hand: `models.transfer('__ecosystem__', <wallet>, 25.0)`, which
+moves rather than mints (supply invariant still exactly 1,000,000,000.0). That is an operator
+action over SSH, not a product.
+
+The UI now at least *says* so before the message is sent, and invites the user to contribute a
+machine — but earning by donating hardware credits the **node**, not the wallet, so the
+invitation does not yet actually solve the problem it points at. **Either node earnings need a
+path into the owner's wallet, or the faucet needs a recurring allowance.** Decide before
+strangers arrive, not after.
+
+### [P28] 🟡 A node that is merely slow is reported to the user as a node that died
+
+`common.HOT_TIMEOUT_S = 30` applies per socket read during generation. On 2026-08-07 the first
+real distributed answer tripped it — driver log `TimeoutError: timed out` — and the driver
+classified the timeout as a dead node, tore down the chain and re-prefilled. The reply carried
+`↻ recovered from 1 node drop`. **Nothing dropped.**
+
+Three costs. The user is told a machine failed when none did, which is the same class of
+misdirection as the no-tokens bug fixed the same day. The reroute re-prefills the whole chain,
+so the request gets *slower*, which makes the next timeout more likely — a node that is merely
+slow can be driven into a loop of self-inflicted "deaths". And a genuinely slow-but-working
+volunteer looks unreliable in the logs.
+
+A read timeout and a closed socket are different events and should be reported differently;
+the timeout also wants to scale with the stage's measured `ms_per_layer` rather than being one
+constant for every node on every network.
+
+### [P27] 🟡 An offline node's stale range outbids a correctly pinned one when it returns
+
+`router._walk` advances by `max(layer_end)` among the nodes starting at each cursor. Two office
+PCs are offline holding a stale **0-13** from before the 2026-08-07 placement fix.
+`POST /network/layers` only rewrites nodes that are **online**, so those ranges were not
+corrected when the split was pinned to 0-9 / 10-27.
+
+When either powers on: at cursor 0 the candidates are the driver (0-9) and a stale node (0-13),
+`max` picks 13, the **driver is dropped from the chain entirely**, the cursor jumps to 14, and
+nothing starts at 14 — `missing (14, 27)`, 503, chat dead. Same mechanism as the morning's
+`missing layers 21-27`, different numbers.
+
+Preferring the widest claim is right for genuine replicas and wrong for stale ranges, and
+nothing currently distinguishes them. Workaround: **run `neuron fix` whenever a machine joins
+or leaves.** Unverified: whether self-heal makes the window worse — the driver, having lost the
+tie, is no longer in `covering_ids` and may read as idle surplus to the reassignment sweep.
+
+### [P26] 🟢 The network promoted itself onto a model no single node could hold — fixed (2026-08-07)
+
+**Observed live.** The network auto-upgraded from Qwen2.5-1.5B to **Qwen2.5-7B-Instruct** the
+moment three nodes were eligible, and the even split handed **9–10 layers** of it — about
+4.5 GB of weights at fp16 — to machines with **8 GB and 12 GB of TOTAL RAM**, on top of Windows,
+a browser and whatever else the volunteer was doing. That is an OOM kill, not a slow stage.
+
+**Cause — two gates that each assumed the other was asking.**
+
+1. `model_tiers` qualified the promotion on **aggregate** capacity: `min_nodes` and
+   `min_ram_gb`, checked against the sum across the network. "3 nodes · 20 GB" is satisfied by
+   8+8+12, and *none of those machines can hold a third of a 7B model*. A pipeline stage lives on
+   one machine; summing RAM answers a question nobody asked.
+2. `migration.plan_migration` — used by both tier migrations and self-heal — partitioned layers
+   **evenly**, with no memory awareness at all. It never looked at a node's RAM, so it could not
+   have refused.
+
+`balancer.py` had solved exactly this in Session 14 (`max_layers_for`, `solve(gb_per_layer=…)`,
+prompted by the identical arithmetic: Llama-3.1-8B at fp32 is 0.87 GB/layer, and an equal 3-way
+split assigned 9.3 GB to a machine with 5–6 GB free). Two things kept that from helping:
+the migration path never called it, **and it was dead code in production anyway** — the cap reads
+`ram_free_gb`, which no node has ever reported (`agent.py` sends `ram_gb`, psutil *total*) and
+`_balanced_plan` never passed `gb_per_layer` either. The guard existed, passed its unit tests, and
+had never once applied to a real plan.
+
+**Fixed, four parts:**
+
+1. **`max_layers_for` falls back to total RAM** minus `RAM_OS_RESERVE_GB` (3 GB — Windows 11 idling
+   with a browser, on the machines here) when no free figure is reported, so the cap is live against
+   the data real nodes actually send. VRAM still wins for a GPU node, unchanged.
+2. **`plan_migration` fits the split to the machines.** It still starts even, then shifts layers
+   off any node over its cap onto nodes with room (`balancer.fit_to_capacity`, now shared with
+   `solve`). On the trio above: 10/9/9 becomes 8/8/12.
+3. **A migration whose target no partition can hold is refused**, not attempted —
+   `partition_shortfall > 0` leaves the network serving what it has, with the reason in
+   `/network/migration` and on the dashboard. Deliberately *not* a new phase: `self_heal` runs only
+   while `phase == "steady"`, so parking a blocked migration elsewhere would have left the network
+   unable to grow **and** unable to repair itself, for as long as the unservable tier stayed
+   qualified.
+4. **The tier gate asks the per-node question too.** `placeable(nodes, tier)` gates promotion and
+   demotion alongside the aggregate check, so the ladder stops advertising an upgrade that can
+   never happen. Tiers carry a measured `gb_per_layer`; a tier without one (env-injected via
+   `NEURON_MODEL_TIERS`) is unconstrained, because an unknown footprint is not grounds to refuse
+   to serve.
+
+Self-heal is deliberately **not** gated on capacity: a coverage gap means no request can complete
+at all, so it re-splits on the best fit available and reports `capacity_shortfall` instead. The
+honest response to "the survivors cannot hold this model" is to serve a smaller one, and that is
+the tier controller's demotion — which now happens, because placement feeds it.
+
+**Known gap, recorded not guessed:** the driver additionally holds the embedding and lm_head
+(~2.2 GB for the 7B) and no cap accounts for it, so the first node in a plan is under-charged by
+that much. Wants a measured `head_gb` column.
+
+**Files:** `coordinator/balancer.py`, `coordinator/migration.py`, `coordinator/model_tiers.py`,
+`coordinator/main.py`. **Tests:** `coordinator/test_migration.py`, `coordinator/test_model_tiers.py`.
+
 ### [P25] 🟢 Every stranger was sent to the same layers, so the chain could never close — fixed (2026-08-07)
 
 **Observed live.** The dashboard read **21/28 layers, DEGRADED — chain incomplete** with four
@@ -95,7 +345,145 @@ too long.
 `agent/agent.py`. **Tests:** `coordinator/test_placement.py`, `coordinator/test_migration.py`,
 `agent/test_replacement.py`.
 
-### [P24] 🔴 Strangers register fine, then sit PROBATIONARY forever — BLOCKS S12
+### [P24] 🟡 Strangers register fine, then sit PROBATIONARY forever — BLOCKS S12
+
+**ROOT CAUSE FOUND 2026-08-07, and it was never the installer.** The coordinator's journal has
+the registration failure in full:
+
+```
+Aug 06 06:25:55 … "POST /node/register HTTP/1.1" 500 Internal Server Error
+  File "/home/ubuntu/neuron/coordinator/main.py", line 347, in register
+      fingerprint = models.register_node(
+  TypeError: register_node() got an unexpected keyword argument 'has_gpu'
+```
+
+**A half-deployed coordinator.** `main.py` had been updated to pass `has_gpu=`; the `models.py`
+on the VM had not. Every registration 500'd for about an hour. Nothing was wrong with the
+agent, the installer, or the volunteer's machine — and the agent could only log
+`500, retrying in 60s`, forever, at WARNING. This is precisely what `coordinator/deploy.sh`'s
+header warns about; shipping `coordinator/` as one atomic tar is why it cannot recur. Verified
+fixed: every `/node/register` in the 36h to 2026-08-07 returned 200, and the driver registered
+200 OK at 21:38.
+
+**Two theories this killed:**
+
+- **`_save()` truncation is NOT the mechanism.** The work PC's `config.json` was finally pulled
+  and is complete, valid JSON with `node_id`/`node_token` intact. Session 53 said
+  truncated-or-empty would confirm it; it is neither. The atomic-save fix stays — it is correct
+  work — but it does not explain 0.18.
+- **`registered_at` is not a restart indicator.** `coordinator/models.py:357` is
+  `ON CONFLICT(node_id) DO UPDATE SET … status='online', last_seen=excluded.last_seen`, and
+  `registered_at` is **not in that list**. It records only a node's first-ever join. An hour was
+  spent restarting a machine on the strength of that field reading "8 days".
+
+**The finding that reframes the whole entry: no stranger's machine has ever reached the
+coordinator.** Since 2026-07-26 exactly **two** IP addresses have hit `/node/register`, and both
+are ours — the office and the home connection. (The addresses themselves are deliberately not
+recorded here: this repository is public, and they identify a residence. The count is the
+finding; the numbers add nothing.) The 2026-08-07 install did not fail *at* registration; it
+never made a successful request at all. v0.18 cannot say which, because its logging starts
+after the config read. **Do not put 0.18 in front of another stranger** — cut 0.19 first, and
+if that machine is still reachable, take `%LOCALAPPDATA%\NEURON\` off it before a reinstall
+destroys the evidence. The absence of a log is itself the finding.
+
+**Fixed on 2026-08-05 (everything except the 0.18 crash itself, which needs the machine).**
+The four numbered fixes below are done, plus the two the entry did not name — the silent
+startup and the config-shaped crash suspect. What is still open is stated at the end.
+
+- **Logging now exists before anything can fail.** `_setup_logging()` is the first statement of
+  `main()`, ahead of the config read that used to precede it. The module-level imports, the
+  config read, `Agent.run()`, the tray, and `packaging/neuron_app_entry.py` each write their own
+  traceback to `agent.log` via a stdlib-only `crash_log()` that needs no logging config and no
+  successful import. The frozen entry duplicates the log-path rule deliberately: the import it
+  is reporting on is the one it must not depend on. Windowed tray mode also puts the log's
+  location in a message box, because there is no console for a traceback to reach. The first
+  line of the log now names the version, which the log from the machine could not.
+  `agent/test_startup_is_never_silent.py` 10/10.
+- **A 0.17 config no longer kills 0.18 in the constructor.** `Agent.__init__` read
+  `cfg["coordinator"]` directly, so any key a newer build expects and an older one never wrote
+  was a `KeyError` before a single log line existed — [P24]'s own second suspect. Missing keys
+  now fall back to `DEFAULT_CONFIG` and are *named in the log*; they are not written into the
+  user's file (injecting defaults an operator deliberately omitted has its own failure mode —
+  see `install.py`'s `write_config`).
+- **The agent says when it is online and useless (fix 3).** `GET /node/{id}/ping` now returns
+  `standing`, so a node learns it more than once — it used to learn it exactly once, in the
+  reply to its registration, which is why the fact scrolled away on day one. After 60
+  heartbeats still probationary the agent WARNs, repeatedly, that this machine is healthy but
+  serves nothing and earns nothing and that the operator's verifier may be down; the heartbeat
+  line itself says `probationary, not yet serving or earning` instead of `active`; and
+  promotion is announced. `agent/test_probation_is_visible.py` 14/14.
+- **The verifier retries, escalates, and proves it is alive (fix 4).** A roster read is retried
+  3× with backoff inside the cycle (502s and DNS failures are the normal weather on a home
+  connection — its last three lines ever were exactly those), a sustained outage escalates
+  WARNING → ERROR naming the consequence, and recovery is logged. **The important one:** a
+  healthy verifier used to log *nothing* (`nothing to verify` is debug-level), so its log looked
+  identical whether it was running or had been dead since Monday. It now writes an alive line
+  every 30 cycles, so silence means dead. `test_verifier_survives.py` 15/15.
+- **Something watches it now (fix 1 and 2).** `neuron_doctor.py` fails when `verify_service.log`
+  stops growing for 90 minutes — run against the live network on 2026-08-05 it reported the
+  verifier dead for **2,970 minutes**, confirming this entry's diagnosis from the outside. The
+  probationary check the entry called for is also in the doctor. And `agent/verifier_keepalive.py`
+  restarts the verifier if it is not running: the Windows Run key that "installed" it fires once
+  at login and never again, so it survives a reboot and not a crash. Install the 5-minute check
+  with `python agent/install.py --verifier-keepalive` (a scheduled task on Windows, a cron line
+  elsewhere); `--with-verifier` now installs it too.
+- **Supervision is now installed and proven (2026-08-05 22:55).** `NEURONVerifierKeepalive` runs
+  every 5 minutes as a scheduled task, pointed at the **venv** interpreter — not PATH's, which
+  has no torch and would start a verifier that dies on import every five minutes, the trap
+  `install.py` already documents for the Run key. Both branches have live evidence: the *start*
+  branch is what brought the verifier back at 19:00 after two days dead, and the *detect-and-
+  skip* branch was exercised at 22:55 (task exit 0, no second process spawned). Remove with
+  `schtasks /delete /f /tn NEURONVerifierKeepalive`.
+  - **Its own liveness check had to be fixed first.** The first version counted any process
+    whose command line mentioned `verify_service.py` as healthy, so a *hung* verifier would be
+    reported fine forever — "online means nothing" for the third time in this file, after [P21]
+    and [P22], committed by the file written to prevent [P24]. It now reads the alive line's age:
+    a process silent for 90 minutes is stopped and replaced. Two guards that are load-bearing —
+    **process age** (right after an outage the log is days stale and the process seconds old:
+    that is the verifier just restarted, still loading torch, and without this guard the
+    keepalive would kill what it had itself started, forever) and **all matching PIDs, not the
+    first** (a venv's `pythonw.exe` on Windows is a redirector that spawns the base interpreter
+    as a child, so one verifier is two processes — 5.8 MB shim plus the 177 MB child doing the
+    work — and killing only the first leaves the working half behind).
+  - **Known limit, stated rather than assumed:** the task is `Logon Mode: Interactive only`, so
+    it covers a crash — the failure that actually happened — but not a reboot with nobody
+    signed in. That needs `/ru SYSTEM` and admin rights.
+- **Investigated further (2026-08-05, same day). One suspect eliminated, a new mechanism found.**
+  - **The packaging suspect is DEAD.** The shipped `dist/neuron-agent/neuron-agent.exe` (0.18.0,
+    built 2026-08-03) was run here as `--headless --help`, which executes every module-level
+    import — the whole suspect surface, `agent.gpu` included — and then exits at argparse before
+    touching the network or the config. It printed usage and **exited 0**. A Python module
+    missing from a PyInstaller bundle fails identically on every machine, so the frozen import
+    chain is not what dies.
+  - **`_save()` was not atomic, and that produces this exact signature.** It was
+    `json.dump(self.cfg, open(self.config_path, "w"), indent=2)`: the open **truncates
+    immediately**, the handle was never explicitly closed, and it runs from eight places
+    including registration and migration cutover. Anything stopping the process mid-write — an
+    OS shutdown, a task kill, installing a new version over a running agent (`neuron.iss` has no
+    stop-the-app step) — leaves a truncated `config.json`. The next start's `json.load` then
+    raises *before* v0.18's logging existed: silent death, no log file, **on every start,
+    forever**, which is the reported symptom precisely (not an intermittent crash — an install
+    that simply does nothing). It also explains "0.17 worked, 0.18 does not": the config is
+    corrupted at the moment of the upgrade, and only the newer binary ever reads it again.
+  - **Fixed:** `_save()` writes a temp file in the same directory, `flush()` + `fsync()`, then
+    `os.replace()` (atomic on Windows and POSIX), keeping the previous good copy as `.prev`.
+    New `load_config()` falls back to `.prev` when the live file is unreadable, preserves the
+    broken one as `.corrupt` for evidence, and **raises rather than inventing a fresh identity**
+    when there is no backup — `node_id`/`node_token` are the node's claim on everything it has
+    earned, so silently regenerating them would orphan the owner's balance and rejoin as a
+    stranger. `agent/test_startup_is_never_silent.py` 19/19.
+  - **This is a mechanism, not a proof.** Confirming it needs that machine's `config.json`; if
+    it is truncated or empty, that is the answer. Worth checking before anything else.
+- **Still open:** the v0.18.0 crash has not been *identified*, only made diagnosable — that
+  needs the machine. Run the installed 0.18 exe from a terminal, or just run it again once a
+  build with these changes exists: it writes `agent.log` no matter where it dies. The two
+  suspects the entry names (the GPU path, the in-place config upgrade) are unchanged, though the
+  second is no longer fatal. Note that machine cannot auto-update to the fix — auto-update only
+  runs inside a working agent, and that one crashes — so it needs a manual install.
+
+**Original entry follows.**
+
+### [P24-orig] 🔴 Strangers register fine, then sit PROBATIONARY forever
 
 **This entry replaces an earlier, wrong diagnosis.** The first version blamed a failed
 registration producing a null node_id and a `/node/None/slice-info` 404. The agent log from the

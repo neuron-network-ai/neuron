@@ -3797,6 +3797,743 @@ that lowers quality must be visible in the response metadata, never silent.
 
 ---
 
+## Session 53 (2026-08-05) — a release that left no trace, and the surfaces a person actually sees
+
+Two halves, both starting from the same complaint: **the thing that failed said nothing about
+it.**
+
+### Half one — [P24], the v0.18.0 regression
+
+0.17 ran on the stranger's machine for three days. 0.18, installed over it, produced **no log
+file at all** and a 404 nobody could explain. The missing log is the worse half: a run that
+leaves no trace is indistinguishable from a run that never happened, and the owner had nothing
+to send.
+
+The cause was ordering, not the GPU code everyone suspected. `_setup_logging()` ran inside
+`main()` *after* the config was read, because the log level comes from the config — so a bad
+config, or any module-level import (torch arrives through those), died in silence. In the
+packaged tray app it is worse: `neuron_app_entry.py` hides the console *before* importing, so
+stderr had nowhere to go either.
+
+- Logging is now the **first statement of `main()`**. The heavy imports, the config read,
+  `Agent.run()`, the tray and the frozen entry each write their own traceback via a stdlib-only
+  `crash_log()` that needs no logging config and no successful import. The frozen entry
+  duplicates the log-path rule on purpose: the import it reports on is the one it must not
+  depend on. Windowed mode also puts the log's location in a message box.
+- The log's first line now names the version. The log from the machine could not say which
+  build wrote it — that had to be inferred from which lines were present.
+- **A 0.17 config no longer kills 0.18 in the constructor.** `Agent.__init__` read
+  `cfg["coordinator"]` directly, so a key a newer build expects and an older one never wrote
+  was a `KeyError` before any log line existed. Missing keys fall back to `DEFAULT_CONFIG` and
+  are *named in the log*; they are not written into the user's file, because injecting defaults
+  an operator deliberately omitted has its own failure mode (`install.py`'s `write_config`).
+
+The other half of [P24] was a stranger sitting PROBATIONARY for three days — online, healthy,
+serving nothing, earning nothing — while the agent logged `heartbeat ok — active`. A node
+learned its standing **exactly once**, in the reply to its registration.
+
+- `GET /node/{id}/ping` now returns `standing`. After 60 heartbeats still probationary the
+  agent warns, repeatedly, that this machine is fine but the network operator's verifier may be
+  down; the heartbeat line says `probationary, not yet serving or earning`; promotion is
+  announced.
+- The verifier retries a roster read 3× within the cycle (502s and DNS failures are the normal
+  weather on a home connection — its last three lines ever were exactly those), escalates a
+  sustained outage to ERROR, and **writes an alive line every 30 cycles**. It used to log
+  *nothing* when healthy, so its log looked identical whether it was running or had been dead
+  since Monday. Silence now means dead.
+- `neuron_doctor.py` fails on a stale verifier log. Run live it reported the verifier dead for
+  **2,970 minutes**, confirming the diagnosis from outside. `agent/verifier_keepalive.py`
+  restarts it every 5 minutes (`install.py --verifier-keepalive`) — the Windows Run key that
+  "installed" it fires once at login, so it survived a reboot and not a crash.
+
+**The keepalive made this session's own mistake, and had to be fixed.** Its first version
+counted any process whose command line mentioned `verify_service.py` as healthy — so a verifier
+that *hung* rather than died would be reported fine forever and never restarted. That is "online
+means nothing" for the third time in this file ([P21]: an agent logging `heartbeat ok` while its
+listener had never bound; [P22]: a relay accepting connections and carrying nothing), committed
+by the file written to stop [P24]. The alive line is the real signal: `verifier_state()` now
+returns running/hung/dead/unknown from the log's age, and stops a 90-minute-silent process
+before starting a fresh one.
+
+Two guards that are not obvious and are load-bearing:
+- **Process age, not just log age.** Right after a real outage the log is days stale and the
+  process is seconds old — that is the verifier that was *just* restarted, still loading torch.
+  Without the age guard the keepalive would kill the verifier it had itself started, every run,
+  forever.
+- **All matching processes, not the first.** Found live on this machine: a venv's `pythonw.exe`
+  on Windows is a redirector that spawns the base interpreter as a child, so one logical
+  verifier is two processes (a 5.8 MB shim and the 177 MB child doing the work). A restart that
+  killed only the first would leave the working half running.
+
+`agent/test_startup_is_never_silent.py` 10/10, `agent/test_probation_is_visible.py` 14/14,
+`test_verifier_survives.py` 27/27.
+
+**Not identified: the 0.18 crash itself.** It is now diagnosable, which is a different thing.
+That needs the machine.
+
+### Half two — the pages a person actually looks at
+
+`docs/index.html` links "Live network dashboard →" and the destination was unstyled system-grey
+in Google's console palette: a visible seam into what looked like a different product. The chat
+UI had a third palette again — indigo.
+
+- **`coordinator/theme.py`** holds the landing page's palette, type and component shapes once;
+  both dashboards render through it. **No web fonts**: the page hard-refreshes every 5s, and a
+  font CDN would be a repeated third-party request from a page about a privacy-preserving
+  network. The families are named in the stack, never fetched.
+- **The dashboard now shows what the coordinator already knew.** A layer-coverage strip naming
+  exactly which layers have no node — "21/28" said the chain was broken without saying where,
+  which is the only part anyone can act on. `uncovered_layers` went into `/status` and the
+  doctor's message in the same change, so one fact has one source. Plus per-node GPU, measured
+  ms/layer, proof-of-compute record, last seen, aggregate cores/RAM/GPUs, tokens generated, and
+  a plain statement when nodes sit awaiting verification.
+- **A node token could leak out of its own dashboard.** The private page is reached at
+  `?token=…`, so every outbound link handed that token to the destination in the `Referer`
+  header — the nav's GitHub link would have posted node tokens to GitHub. Found while fixing a
+  test of mine that was vacuous (`or ">" in priv` is always true). The page now carries no
+  third-party links and declares `referrer: no-referrer`.
+- **The chat UI** kept its structure — it is the best-built page in the project — and changed
+  only its variables, plus two bugs that fell out: the warning strip was a hardcoded `#fff7e6`,
+  a near-white slab in dark mode; and the Send button was `#fff` on `var(--brand)`, which in
+  dark mode was **2.9:1, below AA**. A new `--on-brand` gives 5.02:1 light and 8.55:1 dark, both
+  computed in the test rather than asserted.
+
+Then five UX changes, all of them about the same thing as half one — a system that does not say
+what it is doing:
+
+1. **The wait before the first token.** At ~1 tok/s across volunteer machines it is the defining
+   moment of the experience, and it was a blinking cursor, indistinguishable from a hung page.
+   The `meta` event carrying the chain **already arrived first** and was being held until the
+   answer finished. It now shows live — "chain built across 3 machines · waiting for the first
+   token · 0:07" — with an honest explanation after 8s of why the first token is the slow one.
+2. **Sending into a chain that cannot answer** is refused up front with the reason, instead of
+   costing a wait and an error. A locally-capable machine is never blocked (it serves itself), a
+   failed *status poll* never blocks (that would be a self-inflicted outage), and Stop stays
+   clickable while busy or a running request would be stranded.
+3. **A partial answer survives the failure that ended it.** `showError` overwrote the message
+   body, deleting text the user had already been given and already paid for. It now keeps what
+   arrived and offers to ask again.
+
+   **The first version of this said the wrong thing, and the founder caught it.** It reported
+   "a machine in the chain went offline mid-answer" as the reason an answer failed. That is
+   precisely the event this system does *not* fail on: `neuron_driver._reroute` takes a fresh
+   chain, replays the junction cache into it, and continues — and `test_node_death.py` SIGKILLs
+   a node mid-generation and requires the output to be **token-identical** to an uninterrupted
+   run. Naming the handled event as the cause of a failure is both untrue and corrosive: it
+   teaches users to distrust the one thing the network handles best. What actually reaches the
+   error path is recovery being *impossible* — all four chain attempts lost their chain, or the
+   answer outran the junction cache recovery replays from. The message now says that.
+
+   Two things followed from the correction, both improvements the original review missed:
+   - **A reroute is now its own event.** Recovery is invisible in the token stream by design,
+     but not in *time*: the stream stalls for a chain handout and a replay. The driver emits
+     `reroute`, `ui/app.py` forwards it, and the page shows a neutral "a machine dropped out —
+     rebuilding the chain and picking up where it left off…". A mysterious stall becomes the
+     system visibly working.
+   - **`done.reroutes` was being dropped.** The driver has always recorded it, with the comment
+     "a recovered answer is still a degraded one" — and `ui/app.py` did not forward it, so a
+     request that survived two node deaths looked identical to one that sailed through. That
+     contradicted RESILIENCE.md's own rule that a fallback must be visible in the response
+     metadata, never silent. The meta line now reads "↻ recovered from 1 node drop".
+4. **A capped answer says it was capped.** `max_tokens` was hardcoded at 128 and silent, so a
+   reply stopped mid-sentence looking like the model had finished. Named constant, stated limit,
+   and a continue button that uses the server-side conversation.
+5. **Accessibility and mobile**: `aria-live` on the thread (a screen reader got silence for the
+   whole generation), labels on icon-only buttons, `prefers-reduced-motion`, and `100dvh` —
+   `100vh` on a phone hides the composer behind the address bar.
+
+`coordinator/test_dashboard.py` 28/28 (including the privacy invariants adding columns is most
+likely to break: no node addresses, no GPU model names, no balances on the public page),
+`ui/test_chat_ui.py` 46/46.
+
+### Half three — the 0.18 crash, narrowed by investigation
+
+Asked directly whether "diagnosable" meant the cause could be found, the honest answer was no —
+not from here, since the run left no artifact and neither suspect reproduces on this machine.
+Investigating anyway produced two results.
+
+- **The packaging suspect is dead.** The shipped `dist/neuron-agent/neuron-agent.exe` (0.18.0,
+  built 2026-08-03) is on this machine. Running it as `--headless --help` executes every
+  module-level import — the entire suspect surface, `agent.gpu` included — and exits at argparse
+  before touching the network or the config. It printed usage and **exited 0**. A Python module
+  missing from a PyInstaller bundle fails identically everywhere, so the frozen import chain is
+  not what dies.
+- **`_save()` was not atomic, and that produces this exact signature.** It was
+  `json.dump(self.cfg, open(self.config_path, "w"), indent=2)`: the open truncates immediately,
+  the handle was never explicitly closed, and it runs from eight places. Anything stopping the
+  process mid-write — OS shutdown, task kill, installing over a running agent (`neuron.iss` has
+  no stop-the-app step) — leaves a truncated `config.json`, and the next start's `json.load`
+  raised *before* v0.18's logging existed. Silent death, no log, **on every start, forever** —
+  which is the reported symptom precisely, an install that does nothing rather than an
+  intermittent crash. It also explains "0.17 worked, 0.18 does not" without the two differing:
+  the config is corrupted at the moment of the upgrade and only the newer binary reads it again.
+  Fixed with a temp file + `fsync` + `os.replace`, keeping the previous copy as `.prev`, and a
+  new `load_config()` that recovers from it — and **raises rather than inventing a fresh
+  identity** when there is no backup, because `node_id`/`node_token` are the node's claim on
+  everything it has earned. A mechanism, not a proof: confirming it needs that machine's
+  `config.json`, and a fresh install would destroy the evidence.
+
+### Half four — languages, and one change reverted
+
+Asked whether the chat could be used from China. The model side already could: NEURON serves
+**Qwen2.5** at every tier, which is multilingual, so a prompt in Chinese gets an answer in
+Chinese with no setting at all. The interface was the English-only part.
+
+**Two mechanism bugs made non-English moderation impossible, and both are fixed.** Found by
+testing rather than reading: `\b` word boundaries never match inside scripts that do not put
+spaces between words, so a Chinese blocklist term matched only when it stood completely alone —
+it would pass a unit test against the bare term and fire on nothing real; and the blocklist was
+read with the locale codepage (cp1252 here), so a single non-ASCII term raised
+`UnicodeDecodeError` and took the whole content gate down. Adding translated terms first would
+have produced a filter that looked multilingual and was not.
+
+On top of that, `check_text()` now distinguishes **"scanned and clean" from "we have nothing to
+scan this with"** (`script` / `screened` on the result, `covered_scripts()` from the loaded
+blocklist), unscreened requests are recorded locally as `unscreened_script:<script>` with no
+snippet, and `SAFETY.md` states the coverage hole plainly instead of leaving it implicit.
+Chinese terms were added for the six existing categories — same policy, translated, not a wider
+one. `safety/test_moderation.py` 24/24.
+
+**The UI language switcher was built and then reverted at the founder's instruction.** An
+English/Chinese string table with a picker and `navigator.language` detection was added to
+`chat.html` and removed again the same session. The revert was surgical, not `git checkout`:
+the theme and all the UX work in that file stay, only the language layer went. Verified after:
+no `t(` calls, no `STRINGS`, no selector, English strings back inline, and 46/46 still passing.
+
+**Open question for whoever picks this up:** the instruction was "revert back all" in response
+to the UI switcher. Items 1 and 3 — the SAFETY.md coverage section and the moderation
+fixes — are still in the tree, on the judgement that the two mechanism bugs are real defects
+independent of any language policy. The Chinese blocklist terms are the part genuinely tied to
+that decision. **Confirm before committing** whether those should stay.
+
+### State at end of session — nothing committed, nothing deployed
+
+Everything is in the working tree. The live coordinator still runs the committed build, so
+`standing`-on-ping, `uncovered_layers` and both restyled dashboards take effect only at the next
+deploy. The agent-side changes (logging, atomic config, chat UI) need a build: they live on each
+user's machine, not the VM.
+
+The one thing that IS live: `NEURONVerifierKeepalive`, installed 22:55 as a 5-minute scheduled
+task pointed at the venv interpreter, and the verifier itself, restarted at 19:00 after two days
+dead. Remove with `schtasks /delete /f /tn NEURONVerifierKeepalive`.
+
+**Suggested pick-up order:**
+1. Decide the open question above, then commit — split three ways (startup logging + atomic
+   config; probationary/verifier visibility; UI theme + chat UX) so each reverts independently.
+2. Look at `%LOCALAPPDATA%\NEURON\config.json` on the work PC **before** installing anything
+   there. Truncated or empty confirms the `_save()` theory.
+3. Deploy the coordinator (no installer needed, no schema change, reversible in seconds).
+4. Only then cut 0.19: bump the version in all three places, build, upload, and set
+   `NEURON_AGENT_SHA256` — which is empty today and is the kill switch for the rollout. Test on
+   the broken PC first; auto-update cannot reach it, since it only runs inside a working agent.
+
+Rollback notes worth keeping: the coordinator diff has **no schema change**, and the two API
+additions are version-tolerant in both directions (an old agent ignores `standing`; a new agent
+treats a missing `standing` as "conclude nothing"). The installer is the one forward-only
+surface — `is_newer()` is a strict `>`, so pointing `AGENT_VERSION` back does not downgrade
+anyone.
+
+---
+
+## Session 54 (2026-08-07) — the first answer that crossed the chain, and the three failures that were not the network
+
+**Three commits landed during the day, all from one live incident:** four machines online,
+three of them serving layers 0-13, 21-27 covered by nobody, DEGRADED, nothing completing.
+
+| commit | time | what |
+|---|---|---|
+| `b28f7bb` | 10:16 | placement reasoned over `build_chain`, which filters to *eligible* nodes — so every probationary newcomer was invisible to the next one and all three were told "0-13" |
+| `7b23ddd` | 11:24 | self-heal moved working nodes; surplus now means idle **or redundant replica**. `node_id` breaks the plan-ordering tie, because a plan that changes between ticks can never converge |
+| `9a59a01` | 12:31 | `neuron_logs.py` — nodes push a redacted 64 KB tail on heartbeat, so diagnosing one stops being hostage to somebody else's attention |
+
+Everything below that point is uncommitted and in the working tree.
+
+### Half one — the network brought back up
+
+`POST /network/layers` + `coordinator/pin_layers.sh` pin an explicit split, because the
+balancer optimises for stage time and produces splits **no client can route**: the driver
+holds a fixed shard (`neuron_driver.S1`, layers 0..S1-1) and `node_a.py` rejects any chain
+whose first stage is not exactly that. `coordinator/rebalance.sh` exists for the same reason
+`neuron.bat` does — the one-liner form needs `$(...)` substitution, and pasted into cmd.exe it
+sends the literal text as the header, gets a 401, and `curl -s` swallows it. **That cost a
+real hour on 2026-08-07, three separate times.**
+
+Deployed at ~21:40 via `coordinator/deploy.sh` (DB backed up, gates verified, rollback armed).
+Pinned **0-9 / 10-27**, 28/28 covered, `network_healthy: true`.
+
+`node_a.py:112` now accepts **2 or 3** stages. A two-machine network is the ordinary evening
+state of a network built from other people's spare computers, not an exotic one — self-heal
+had been correctly re-splitting to two stages and reporting healthy while every request died
+on `expected a 3-node chain, got 2`. The recovery machinery worked; nothing could use what it
+produced. `test_short_chain.py` 12/12 pins the shapes *and* what goes on the wire for each.
+
+`agent/node_server.py` gained a load-time range guard reading the safetensors header, so the
+**bytes** decide what a node can serve. Seen live on `agent-optinovate-67e4eb`: coordinator
+said 0-27, disk held 19-27, node started, benchmarked, registered verified, reported healthy.
+`load_slice_model` fills a full skeleton with `strict=False`, so the missing two-thirds stayed
+uninitialised meta tensors and the forward pass ran on garbage — no crash, no wrong-looking
+output, just fluent nonsense. `agent/test_slice_range_guard.py` 11/11.
+
+### Half two — the proof
+
+**First answer ever to cross the chain**, forced over the network with `NEURON_FORCE_NETWORK=1`:
+
+```
+⛓ 2 nodes   ◈ Cost: 0.0120 NRN   9 tokens · 0.19 tok/s   ↻ recovered from 1 node drop
+```
+
+Real nodes, non-zero NRN settled, and a mid-request recovery that completed token-identically
+and *said so*. That is [R2] and the `done.reroutes` work firing on their first real run.
+
+**It was slow, and the reasons are known.** The "node drop" was not a death — the driver log
+says `TimeoutError: timed out`. `common.HOT_TIMEOUT_S = 30` is applied per socket read during
+generation; one read exceeded it, the driver classified that as a dead node, rebuilt the chain
+and re-prefilled. Most of the 47 seconds went there. Expected cost from the nodes' own
+measured per-layer times is ~350 ms/token (~2.9 tok/s), so there is a baseline gap *as well as*
+the timeout. **A slow node is currently reported to the user as a dead one, and the false
+reroute makes the next timeout more likely.** Not yet fixed.
+
+The split is also unbalanced **by construction**: `pin_layers.sh` nails stage 1 to the driver's
+fixed shard, so with two machines it can only ever be 10/18 — pavilion carries 18 layers at
+12.62 ms/layer against the driver's 10 at 7.88. Best measured split on the old trio was a
+balanced 9/9/10. The fixed-`S1` constraint is the same root cause as `PIPELINE.md` step 1.
+
+### Half three — [P24] has a root cause, and it was never the installer
+
+The v0.18 registration failure was found in the coordinator's journal:
+
+```
+File "/home/ubuntu/neuron/coordinator/main.py", line 347, in register
+    fingerprint = models.register_node(
+TypeError: register_node() got an unexpected keyword argument 'has_gpu'
+```
+
+**A half-deployed coordinator on 2026-08-06.** `main.py` had been updated to pass `has_gpu=`;
+the `models.py` on the VM had not. Every registration 500'd for ~an hour. Nothing was wrong
+with the installer, the agent, or the stranger's machine — and the agent could only report
+"500, retrying in 60s" forever. This is exactly what `deploy.sh`'s header predicts about
+one-scp-at-a-time deploys, and shipping `coordinator/` as one atomic tar is why it cannot
+recur.
+
+**Two things the investigation killed:**
+
+- **The `_save()` truncation theory is dead.** The work PC's `config.json` was pulled and is
+  complete, valid JSON with `node_id`/`node_token` intact — neither truncated nor empty.
+  Session 53 said truncated-or-empty would confirm it. The atomic-save fix is still right; it
+  is not the mechanism.
+- **`registered_at` is not a restart indicator.** `models.py:357` is
+  `ON CONFLICT DO UPDATE SET ... status='online', last_seen=...` — `registered_at` is **not in
+  that list**, so it records only when a node first ever joined. An hour was spent on the
+  belief that pavilion had not restarted in 8 days, on the strength of that field.
+
+**And the finding that reframes the stranger problem entirely: since 2026-07-26 exactly two IP
+addresses have ever hit `/node/register`** — the office PCs and home. **No stranger's machine
+has ever reached the coordinator once.** Today's install did not fail at registration; it never
+made a successful request at all. v0.18 cannot say why, because its logging starts after the
+config read. That is the argument for cutting 0.19 before the next stranger.
+
+### Half four — three failures that looked like the network and were not
+
+1. **A wallet with no balance.** `/infer` holds ~0.158 NRN before dispatch; the wallet was at
+   0.00, so it 402'd and no chain was ever built. The page said *"a node dropped out while
+   loading its slice."*
+2. **The UI had the real error and threw it away.** An `error` event also ends a stream with no
+   token and no `.meta`, so the generic no-tokens fallback ran straight after `showError()` and
+   overwrote it. The specific `insufficient_funds` branch was already written and simply never
+   reached. Fixed with a `shownError` guard.
+3. **`--engine auto` silently bypasses the network.** The first "successful" test answered
+   locally via GGUF with `node_c 0%`, `node_b 0%`, 0 NRN. On the machine you test the chain
+   from, "it works" means nothing without `--engine torch` or `NEURON_FORCE_NETWORK=1`.
+
+Also fixed in the UI: **no width breakpoint existed at all** — 67px of horizontal overflow at
+375px, sidebar never collapsing, Send off-screen; and a **zero balance is now stated before the
+message is sent**, framed as an invitation to contribute rather than a paywall, with no
+unmeasured environmental claim (there is a test that fails if one appears).
+`ui/test_chat_ui.py` **46 → 62**.
+
+### Half five — the engine question, and where 200B actually stands
+
+**llama.cpp is on the local path only.** `agent/node_server.py` imports `load_slice_model` —
+PyTorch fp32. `llama_cpp` appears in `local_gguf.py`, `local_chat.py`, `openai_compat.py`,
+`node_a.py`, `neuron_driver.py`, `ui/app.py`: every driver/local path, and **not the node
+serving a slice**. A 200B model never fits on one machine, so the local path can never trigger
+for it — **the fast engine is unreachable for exactly the models NEURON exists to serve.**
+
+The NeuronScript verdict, from this repo's own measurements:
+
+| stack | tok/s |
+|---|---|
+| PyTorch fp32, 3-node chain | 1.61 |
+| + int8 AVX2 on all 3 nodes | 2.32 |
+| + tiler | 2.26 (−2.6%) |
+| + predictor | crash, `STATUS_HEAP_CORRUPTION` |
+| **llama.cpp Q4_K_M, ONE machine** | **27.9** |
+
+`neuronscript_simd.c`'s own closing verdict was right: *use llama.cpp as the kernel,
+NeuronScript's value is the distribution layer*. The kernel work is not wasted — it establishes
+that a hand-rolled AVX2 int8 kernel buys **1.44×** on this hardware, so adopting llama.cpp is
+now a decision rather than a guess.
+
+**200B projection** (80 layers, from measured per-layer rates): fp32 ~32 s/token;
+llama.cpp-class kernels ~2-5 s/token. `PIPELINE.md`'s stated ceiling of "80 hops ≈ 2.4 s/token"
+counts **network traversals only** — compute is ~15× that and dominates, so steps 3 and 4 of
+its build order optimise the smaller term. **The kernel decides 200B, not the split.**
+
+Licensing was checked because it was raised: `llama_cpp_python` 0.3.34 is **MIT**, llama.cpp
+and ggml are **MIT**, and `tools/gen_notices.py:124` already inventories both — v0.18 ships
+them today. Using llama.cpp on the network path adds no new exposure. The Llama *Community
+Licence* on Meta's weights is the restrictive one, and the model gate already refuses it.
+Mojo was assessed and rejected: the compiler is proprietary, Windows support lags the `.exe`
+installer NEURON ships, and — decisively — the C kernel already proves the language was never
+the bottleneck.
+
+### Half six — GPU offload landed; distributed llama.cpp does not fit this binding
+
+**The bandwidth model was validated before anything was built.** Three of this project's own
+benchmarks, models 47× apart in size, all land on the same number:
+
+| model | Q4 size | measured | implied bandwidth |
+|---|---|---|---|
+| 1.5B | 1.12 GB | 36 ms/token | 31 GB/s |
+| 7B | ~4.5 GB | 128 ms/token | 35 GB/s |
+| 70B | ~42 GB | 1.61 s/token | 26 GB/s |
+
+Decode is memory-**bandwidth** bound. Speed = model bytes ÷ bus speed, and ~30 GB/s *is* the
+DDR bus. That is why llama.cpp is 17× faster than the hand-written kernel and why no further
+kernel work pays: llama.cpp already runs at 60-90% of what the hardware can physically deliver.
+A consumer GPU moves 360-1000 GB/s — **12-33×** — the only lever of that size left.
+
+**Built:** `engine/local_gguf._gpu_layers()` and `n_gpu_layers` on the `Llama` constructor,
+which defaulted to `0` — so **every GPU machine has been running CPU-only.** Deliberately
+all-or-nothing: whole model to VRAM, or stay on CPU. Partial offload needs a layer count, which
+needs the model loaded, and a wrong guess is an OOM on a machine whose owner is looking at a
+screen that card is drawing. `GPU_HEADROOM_GB = 1.5` is reserved for the same reason the loader
+already leaves a CPU core free. `NEURON_GPU_LAYERS` overrides. A failed GPU load retries on CPU
+rather than leaving the node with no engine at all. `engine/test_local_gguf.py` **30/30**, nine
+of them new.
+
+**BLOCKED, and this is the finding worth keeping:** serving a *layer range* through llama.cpp
+is **not reachable from `llama-cpp-python` 0.3.34**. Checked directly against the installed
+package — `rpc_servers` is **not** a parameter of `Llama.__init__`, and there is no layer-range
+entry point; `Llama` is a whole-model abstraction. So "swap `load_slice_model` for llama.cpp
+inside `node_server.py`" cannot be done with what is installed. See [P30].
+
+One process note: the first version of these tests created real 5 GB and 7 GB files with
+`truncate()`, which NTFS actually allocates — 12 GB written per run on a disk with 52 GB free,
+and the suite hung. Rewritten to stub `os.path.getsize`; runs in 2 s and writes nothing.
+
+### State at end of session
+
+Nothing committed. **Live and working:** coordinator deployed, split pinned 0-9/10-27, driver
+running from source as `agent-optinovate`, one verified end-to-end answer over the chain.
+
+Wallet note: both founder wallets had already **spent** their one-time faucet grants
+(`total_earned` 25.0 and 25.962, balance 0.0). 25 NRN was moved to each from `__ecosystem__`
+via `models.transfer` — supply invariant still reads exactly 1,000,000,000.0. There is no
+top-up path for a user who runs out: the faucet is one-time and node earnings live in a
+separate ledger with no route into a wallet. **A stranger hits that wall on their ~158th
+message.**
+
+**Landmine for the next session:** `agent-bhpc012101` and `agent-bhpc012104` are offline
+holding a stale **0-13**. `_walk` picks `max(layer_end)` at each cursor, so when either powers
+on it outbids the driver's 0-9 at cursor 0, drops the driver from the chain entirely, and
+reports `missing (14, 27)`. **Run `neuron fix` whenever a machine joins or leaves.** Whether
+self-heal makes it worse in that window is unverified — the driver, having lost the tie, is no
+longer counted as covering anything and may look like idle surplus.
+
+**Suggested pick-up order:**
+1. **`node_server.py` through llama.cpp** — serve a layer *range* via the existing binding
+   instead of `load_slice_model`. Check whether `llama_cpp` exposes it, and whether
+   `rpc-server` ships with the build. This is the 200B decision.
+2. Cut **0.19** before another stranger install — the early logging and the slice range guard
+   are the two that matter, and the second is a correctness bug, not a diagnostics gap. Bump
+   `updater.LOCAL_VERSION`, `neuron.iss` AppVersion and `AGENT_VERSION` together, and update
+   `NEURON_AGENT_VERSION` **and** `NEURON_AGENT_SHA256` on the VM in the same change — the
+   updater rejects a hash mismatch, and `is_newer` is a strict `>`, so republishing as 0.18
+   would mean no existing node ever updates.
+3. A slow node must stop being reported as a dead one (`HOT_TIMEOUT_S`, and the false reroute
+   that follows).
+4. `neuron.bat` gained `driver` and `faucet`; `coordinator/faucet.sh` is new. `.gitignore` now
+   covers `agent/config.*.json`, `agent/*.prev` and `agent/payout_key.json` — the last held a
+   wallet private key and was committable.
+
+---
+
+## Session 55 (2026-08-08) — the GPU support that was never once executed, and the OOM it shipped
+
+Session 42 turned on a flag that sized a volunteer's slice from **VRAM**. The code it trusted to
+make that safe has **never run**: no NVIDIA card exists in this project and the shipped wheel is
+`torch 2.4.1+cpu`. ~500 lines of device code, zero executions, one live hazard.
+
+### Half one — the OOM, and why the guard caused it
+
+`balancer.max_layers_for` sized a GPU node by `gpu_vram_gb`. That was justified in Session 42 by
+`common.py` gaining a device resolver. Checked against the code a volunteer's machine actually
+runs, the justification does not survive:
+
+- `agent/node_server.py` loads through `slice_downloader.load_slice_model`, and
+  `slice_downloader.py:299` returns `common.cast_linears(model)` — **no device move**.
+- `common.move_model_to_device` has **one caller repo-wide** (`common.py:256`), on the
+  bench/verifier path no agent ever reaches.
+- `dist/neuron-agent/_internal/torch/version.py:4` is `2.4.1+cpu`, `cuda = None`.
+
+So the weights sit in **system RAM** while the sizing was done against **VRAM** — and the VRAM
+branch had **no OS reserve at all** where the RAM branch reserved 3 GB. Backwards: a card with
+no headroom left stutters the desktop it is drawing.
+
+Reproduced without hardware, a 12 GB card in an 8 GB machine on Qwen2.5-7B (0.466 GB/layer):
+
+| | layers | weights, into 8 GB of RAM |
+|---|---|---|
+| shipped 0.18 (VRAM, no reserve) | **19** | 8.9 GB fp16 / **17.7 GB fp32** |
+| this change (system RAM − 3 GB) | **8** | 3.7 GB fp16 / 7.5 GB fp32 |
+
+**`GPU_EXECUTION = False`.** Ships by coordinator restart alone — every installed 0.18 agent
+stops being over-assigned with no installer and no agent release. Hardened so re-enabling is
+safe rather than a second guess: `sane_vram_gb()` (rejects NaN/inf/non-positive/non-numeric and
+anything over 192 GB), `VRAM_OS_RESERVE_GB = 1.5` mirroring `local_gguf.GPU_HEADROOM_GB`, and
+the three stale comment blocks rewritten to cite `slice_downloader.py:299` so the flag cannot be
+re-flipped on the same misreading.
+
+Two more, both about data outliving the fact it described:
+
+- **`main.py` clamps `gpu_vram_gb` at the edge.** It is the only registration field that becomes
+  a *memory budget*, and open join means it arrives with no credential. **Clamped to None, never
+  rejected** — a 422 over a cosmetic hardware field is [P24] exactly: a healthy machine whose
+  owner sees nothing wrong and which simply never joins.
+- **`models.py`: VRAM/name follow `has_gpu`** instead of being COALESCEd like `platform`. A node
+  that lost its card kept phantom VRAM **forever**, so the balancer could size a slice from
+  memory the machine no longer had. A build that reports the card but omits the figure still
+  keeps a good one.
+
+**`coordinator/test_gpu_capability.py` 24 → 38.** Its assertions at `:108-142` **asserted the
+harm** — 24 GB of VRAM ⇒ 18 layers. They are inverted, each with a comment saying why, in the
+same commit as the fix. **The test change IS the fix, not a way to green a red suite.** The
+volunteer is now pinned by name: `{has_gpu: True, gpu_vram_gb: 12.0, ram_gb: 8.0}` must size
+from RAM.
+
+**Not fully cleared, and worth stating.** At 8 layers the volunteer still holds 7.5 GB in 8 GB
+**at fp32**, because `model_tiers.py:41-50` sizes at fp16 while the runtime defaults to fp32 —
+which that file already admits. A tier-table change touching every node, deliberately not folded
+into an urgent coordinator-only commit.
+
+**Suite:** 66 modules green (not 64 — `api/`, `security/`, `packaging/` exist beyond the dirs
+`neuron.bat:90` sweeps), `selftest_shard.py` ALL PASS. `packaging/test_app_entry.py` cannot run
+via `-m` (no package init) and passes 5/5 as a script; `blockchain/test_nrn.py` needs a local
+hardhat EVM and is unrunnable here — pre-existing, unrelated.
+
+### Half two — every log line and doc claim made true
+
+The engine logged an offload that **cannot happen**. Verified against the installed package:
+`llama_supports_gpu_offload()` → **False**, and `llama_cpp/lib/` holds ggml-base, ggml-cpu,
+ggml, llama and mtmd with **no `ggml-cuda`**. `n_gpu_layers=-1` is accepted and silently
+ignored, while `local_gguf.py` logged *"offloading every layer"*.
+
+- **The build check now comes first**, ahead of the hardware probe — a card the binary cannot
+  address is not a card, so asking about VRAM is asking the wrong question. `NEURON_GPU_LAYERS`
+  is gated the same way: **an override that silently does nothing is the same bug with a manual
+  trigger, and worse**, because someone set it deliberately and would read the log as
+  confirmation. Unknown (symbol missing) still attempts, and says it is unverified.
+- **The CPU-retry `except` stays** — correct for a future CUDA wheel — but its test is
+  re-commented to say it guards a path this build does not ship, reached only because the stub
+  holds the gate open. `engine/test_local_gguf.py` **30 → 35**, including one that asserts the
+  installed build reports no offload support, so this flips loudly if a CUDA wheel ever lands.
+
+**`INSTALL.md` asked first-GPU volunteers to send back `device: cuda:0` — a line no machine can
+print.** It comes from `common.device_name()`, whose only caller is `common.py:257` on the bench
+path. Replaced with a witness the node genuinely emits: `reload()` now reads the device **off
+the loaded tensors** and folds it into the `slice ready` line — `weights on cpu`. Deliberately
+not `common.DEVICE`: that is configured *intent*, and the gap between intent and where the bytes
+actually are is precisely what let this survive a release. Meta tensors are skipped (a slice is
+a full skeleton with `strict=False`), and it never raises — a diagnostic that can stop a node
+from starting is worse than no diagnostic.
+
+**`test_resource_guard.py` shelled out to the real `nvidia-smi`**, which on a machine with no
+card can only ever answer "no card" — so the `gpu_ceiling` branch had **zero** coverage. Stubbed
+now, with a busy card, an unreadable one, a probe that raises, and each mode's ceiling checked
+through to `gpu_busy`. **18 → 27.**
+
+*Two of this session's own test bugs, both the same shape as the bug being fixed:* an assertion
+about `max` mode that was really asserting the stub, and a stub of `rg._gpu.gpu_busy` that
+mutated the shared `agent.gpu` module and was never restored, so later checks silently tested
+the stub instead of the code. Saved and restored, like `_real_seconds_since_input` already was.
+
+**Docs corrected, published text left intact.** `RELEASE_NOTES_v0.18.0.md` gets a dated
+**Correction** block (the notes are published; they are not rewritten), `CHANGELOG.md` a set of
+entries under Unreleased with the v0.18.0 claims left below as published, `INSTALL.md` a plain
+statement that **this build computes on the CPU whatever card you have**, and the five source
+comments that still said "CPU-only pipeline" while `GPU_EXECUTION` was `True`.
+
+**The wording that mattered.** Every Session 42 caveat was honest — "has never executed", "no
+speedup is claimed" — and every one blamed the **absent test card**. A hardware gap reads as
+*untested*; the real cause was **packaging**, which reads as *impossible in this binary*. Only
+the second tells you not to size a volunteer's memory by it. Recorded as [P31].
+
+**Suite after half two:** 66 green, `selftest_shard.py` ALL PASS.
+
+### Half three — the device choice, and the ordering trap that makes it real
+
+The requested feature: a post-install CPU/GPU choice, defaulting to what the machine has, with
+contribution defaulting to **balanced**.
+
+**The whole difficulty is one line of import order.** `common.DEVICE` is resolved exactly once,
+at import (`common.py:113`), and `agent/agent.py` imports `agent.node_server` → `common` at
+**module level**. So a device setting read in `main()` would be read, saved, ticked in the tray
+menu, and **do nothing at all** — the device was chosen while the module was still importing.
+`_apply_device_preference()` therefore runs at module scope, ahead of that import block, and
+reads `--config` out of `sys.argv` itself because argparse has not run yet. There is a test
+that fails if anyone moves it, and it is line-anchored: the first version matched the mention of
+the import inside its own docstring and reported the ordering backwards.
+
+Rules, in order: an explicit `NEURON_DEVICE` in the environment wins (an operator on the command
+line is not overruled by a file); `auto` sets nothing and leaves `common._resolve_device()`
+exactly as it was; `cpu` pins the CPU; **`gpu` is honoured only if torch reports a usable CUDA
+device.** That last one matters — `torch.device("cuda:0")` is accepted by torch **without
+checking anything**, so pinning it on a `+cpu` build would hand `common` a device that fails on
+first use. Instead the node logs *"GPU requested, but THIS BUILD COMPUTES ON CPU"*, and the tray
+shows *"GPU selected — this build computes on CPU"*. **Said out loud, never silently ignored** —
+that silent no-op is exactly what [P31] is about, and repeating it in the fix would be absurd.
+
+- **`install.py`** gains `detect_device()` — `torch.cuda`, not `agent.gpu.detect_gpu()`, because
+  a card being *present* says nothing about whether this binary can address it, and conflating
+  those two is the v0.18.0 mistake. It writes a concrete `"cpu"`/`"gpu"`, not `"auto"`: a value
+  written at install is one a person can read in their own config and change.
+- **`tray.py`** gains a **Compute device** submenu mirroring *Donation level*, plus a note line
+  that says when a change needs a restart. Its text is a *callable*, like `title`/`status` — a
+  plain string freezes at its first value and would still say "applies on restart" afterwards.
+- **`donation_mode` defaults to `balanced`** in `agent.py`, `install.py` and the committed
+  `agent/config.json` template. `write_config` merges, so **existing configs keep what they
+  have** — the same guarantee it already makes for `max_cpu_pct`, now tested for these two keys.
+
+`agent/test_device_choice.py` **34/34** (new), `agent/test_tray.py` **8 → 16**.
+
+**Suite: 67 modules green, `selftest_shard.py` ALL PASS.**
+
+### Half four — the device path, and two lifecycle bugs that were never about GPUs
+
+**Phase 4a: every edit a no-op on CPU, and proved rather than asserted.** `test_batching.py`'s
+batched-vs-sequential figure is **`4.530e-06` before the change and `4.530e-06` after** —
+measured by restoring `batching.py` from HEAD and re-running, not by trusting that the suite
+stayed green.
+
+- `batching.py` — KV left-padding is allocated on the cache's own device (`torch.cat` refuses
+  to join a CPU pad to a CUDA cache), and the mask, `position_ids` and `cache_position` follow
+  `hidden`, which `run_layers_batched` now moves to the device on entry exactly as
+  `common._run_layers` already did.
+- **The batched stages returned device tensors while their unbatched twins returned CPU.** That
+  divergence *is* the bug: every node in a real chain serves through the batcher, so the path
+  that correctly returns to CPU is the one nothing uses. All four now mirror `common`.
+- `wire_codec.py` — the Hadamard matrix follows its operand (it is pinned CPU-side on the
+  **default** `i8h` codec, so this is the first thing a GPU node would have hit), and every
+  `.numpy()` reaches CPU first; `numpy()` raises on a CUDA tensor.
+- Every `send_msg` caller passes `common._to_cpu`, fixing `common.py:474-482`'s legacy
+  `torch.save` **from the callers** — no `common.py` edit, build rule 7 intact.
+- `agent/agent.py` — `torch.cuda.synchronize()` around the self-benchmark. CUDA kernels are
+  queued, not run, so without it a GPU node times how fast it can *enqueue* work, reports an
+  absurd `ms_per_layer`, and `balancer.solve` hands it nearly every layer: **the same OOM by a
+  second route**, through the speed field instead of the memory one.
+
+**Phase 4b stays deferred, and now has a tripwire.** `slice_downloader.py:299` is left alone
+with a comment saying why; root **`test_device_path.py`** (18/18) fails if it starts moving
+weights, and fails if `GPU_EXECUTION` is switched on while the loader does not — those two facts
+are a pair. **Verified the tripwire actually fires** by temporarily adding the device move: 1
+failure, then restored.
+
+**Phase 5a — pause meant almost nothing.** `NodeServer.paused` existed and was **never read**;
+the agent never passed its own flag in, so Pause skipped the heartbeat and the coordinator went
+on routing live requests for up to ~90 s while the owner watched a tray that said "Paused".
+
+The plan said to check what the driver does with a refused connection before writing this, and
+that check changed the design: `DEAD_PEER = (ConnectionError, TimeoutError, EOFError, OSError)`
+and **`ConnectionRefusedError` is a subclass of `ConnectionError`** — so slamming the socket is
+indistinguishable from the machine dying. The driver would rebuild the chain, replay the
+junction cache, and tell the user *"a machine dropped out"*: [P28]'s complaint, self-inflicted.
+
+So the refusal is a **typed reply**, checked on `config` (which starts a new request) and not on
+`act` (which continues one already in flight). And the reply had to be made *recoverable*: peers
+did `assert ack.get("ok")` / `raise RuntimeError`, neither of which any handler catches, so a
+polite refusal would have failed the whole answer where a rude one merely rerouted.
+`PeerUnavailable(ConnectionError)` fixes that with no change to the error handling — it is
+already inside `DEAD_PEER` — while staying distinguishable in the reason string. **Paused and
+died are different events.**
+
+**Phase 5b — a migrating node held two slices at once.** `reload()` loaded the new slice while
+`self.model` still referenced the old, peaking at ~150% of one slice on machines chosen because
+they had room for one. Peak is what OOM-kills a volunteer; steady state is not. Now the old
+slice and its batchers are released, `gc.collect()` + `empty_cache()` run in the gap, and only
+then does the new one load. The window is guarded: a request arriving in it gets a named
+`reloading` refusal instead of an `AttributeError` from inside a batcher.
+
+**The cost is stated rather than discovered later:** a load that fails now leaves the node with
+no slice, where before it kept serving the old one. That is the right trade — the node is being
+migrated off that slice anyway — but it is a real change, so the failure path is explicit and
+tested.
+
+`agent/test_pause_admission.py` **14/14** and `agent/test_reload_lifetime.py` **14/14**, both
+new, and **separate commits**: one changes request admission, the other model lifetime.
+
+**Suite: 70 modules green**, `selftest_shard.py` ALL PASS, `test_short_chain.py` 12/12,
+`test_node_death.py` 7/7 — still token-identical after a SIGKILL mid-generation.
+
+### Half five — the bug that was never about GPUs
+
+Chasing the fp32 residue left over from half one turned up the largest sizing error in the
+repo, and it has nothing to do with graphics cards.
+
+`model_tiers.gb_per_layer` is computed at fp16 (2 bytes/param). Its comment justified that with
+**"common.WEIGHT_DTYPE=fp16"**. `common.py:62` reads `NEURON_WEIGHT_DTYPE` and defaults to
+**fp32**; nothing in the agent, the installer or the packaged build sets it; and `cast_linears`
+is a no-op at fp32. **Every node on every tier was cleared for twice its real footprint** — an
+8 GB machine on the 7B tier for 8 layers, 7.46 GB of weights against a 3.75 GB budget. Latent
+only because the network serves the 1.5B, where 28 layers is too few for the cap to bind.
+
+Same shape as [P31] itself: an assumption about the runtime, written down as fact, that the
+runtime contradicts. Found only by reading `common.py` instead of the comment describing it.
+
+`balancer.effective_gb_per_layer` scales the tier figure by `weight_bytes_for(node)` —
+pessimistic (fp32) unless a node says otherwise, applied **exactly once** on every path
+(`max_layers_for`, and `layer_caps`/`capacity_shortfall`/`solve` through it). Deliberately not
+fixed by doubling the table: a layer's size is a property of the MODEL, the dtype a property of
+the NODE, and conflating them makes a genuine fp16 node impossible to size.
+
+**The part worth keeping.** Seven tests failed on the corrected arithmetic — every one with
+"fits" or "can hold" in its premise. The first fix was to pin `weight_dtype: "fp16"` in the
+fixtures, which passes and is wrong: it preserves the claim that the live 8/8/12 trio can hold
+the 7B, when at fp32 it holds **15 of 28 layers**. Testing that directly — removing the pin and
+running every test function independently — is what exposed it. The fixtures were resized to
+machines that genuinely fit, and **no dtype pin survives anywhere**: `test_migration` 49/49,
+`test_model_tiers` 23/23, both honest.
+
+**No live impact from deploying it.** The network is on the 1.5B floor with one online node,
+and `/network/model` already reports the 7B as `feasible: false, placeable: false`.
+
+`coordinator/test_weight_dtype_sizing.py` **28/28** (new). **Suite: 71 modules green**,
+`selftest_shard.py` ALL PASS.
+
+### State at end of session
+
+**Nothing committed, nothing deployed.** Phase 1 is coordinator-only and urgent: deploying it
+with `./coordinator/deploy.sh` stops every already-installed 0.18 agent from being over-assigned
+**with no installer and no agent release**. It must not be bundled with any agent change — the
+tree still carries the 44 uncommitted files from Session 54, so that commit needs its four paths
+staged specifically.
+
+Phases 2 and 3 are agent-side and ship in the next build, which must bump `updater.LOCAL_VERSION`,
+`neuron.iss` AppVersion and `AGENT_VERSION` **together** and set `NEURON_AGENT_VERSION` **and**
+`NEURON_AGENT_SHA256` on the VM in the same change — `is_newer` is a strict `>`.
+
+**Commit order** (the handoff plan's table, all seven now written): 1 Phase 1 · 2 Phase 2 code ·
+3 Phase 3 · 4 Phase 2 docs · 5 Phase 4a + `test_device_path.py` · 6 Phase 5a · 7 Phase 5b.
+**5a and 5b must stay separate** — one changes request admission, the other model lifetime.
+
+**Not attempted, deliberately:** Phase 4b (the loader move itself — it needs real GPU hardware,
+and the tripwire now guards it), CUDA packaging and everything gated behind it (Phase 6: the
+~2.5 GB installer, `updater.py` resume/rollback, the `/agent/version` schema, the NVIDIA
+redistributable licensing gap), the fp32 `gb_per_layer` residue, and `selftest_shard.py`'s
+exact-equality check — which makes build rule 6 unsatisfiable on a GPU box. All in [P31].
+
+---
+
 ## Known limits / next steps
 - **Throughput scales with nodes (single 3.2 → 2-node 4.6 → 3-node 6.2 tok/s), but
   sub-linearly** because the nodes are heterogeneous and node_a carries the fixed
