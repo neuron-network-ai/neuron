@@ -20,6 +20,30 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
   roadmap at Session 12** as planned; do NOT integrate quantization now. Log a dedicated
   *quality-preserving quantization* session (GPTQ/AWQ or llama.cpp GGUF+RPC) as prioritized
   future work — evaluate the llama.cpp engine pivot deliberately, with real users in view.
+- **2026-08-08 — Rent a cloud GPU rather than keep deferring the GPU path.** Every remaining
+  GPU item is blocked on the same thing: **no machine in this project has an NVIDIA card**, so
+  not one line of the CUDA path can be executed, let alone measured. That is exactly how
+  [P31] happened — a capability built, never run, then documented as though it had been — and
+  it is not a gap that more code review closes. Decision: **hire GPU time online** and do the
+  work on real hardware.
+  What that session must cover, in order, because the order is what keeps it safe:
+  1. Verify **Phase 4a** on CUDA. It is written and bit-identical on CPU (`test_batching`'s
+     figure is unchanged to the digit), but "passes on CPU" is not "works on a GPU".
+  2. Then **Phase 4b** — the one-line device move at `slice_downloader.py:299`.
+     `test_device_path.py` fails until it is done deliberately, and says what to verify first.
+  3. Reconcile **`selftest_shard.py`**, which requires `diff == 0` between a CPU `load_model()`
+     and a CUDA `load_model_shard()` — as written, **build rule 6 is unsatisfiable on a GPU
+     box**, so it fails on the first machine that could actually prove the feature works.
+  4. Only then **`balancer.GPU_EXECUTION`** back on, with the VRAM reserve and bound that are
+     already in place and dormant.
+  5. **CUDA packaging last**, and it is its own problem: ~2.4 GB of torch against today's
+     207 MB installer, `updater.DOWNLOAD_TIMEOUT = 600` (needing a sustained ~32 Mbit/s), no
+     resume, no disk-space check, no rollback (`updater.py:173` is `os._exit(0)`), a
+     `/agent/version` that cannot express a per-capability build, and NVIDIA redistributables
+     that `tools/gen_notices.py` does not cover. **With one installer, every volunteer pays
+     that download, including the ones with no GPU.** Fix the updater before shipping it.
+  Rented time is cheap next to the lever: decode is bandwidth-bound at ~30 GB/s on DDR against
+  360–1000 GB/s on a consumer card, and 200B needs ~30–80 CPU machines or ~10 GPU ones.
 - **2026-07-28 — Pre-launch audit before the first real external stranger.** No real
   stranger has ever run a node — everything "live" so far is the founder's own machines.
   Before handing the installer to an actual friend, ran three parallel audits (security,
@@ -120,7 +144,10 @@ the function that prevents it. `coordinator/test_gpu_capability.py:108-142` **as
 **Still open:**
 - **Phase 4b — the loader itself.** One line, guarded by the tripwire above. It needs real GPU
   hardware to verify, because "passes on CPU" is not "works on a GPU" and that distinction is
-  the whole subject of this entry.
+  the whole subject of this entry. **Decided 2026-08-08: rent GPU time online rather than wait
+  for a card** — see the decisions log for the order that session must follow, which is not
+  arbitrary: 4a verified before 4b, `selftest_shard` reconciled before `GPU_EXECUTION` goes
+  back on, packaging last.
 - **`selftest_shard.py`** compares a CPU `load_model()` against a CUDA `load_model_shard()` and
   requires `diff == 0`, so **on a GPU box build rule 6 is unsatisfiable** as written.
 - **CUDA packaging.** With one installer, bundling a CUDA torch means every volunteer downloads

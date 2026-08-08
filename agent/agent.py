@@ -171,6 +171,10 @@ BIND_TIMEOUT_S = 20
 # How often to prove this node is reachable at its PUBLIC relay endpoint, and how long to wait
 # for that proof. Every fourth heartbeat (~2 min) rather than every one: it opens a real
 # connection through the relay and back into our own server, so it is not free.
+# One INFO line per unchanged state every N beats (~15 min at PING_SECONDS=30). Silence
+# still has to mean dead -- see verify_service.py, which learned this the hard way: a
+# healthy service that logs nothing looks identical to one that died on Monday.
+HEARTBEAT_ALIVE_EVERY = 30
 RELAY_PROBE_EVERY = 4
 RELAY_PROBE_TIMEOUT_S = 20
 # How often a verified node looks for a newcomer to vouch for. Slow on purpose: verifying is
@@ -1157,8 +1161,31 @@ class Agent:
 
     def heartbeat_loop(self):
         beat = 0
+        last_line = None            # so a steady state is logged once, not every 30 s
         while not self._stop.is_set():
             beat += 1
+
+            def beat_log(msg, *args, level=logging.INFO):
+                """Log a heartbeat outcome ON CHANGE, plus a periodic proof of life.
+
+                Every beat used to log at INFO. At ~30 s that is 2,833 lines and 141 KB a day
+                of `heartbeat ok — active`, and `logtail.MAX_BYTES` is 64 KB — so the tail the
+                coordinator collects held under 11 hours and, on an idle node, was ~100%
+                heartbeat. `neuron_logs.py` exists so that diagnosing a stranger's node does
+                not depend on their attention; a window full of "ok" defeats exactly that.
+
+                Same shape as the fix in `verify_service.py`: quiet while nothing changes,
+                an alive line every ALIVE_EVERY beats so SILENCE STILL MEANS DEAD, and every
+                transition logged the moment it happens.
+                """
+                nonlocal last_line
+                line = msg % args if args else msg
+                changed = line != last_line
+                last_line = line
+                if changed or beat % HEARTBEAT_ALIVE_EVERY == 0:
+                    log.log(level, "%s", line + ("" if changed else "  (still)"))
+                else:
+                    log.debug("%s", line)
             reasons = ["paused by user"] if self.user_paused.is_set() else self.guard.reasons_to_pause()
             # Prove the PUBLIC path, not just the local one. The tunnel can die silently while
             # this process is perfectly healthy (the control socket stays ESTABLISHED and blocked
@@ -1189,7 +1216,7 @@ class Agent:
             try:
                 if reasons:
                     self.state.update(status="idle", detail="; ".join(reasons))
-                    log.info("paused (%s) — not advertising availability", "; ".join(reasons))
+                    beat_log("paused (%s) — not advertising availability", "; ".join(reasons))
                 else:
                     self.ping()
                     if self.standing == "probationary":
@@ -1198,13 +1225,13 @@ class Agent:
                         # use. Say which of the two it is ([P24]).
                         self.state.update(status="active",
                                           detail="awaiting verification — not yet earning")
-                        log.info("heartbeat ok — probationary, not yet serving or earning")
+                        beat_log("heartbeat ok — probationary, not yet serving or earning")
                     else:
                         self.state.update(status="active", detail="earning")
-                        log.info("heartbeat ok — active")
+                        beat_log("heartbeat ok — active")
             except requests.RequestException as e:
                 self.state.update(status="error", detail=f"coordinator unreachable: {e}")
-                log.warning("heartbeat failed: %s", e)
+                beat_log("heartbeat failed: %s", e, level=logging.WARNING)
             self._stop.wait(PING_SECONDS)
 
     # -- model migration (Build 3, node-side): download the coordinator's chosen target

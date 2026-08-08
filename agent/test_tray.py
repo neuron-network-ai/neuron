@@ -36,8 +36,15 @@ class _Menu:
 
 
 class _Icon:
-    def __init__(self, *a, **k):
-        self.icon = None
+    def __init__(self, name=None, icon=None, title=None, **k):
+        self.icon = icon
+        # Recorded because the tray shows the version here. A stub that silently drops an
+        # attribute turns every assertion about it into a vacuous pass.
+        self.title = title
+        self.notified = []
+
+    def notify(self, message, title=None):
+        self.notified.append((title, message))
 
     def update_menu(self):
         pass
@@ -206,6 +213,79 @@ def main():
     dm3 = device_menu(t4)
     dm3.items[0].action(None, None)                         # back to "Automatic"
     check("returning to the starting device clears the restart note", note(t4) == "")
+
+    # 5) the tray says what the app is and what it is doing
+    #    "Status: Active" with no version and no detail is indistinguishable from a stub, and
+    #    the agent had computed a `detail` for every state all along -- the menu discarded it.
+    t5, _ = _tray(tmpdir)
+
+    def row(tray, prefix):
+        for i in tray._menu().items:
+            if isinstance(i, traymod.pystray.MenuItem) and callable(i.text):
+                txt = i.text(None)
+                if txt and txt.startswith(prefix):
+                    return txt
+        return ""
+
+    from agent import updater as _upd
+    check("the tray names the version it is running",
+          _upd.LOCAL_VERSION in row(t5, "NEURON v"))
+    check("...and so does the hover tooltip, where it costs nothing to read",
+          bool(t5.icon.title) and _upd.LOCAL_VERSION in t5.icon.title)
+
+    t5.agent.state.update(status="active", detail="earning")
+    check("the status row shows the detail the agent already computed",
+          row(t5, "Status:") == "Status: Active — earning")
+    t5.agent.state.update(status="error", detail="coordinator unreachable: timed out")
+    check("an error state says what went wrong, not just 'Error'",
+          "coordinator unreachable" in row(t5, "Status:"))
+    t5.agent.state.update(status="idle", detail="x" * 90)
+    check("a very long detail is truncated rather than stretching the menu",
+          len(row(t5, "Status:")) < 70)
+    t5.agent.user_paused.set()
+    check("a user-initiated pause says so plainly",
+          row(t5, "Status:") == "Status: Paused by you")
+    t5.agent.user_paused.clear()
+
+    # 6) notifications: only on transitions, and never fatal
+    t6, _ = _tray(tmpdir)
+    sent = []
+    t6.icon.notify = lambda msg, title=None: sent.append((title, msg))
+
+    t6.agent.standing = "probationary"
+    t6.agent.state.update(status="active", detail="awaiting verification")
+    t6._maybe_notify()
+    check("a probationary node tells its owner it is not yet earning", len(sent) == 1)
+    t6._maybe_notify(); t6._maybe_notify()
+    check("...once, not on every poll — an app that cries wolf gets muted", len(sent) == 1)
+
+    t6.agent.standing = "verified"
+    t6._maybe_notify()
+    check("promotion to verified is announced", len(sent) == 2 and "verified" in sent[-1][0])
+
+    t6.agent.state.update(status="error", detail="node server not listening")
+    t6._maybe_notify()
+    check("a node that has stopped serving is announced",
+          len(sent) == 3 and "not serving" in sent[-1][0])
+    t6._maybe_notify()
+    check("...and not repeated while it persists", len(sent) == 3)
+
+    # Pause is user-initiated: they just clicked it, so telling them is noise.
+    before = len(sent)
+    t6.agent.state.update(status="idle", detail="paused by user")
+    t6.agent.standing = "verified"
+    t6._maybe_notify()
+    check("an ordinary idle state is not notified", len(sent) == before)
+
+    # A backend that refuses must never take down the tray.
+    def _boom(msg, title=None):
+        raise RuntimeError("no notification service")
+    t6.icon.notify = _boom
+    t6._notified = None
+    t6.agent.standing = "probationary"
+    t6.agent.state.update(status="active", detail="awaiting verification")
+    t6._maybe_notify()
+    check("a notification backend that raises does not crash the tray", True)
 
     print(f"\n{ok} passed, {fail} failed")
     return fail == 0

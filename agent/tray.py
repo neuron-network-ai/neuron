@@ -24,6 +24,7 @@ import pystray
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agent.agent import Agent, _setup_logging, crash_log   # noqa: E402
 from agent import resource_guard                 # noqa: E402
+from agent import updater                        # noqa: E402  (LOCAL_VERSION, shown in the tray)
 
 log = logging.getLogger("neuron.agent")   # same file as the agent's own log
 
@@ -81,20 +82,40 @@ class Tray:
         self.ledger = {"balance": 0.0, "total_earned": 0.0}
         self._ledger_error = None            # last non-200 from the ledger poll, if any
         self._last_logged_ledger_error = None   # so one bad status isn't logged every 30s
-        self.icon = pystray.Icon("neuron", icon_image(COLORS["starting"]), "NEURON",
-                                 menu=self._menu())
+        # The hover tooltip is the one place a version number is free to read and costs
+        # nothing to show. "which version are you running?" was previously unanswerable
+        # without opening a log file, on the surface a non-technical volunteer actually uses.
+        self.icon = pystray.Icon("neuron", icon_image(COLORS["starting"]),
+                                 f"NEURON v{updater.LOCAL_VERSION}", menu=self._menu())
+        # What the last notification was about, so a state that persists is announced once
+        # rather than every refresh. Notification spam is worse than no notifications: the
+        # first thing a user does with an app that cries wolf is silence it permanently.
+        self._notified = None
 
     def _effective_status(self):
         return "idle" if self.agent.user_paused.is_set() else self.agent.state.get("status", "starting")
 
     def _menu(self):
         def title(_):
-            return f"NEURON — {self.ledger.get('balance', 0):.2f} NRN balance"
+            return f"NEURON v{updater.LOCAL_VERSION} — {self.ledger.get('balance', 0):.2f} NRN"
 
         def status(_):
-            s = "Paused" if self.agent.user_paused.is_set() else \
-                self.agent.state.get("status", "starting").capitalize()
-            return f"Status: {s}"
+            # The agent has always computed a `detail` for every state -- "earning", "awaiting
+            # verification — not yet earning", "coordinator unreachable: …", the list of
+            # reasons it paused -- and this menu threw all of it away and showed one word.
+            # "Status: Active" and "Status: Idle" are indistinguishable from a stub, which is
+            # what makes the app feel like it is not doing anything. It always knew; it just
+            # did not say.
+            if self.agent.user_paused.is_set():
+                return "Status: Paused by you"
+            s = self.agent.state.get("status", "starting").capitalize()
+            detail = (self.agent.state.get("detail") or "").strip()
+            if not detail:
+                return f"Status: {s}"
+            # Keep the menu narrow: a long reason list is a tooltip, not a menu row.
+            if len(detail) > 46:
+                detail = detail[:45].rstrip(" ;,—-") + "…"
+            return f"Status: {s} — {detail}"
 
         def earned(_):
             return f"Total earned: {self.ledger.get('total_earned', 0):.2f} NRN"
@@ -277,7 +298,58 @@ class Tray:
                     pass
             self.icon.icon = icon_image(COLORS.get(self._effective_status(), COLORS["idle"]))
             self.icon.update_menu()
+            self._maybe_notify()
             time.sleep(30)
+
+    # -- desktop notifications ------------------------------------------------ #
+    # Restrained on purpose. Only events the owner CANNOT otherwise discover, and only on the
+    # transition into them -- `_notified` holds the last key, so a state that persists for a
+    # day is announced once. An agent that notifies on every poll gets muted by the OS within
+    # an hour, and then the one notification that mattered never arrives either.
+    #
+    # Deliberately NOT notified: pause and resume (the user just did it), and the ordinary
+    # active heartbeat (nothing to act on).
+    def _notify_key(self):
+        """(key, title, message) for a state worth interrupting someone about, or None."""
+        st = self.agent.state
+        status = st.get("status")
+        detail = (st.get("detail") or "").strip()
+
+        if self._ledger_error == 401:
+            return ("token", "NEURON — this node's token was superseded",
+                    "Another copy of the agent has registered the same node id. Earnings "
+                    "shown here are stale until that is resolved.")
+        if status == "error":
+            # The two that strand a node silently: it looks online and serves nothing.
+            return ("error:" + detail[:40], "NEURON — your node is not serving",
+                    detail or "The node hit an error; see the log.")
+        if self.agent.standing == "probationary":
+            return ("probationary", "NEURON — waiting to be verified",
+                    "Your node is online and healthy, but a verifier must confirm it before "
+                    "it receives requests or earns NRN.")
+        if self.agent.standing in ("verified", "trusted") and status == "active":
+            return ("serving", "NEURON — your node is verified",
+                    "It is now serving requests and earning NRN.")
+        return None
+
+    def _maybe_notify(self):
+        try:
+            entry = self._notify_key()
+            if entry is None:
+                self._notified = None      # recovered: allow the next occurrence to announce
+                return
+            key, title, message = entry
+            if key == self._notified:
+                return
+            self._notified = key
+            notify = getattr(self.icon, "notify", None)
+            if notify:
+                notify(message, title)
+        except Exception:                                          # noqa: BLE001
+            # A notification backend that is missing, disabled by policy, or simply refuses
+            # must never take down the tray -- this is decoration on top of a node that is
+            # doing its actual job.
+            pass
 
     def run(self):
         threading.Thread(target=self.agent.run, daemon=True).start()
