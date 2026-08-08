@@ -21,6 +21,19 @@ SERVICE="neuron-coordinator"
 PUBLIC_URL="${NEURON_PUBLIC_URL:-http://150.230.22.250:8001}"
 DRY=""; [ "${1:-}" = "--dry-run" ] && DRY="--dry-run"
 
+# The deploy key carries a passphrase (2026-08-09). An unencrypted key on a Windows box is a
+# root-equivalent credential readable by anything running as that user -- and this one is the
+# ONLY key authorised on the VM that holds the ledger, every wallet balance and the register
+# secret. `chmod 0600` does not protect it there: NTFS ignores POSIX mode bits.
+#
+# So prefer a running ssh-agent. Without one, `ssh -i` still works and simply prompts, which is
+# correct for a human running this by hand and merely inconvenient. With one, unattended runs
+# keep working. Started once per boot:
+#     ssh-agent -a ~/.ssh/neuron-agent.sock
+#     SSH_AUTH_SOCK=~/.ssh/neuron-agent.sock ssh-add ~/.ssh/oracle_coordinator
+: "${SSH_AUTH_SOCK:=$HOME/.ssh/neuron-agent.sock}"
+[ -S "$SSH_AUTH_SOCK" ] && export SSH_AUTH_SOCK || unset SSH_AUTH_SOCK
+
 SSH=(ssh -i "$KEY" -o StrictHostKeyChecking=accept-new "$HOST")
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
