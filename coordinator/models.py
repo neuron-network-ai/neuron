@@ -30,9 +30,11 @@ CREATE TABLE IF NOT EXISTS nodes (
     node_token    TEXT NOT NULL,
     platform      TEXT,
     hw_fingerprint TEXT,
-    -- GPU capability, as reported by the node. Recorded so the balancer can size a slice
-    -- against VRAM rather than only system RAM. It is NOT a speed signal: the pipeline is
-    -- CPU-only today, and a node's real speed is its measured ms_per_layer.
+    -- GPU capability, as reported by the node. Recorded for the operator and for the day the
+    -- pipeline can use a card; it does NOT size a slice today. `balancer.GPU_EXECUTION` is
+    -- off, because the shipped agent loads its shard without moving it to any device and
+    -- ships a `+cpu` torch, so a GPU node's weights sit in system RAM like everyone else's.
+    -- It is NOT a speed signal either: a node's real speed is its measured ms_per_layer.
     has_gpu       INTEGER NOT NULL DEFAULT 0,
     gpu_vram_gb   REAL,
     gpu_name      TEXT,
@@ -362,9 +364,18 @@ def register_node(node_id, tailscale_ip, port, layer_start, layer_end, cores,
                    head_ms=COALESCE(excluded.head_ms, nodes.head_ms),
                    platform=COALESCE(excluded.platform, nodes.platform),
                    hw_fingerprint=COALESCE(excluded.hw_fingerprint, nodes.hw_fingerprint),
+                   -- GPU details follow has_gpu instead of being COALESCEd like platform.
+                   -- COALESCE was wrong in one direction: a node that LOST its card (pulled,
+                   -- failed, or a driver that stopped exposing it) reported has_gpu=0 and kept
+                   -- its old VRAM forever, so the balancer could still size a slice from
+                   -- memory that no longer existed. Within a report that still has a card,
+                   -- COALESCE still applies -- an agent build that detects a GPU but omits the
+                   -- VRAM figure must not erase a good one.
                    has_gpu=excluded.has_gpu,
-                   gpu_vram_gb=COALESCE(excluded.gpu_vram_gb, nodes.gpu_vram_gb),
-                   gpu_name=COALESCE(excluded.gpu_name, nodes.gpu_name),
+                   gpu_vram_gb=CASE WHEN excluded.has_gpu
+                       THEN COALESCE(excluded.gpu_vram_gb, nodes.gpu_vram_gb) END,
+                   gpu_name=CASE WHEN excluded.has_gpu
+                       THEN COALESCE(excluded.gpu_name, nodes.gpu_name) END,
                    trusted=excluded.trusted,
                    node_token=excluded.node_token, status='online', last_seen=excluded.last_seen""",
             (node_id, tailscale_ip, port, layer_start, layer_end, cores, ram_gb,

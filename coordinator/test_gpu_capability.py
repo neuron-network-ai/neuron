@@ -3,10 +3,13 @@
 Nodes report GPU capability; the coordinator stores it and the balancer may use it. The
 properties worth pinning down are the ones a future reader is most likely to get wrong:
 
-1. **VRAM is not capacity while the pipeline is CPU-only.** `common.py` materialises every
-   shard into system RAM and selects no device, so a GPU node's VRAM holds nothing. Counting
-   it would over-assign layers and OOM-kill a volunteer's machine. `balancer.GPU_EXECUTION`
-   gates that arithmetic off, and there is a test asserting the gate holds.
+1. **VRAM is not capacity while the pipeline computes on the CPU.** `common.py` resolves an
+   execution device, but the loader every volunteer node actually uses --
+   `slice_downloader.load_slice_model` -- returns the model without moving it, and the shipped
+   torch is a `+cpu` build regardless. A GPU node's VRAM therefore holds nothing. Counting it
+   over-assigns layers and OOM-kills a volunteer's machine; it did, against a 12 GB card in an
+   8 GB machine. `balancer.GPU_EXECUTION` gates that arithmetic off, and there is a test
+   asserting the gate holds.
 2. **A GPU is not a speed multiplier.** Speed is the measured `ms_per_layer`. The GPU only
    breaks ties.
 3. **`gpu_name` is operator-only**, like `platform` and the addresses — a card model is
@@ -61,11 +64,29 @@ def main():
     check("has_gpu is a real bool, not SQLite's 0/1",
           isinstance(models.get_node("cpu-node")["has_gpu"], bool))
 
-    # A GPU node that re-registers from a build with no GPU detection must not silently lose
-    # its card: has_gpu follows the latest report, but VRAM/name are COALESCEd like platform.
-    register("gpu-node", has_gpu=True, vram=12.0, name="NVIDIA GeForce RTX 4070")
+    # An agent build that detects the card but omits the VRAM figure must not erase a good one.
+    register("gpu-node", has_gpu=True)
     n = models.get_node("gpu-node")
-    check("re-registration keeps GPU details", n["has_gpu"] and n["gpu_vram_gb"] == 12.0)
+    check("re-registration with no VRAM figure keeps the known one",
+          n["has_gpu"] and n["gpu_vram_gb"] == 12.0)
+
+    # But a node that LOSES its card must not keep phantom VRAM. It was COALESCEd like
+    # `platform`, so the figure outlived the card that justified it and the balancer could size
+    # a slice from memory the machine no longer had.
+    register("gpu-node", has_gpu=False)
+    n = models.get_node("gpu-node")
+    check("a node that loses its GPU drops the VRAM and name with it",
+          n["has_gpu"] is False and n["gpu_vram_gb"] is None and n["gpu_name"] is None,
+          dict(n))
+    register("gpu-node", has_gpu=True, vram=12.0, name="NVIDIA GeForce RTX 4070")
+
+    # The registration edge clamps an unbelievable VRAM claim to NULL -- and still registers
+    # the node. Refusing it would be [P24] again: a healthy machine that simply never joins.
+    r = register("liar-node", has_gpu=True, vram=100000.0, name="NVIDIA RTX 9090", port=51002)
+    n = models.get_node("liar-node")
+    check("an absurd VRAM claim is stored as NULL", n["gpu_vram_gb"] is None, dict(n))
+    check("...and the node is still registered, not refused",
+          n["has_gpu"] is True and r.get("status") == "registered", r)
 
     # ---------- privacy ----------
     pub = {x["node_id"]: x for x in coord.node_list(x_register_secret=None)["nodes"]}
@@ -105,34 +126,80 @@ def main():
     finally:
         config.DB_PATH = real_db
 
-    # ---------- balancer: VRAM is capacity now that common.py can execute on CUDA ----------
-    check("GPU_EXECUTION is on (common.py resolves a device and moves the shard)",
-          balancer.GPU_EXECUTION is True)
+    # ---------- balancer: VRAM is NOT capacity, because the pipeline never reaches it -------
+    #
+    # These assertions were inverted on 2026-08-08, and the inversion IS the fix, not a way of
+    # greening a red suite. What they asserted before was the harm itself: that a node claiming
+    # 24 GB of VRAM may be handed 18 layers to hold. The premise -- Session 42's claim that
+    # `common.py` moves a shard onto CUDA -- is false on the path a volunteer's machine runs:
+    # `slice_downloader.py:299` returns `cast_linears(model)` with no device move, and the
+    # shipped wheel is torch 2.4.1+cpu. So the weights are in system RAM and the sizing was
+    # done against VRAM. See balancer.GPU_EXECUTION.
+    check("GPU_EXECUTION is off (the loader never moves a shard to the device)",
+          balancer.GPU_EXECUTION is False)
+
+    # These cases use a synthetic gb_per_layer=1.0 to test WHICH memory figure is chosen
+    # (VRAM vs free RAM vs total RAM), which is a different question from how many bytes a
+    # parameter takes. `effective_gb_per_layer` scales by the node's storage dtype, so with
+    # the real fp32 default a "1.0 GB layer" is charged as 2.0 and every count below halves —
+    # obscuring the branch each check is actually about. Neutralised here, restored after, and
+    # the dtype scaling itself is asserted with real footprints in test_weight_dtype_sizing.py.
+    _real_bytes = balancer.ASSUMED_WEIGHT_BYTES
+    balancer.ASSUMED_WEIGHT_BYTES = balancer.TIER_BASIS_BYTES        # factor == 1.0
+    check("the dtype correction is neutral for these branch tests",
+          balancer.effective_gb_per_layer(1.0) == 1.0)
 
     gpu_node = {"node_id": "g", "ms_per_layer": 10.0, "ram_free_gb": 4.0,
                 "has_gpu": True, "gpu_vram_gb": 24.0}
-    check("a GPU node is sized by VRAM (24 * 0.75), not by system RAM",
-          balancer.max_layers_for(gpu_node, gb_per_layer=1.0) == 18)
+    check("a GPU node is sized by system RAM (4 * 0.75), not by its 24 GB of VRAM",
+          balancer.max_layers_for(gpu_node, gb_per_layer=1.0) == 3)
 
-    # The load-bearing one: VRAM must REPLACE system RAM, not add to it. Summing them would
-    # claim 21 layers of room on a machine that has 24 GB in one place, and OOM it.
-    check("VRAM is not added to system RAM",
-          balancer.max_layers_for(gpu_node, gb_per_layer=1.0)
-          != int((4.0 + 24.0) * 0.75))
+    # The volunteer this shipped against, by name. A 12 GB card in a machine with 8 GB of RAM
+    # was assigned from VRAM with no OS reserve -- ~19 layers of weights into 8 GB of RAM, on
+    # a machine whose owner is using it. The cap must come from RAM: (8 - 3) * 0.75 = 3.
+    volunteer = {"node_id": "v", "ms_per_layer": 10.0,
+                 "has_gpu": True, "gpu_vram_gb": 12.0, "ram_gb": 8.0}
+    check("12 GB card + 8 GB RAM is sized from RAM, not from VRAM",
+          balancer.max_layers_for(volunteer, gb_per_layer=1.0) == 3,
+          balancer.max_layers_for(volunteer, gb_per_layer=1.0))
+    check("...and that is strictly fewer layers than the VRAM figure would have given",
+          balancer.max_layers_for(volunteer, gb_per_layer=1.0) < int(12.0 * 0.75))
 
     small_vram = {"node_id": "g2", "ram_free_gb": 32.0, "has_gpu": True, "gpu_vram_gb": 4.0}
-    check("a GPU smaller than system RAM still caps at VRAM (that is where layers sit)",
-          balancer.max_layers_for(small_vram, gb_per_layer=1.0) == 3)
+    check("a GPU node with lots of RAM is sized by that RAM",
+          balancer.max_layers_for(small_vram, gb_per_layer=1.0) == 24)
 
-    check("8 GB of VRAM outranks 4 GB of free system RAM",
-          balancer.max_layers_for({"has_gpu": True, "gpu_vram_gb": 8.0}, gb_per_layer=1.0)
-          > balancer.max_layers_for({"ram_free_gb": 4.0}, gb_per_layer=1.0))
+    check("VRAM alone constrains nothing -- a node reporting only a card is unconstrained",
+          balancer.max_layers_for({"has_gpu": True, "gpu_vram_gb": 8.0},
+                                  gb_per_layer=1.0) is None)
+
+    # ---------- the VRAM figure is bounded for when the flag goes back on ----------
+    # `gpu_vram_gb` is the one registration field that becomes a memory budget, and open join
+    # means it arrives with no credential behind it. Unbelievable -> None -> size from RAM.
+    check("a plausible VRAM figure passes through", balancer.sane_vram_gb(12.0) == 12.0)
+    for bad, label in [(None, "missing"), ("lots", "not a number"), (0.0, "zero"),
+                       (-8.0, "negative"), (float("nan"), "NaN"), (float("inf"), "infinite"),
+                       (1e9, "absurdly large")]:
+        check(f"an unbelievable VRAM figure ({label}) is dropped, not believed",
+              balancer.sane_vram_gb(bad) is None)
 
     real_flag = balancer.GPU_EXECUTION
     try:
-        balancer.GPU_EXECUTION = False
-        check("with GPU execution off, a GPU node falls back to system RAM",
-              balancer.max_layers_for(gpu_node, gb_per_layer=1.0) == 3)
+        balancer.GPU_EXECUTION = True
+        check("with GPU execution on, a GPU node is sized by VRAM minus the OS reserve",
+              balancer.max_layers_for(gpu_node, gb_per_layer=1.0)
+              == int((24.0 - balancer.VRAM_OS_RESERVE_GB) * 0.75))
+        # The reserve is the point: a card with no headroom left stutters the desktop it is
+        # drawing. `local_gguf.GPU_HEADROOM_GB` reserves the same 1.5 GB on the local path.
+        check("the VRAM branch reserves headroom, as the RAM branch always has",
+              balancer.max_layers_for(gpu_node, gb_per_layer=1.0) < int(24.0 * 0.75))
+        check("VRAM replaces system RAM, never adds to it",
+              balancer.max_layers_for(gpu_node, gb_per_layer=1.0)
+              != int((4.0 + 24.0) * 0.75))
+        # A junk figure must not become a budget even once the flag is on.
+        check("with the flag on, an absurd VRAM claim falls back to system RAM",
+              balancer.max_layers_for({"node_id": "liar", "ram_free_gb": 4.0, "has_gpu": True,
+                                       "gpu_vram_gb": 100000.0}, gb_per_layer=1.0) == 3)
     finally:
         balancer.GPU_EXECUTION = real_flag
 
@@ -140,6 +207,10 @@ def main():
           balancer.max_layers_for({"node_id": "c", "ram_free_gb": 4.0}, gb_per_layer=1.0) == 3)
     check("a node reporting neither RAM nor VRAM is unconstrained, as before",
           balancer.max_layers_for({"node_id": "u"}, gb_per_layer=1.0) is None)
+
+    balancer.ASSUMED_WEIGHT_BYTES = _real_bytes
+    check("the real (pessimistic, fp32) weight assumption is restored",
+          balancer.ASSUMED_WEIGHT_BYTES == 4.0)
 
     # ---------- balancer: a GPU is a tie-break, never a speed multiplier ----------
     equal = [{"node_id": "cpu", "ms_per_layer": 10.0},

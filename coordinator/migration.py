@@ -21,9 +21,12 @@ Safety properties:
   * if the target stops qualifying before cutover (capacity dropped and the TierController
     demoted the target back to the serving model), the migration ABORTS and serving stays put.
   * if the target changes to a different model mid-flight, the plan is recomputed.
+  * a target NO NODE PARTITION CAN HOLD is refused outright: the network keeps serving what it
+    has rather than preparing a plan that OOM-kills the machines preparing it.
 
-The layer partition here is a simple even contiguous split (deterministic + testable); the
-speed-weighted balancer and replica-aware placement are refinements layered on top.
+The layer partition here is an even contiguous split fitted to each node's memory (deterministic
++ testable); the speed-weighted balancer and replica-aware placement are refinements layered on
+top. Memory is the one hard constraint — see plan_migration.
 
 Self-heal (added later): a SEPARATE state machine, self_heal()/heal_status(), living on the
 same MigrationController instance but never touching phase/target/plan/ready above. It closes
@@ -39,11 +42,26 @@ steady every tick, which is exactly the state self-heal operates in, so anything
 
 import collections
 
-from coordinator import router
+from coordinator import balancer, config, router
 
 
-def plan_migration(nodes, layers, start=0):
-    """Even contiguous partition of `layers` across the eligible online nodes, beginning at
+def eligible_nodes(nodes):
+    """Online AND eligible, the same filter every planner here applies."""
+    return [n for n in nodes if n.get("status") == "online" and n.get("eligible")]
+
+
+def partition_shortfall(nodes, layers, gb_per_layer):
+    """Layers the online+eligible nodes cannot hold BETWEEN THEM at `gb_per_layer`.
+
+    0 means a valid per-node partition exists — and also means "unknown", when the model's
+    per-layer footprint isn't known (an env-supplied tier with no `gb_per_layer`), because an
+    unknown footprint can't justify refusing to serve.
+    """
+    return balancer.capacity_shortfall(eligible_nodes(nodes), layers, gb_per_layer)
+
+
+def plan_migration(nodes, layers, start=0, gb_per_layer=None, max_stages=None):
+    """Contiguous partition of `layers` across the eligible online nodes, beginning at
     layer `start` (default 0, every existing caller unaffected).
 
     Returns [{node_id, layer_start, layer_end}] covering start..start+layers-1. The driver
@@ -51,26 +69,78 @@ def plan_migration(nodes, layers, start=0):
     layer_start. If there are more nodes than layers, the surplus nodes get no segment
     (candidate replicas -- or, for self-heal, the already-idle nodes it was given to fill a gap
     with in the first place).
+
+    The split starts EVEN and is then fitted to memory when `gb_per_layer` is known: each node's
+    reported RAM (or VRAM) becomes a hard cap via `balancer.max_layers_for`, and layers land on
+    the machines with room instead. An even split is a fine default and a bad promise --
+    observed live 2026-08-07, an even 3-way split of Qwen2.5-7B handed 9-10 layers (~4.5 GB of
+    weights) to machines with 8 GB of TOTAL RAM, because the tier gate qualified the network on
+    AGGREGATE capacity and nothing downstream ever asked whether one node could hold its slice.
+    A stage that gets OOM-killed is infinitely slower than a slow one.
+
+    Under memory pressure a node that an even split left with no segment (surplus) CAN pick one
+    up -- that is the whole point of the fit. This plan always covers every layer; callers that
+    must not proceed when the network genuinely cannot hold the model check
+    `partition_shortfall` first (MigrationController.update does).
+
+    At most `max_stages` nodes become STAGES; any beyond that are assigned as REPLICAS of an
+    existing stage, sharing its exact range. The stage count is not a tuning choice -- the
+    inference path is three programs with three roles (config.PIPELINE_STAGES), and
+    `node_a.coord_get_chain` rejects a chain of any other length. Splitting across "however many
+    nodes are eligible" produced exactly that failure live on 2026-08-07: a migration cut over
+    onto a one-stage plan, coverage read 28/28 healthy because one node held every layer, and
+    every chat died on "expected a 3-node chain, got 1". Replicas are also what added machines
+    are FOR -- they raise throughput instead of deepening the pipeline ([P16]) -- so nothing
+    idles as a result of the cap.
     """
-    elig = [n for n in nodes if n.get("status") == "online" and n.get("eligible")]
-    # node_id breaks the tie last. Without it two nodes on the identical segment sort equal, so
-    # the plan followed whatever order the roster happened to arrive in -- and a plan that
-    # changes between ticks resets every node's readiness and throws away partial downloads,
-    # which on a network of machines that come and go means it can never converge.
+    elig = eligible_nodes(nodes)
+    # Stage 1 is not just "the first slice". It holds the embedding and the lm_head, and the
+    # driver (ui/app.py, neuron_driver.py) IS that node -- node_a.coord_get_chain refuses any
+    # chain whose first stage is not its own shard. So the ordering here decides whether the
+    # network is routable at all, not merely how fast it is.
+    #
+    #   1. a node that has measured a head_ms already carries the head -- keep it there, so the
+    #      lm_head does not have to move machines;
+    #   2. otherwise the FASTEST node takes it. The head is a fixed per-token cost on top of a
+    #      stage's layers, so it belongs on the quickest machine -- and on this network that is
+    #      also the machine running the driver. Sorting by layer_start alone put stage 1 on a
+    #      node measured at 45.8 ms/layer while an 11.3 ms/layer machine took the tail;
+    #   3. layer_start keeps a node near its current range, so fewer slices move;
+    #   4. node_id breaks the tie last. Without it two nodes on the identical segment sort
+    #      equal, the plan follows whatever order the roster arrived in, and a plan that changes
+    #      between ticks resets every node's readiness and discards partial downloads -- on a
+    #      network of machines that come and go, it can then never converge.
     elig.sort(key=lambda n: (0 if (n.get("head_ms") or 0) > 0 else 1,
+                             float(n.get("ms_per_layer") or 1e9),
                              n.get("layer_start", 0), n.get("node_id", "")))
-    n = len(elig)
-    if n == 0 or layers <= 0:
+    if not elig or layers <= 0:
         return []
+    max_stages = config.PIPELINE_STAGES if max_stages is None else max_stages
+    stage_nodes, extra_nodes = elig[:max_stages], elig[max_stages:]
+
+    n = len(stage_nodes)
     base, rem = divmod(layers, n)
-    plan, cur = [], start
-    for i, node in enumerate(elig):
-        cnt = base + (1 if i < rem else 0)
+    counts = [base + (1 if i < rem else 0) for i in range(n)]
+    if gb_per_layer:
+        counts, _ = balancer.fit_to_capacity(
+            counts, balancer.layer_caps(stage_nodes, gb_per_layer, layers))
+    plan, stages, cur = [], [], start
+    for node, cnt in zip(stage_nodes, counts):
         if cnt == 0:
-            continue                       # more nodes than layers → surplus unassigned
-        plan.append({"node_id": node["node_id"],
-                     "layer_start": cur, "layer_end": cur + cnt - 1})
+            continue                       # more stages than layers → this one takes no segment
+        seg = {"layer_start": cur, "layer_end": cur + cnt - 1}
+        stages.append(seg)
+        plan.append({"node_id": node["node_id"], **seg})
         cur += cnt
+
+    # Everyone else replicates, filling the thinnest stage first so depth stays even. A machine
+    # with no segment earns nothing and serves nothing, so the cap must never mean "idle".
+    if stages:
+        depth = [1] * len(stages)
+        for node in extra_nodes:
+            i = min(range(len(stages)), key=lambda k: (depth[k], k))
+            depth[i] += 1
+            plan.append({"node_id": node["node_id"], **stages[i]})
     return plan
 
 
@@ -87,23 +157,48 @@ class MigrationController:
         self.target = None       # {model_id, layers} being migrated to, or None
         self.plan = []           # [{node_id, layer_start, layer_end}] for the target
         self.ready = set()       # node_ids that reported the target slice downloaded
+        self.blocked = None      # why a warranted migration is NOT being attempted, or None
         # Self-heal state -- entirely separate from the tier-migration fields above.
         self.heal_plan = []      # [{node_id, layer_start, layer_end}] closing the current gap
         self.heal_ready = set()  # node_ids that reported the heal slice downloaded
         self.heal_target = None  # {model_id, layers} -- always the CURRENT serving model
         self.heal_mode = None    # "surplus" (idle node fills the gap) | "resplit" ([R6])
+        self.heal_shortfall = 0  # layers the survivors cannot hold, on a [R6] re-split
 
     def update(self, nodes, target, serving, now, apply_serving):
         """Advance the machine.
 
-        target / serving : {model_id, layers}. `apply_serving(model_id, layers)` performs the
-        cutover (flips the coordinator's serving model). Returns status().
+        target / serving : {model_id, layers, gb_per_layer(optional)}.
+        `apply_serving(model_id, layers)` performs the cutover (flips the coordinator's serving
+        model). Returns status().
         """
         # Nothing to migrate (or a just-completed cutover): the target is what we serve.
         if target["model_id"] == serving["model_id"]:
             if self.phase != "steady":
                 self._reset()
+            self.blocked = None
             return self.status()
+
+        # MEMORY GATE. The tier gate upstream qualifies the network on AGGREGATE capacity
+        # ("3 nodes, 20 GB"), which says nothing about whether any INDIVIDUAL node can hold a
+        # slice -- that is how three machines with 8/8/12 GB were told to serve Qwen2.5-7B on
+        # 2026-08-07. Refuse rather than prepare: preparing means every planned node downloads
+        # several GB it cannot load, and cutover would then move the whole network onto a model
+        # that OOM-kills its own pipeline. Serving stays exactly where it is.
+        #
+        # Deliberately NOT a new phase. self_heal() runs only while phase == "steady", so a
+        # "blocked" phase would silently disable gap healing for as long as an unservable tier
+        # stayed qualified -- the network would be both unable to grow AND unable to repair.
+        # Blocked is a fact ABOUT a steady network, so it rides in status() instead.
+        shortfall = partition_shortfall(nodes, int(target["layers"]),
+                                        target.get("gb_per_layer"))
+        if shortfall:
+            if self.phase != "steady":
+                self._reset()
+            self.blocked = {"model_id": target["model_id"], "layers": int(target["layers"]),
+                            "reason": "capacity", "capacity_shortfall": shortfall}
+            return self.status()
+        self.blocked = None
 
         # A migration is warranted. (Re)start/replan preparing if: we aren't preparing yet, the
         # target changed, OR a node already in the plan is no longer online+eligible (a real
@@ -117,8 +212,10 @@ class MigrationController:
         node_dropped = self.phase == "preparing" and not planned_ids.issubset(elig_ids)
         if self.phase != "preparing" or (self.target or {}).get("model_id") != target["model_id"] \
                 or node_dropped:
-            self.target = {"model_id": target["model_id"], "layers": int(target["layers"])}
-            self.plan = plan_migration(nodes, self.target["layers"])
+            self.target = {"model_id": target["model_id"], "layers": int(target["layers"]),
+                           "gb_per_layer": target.get("gb_per_layer")}
+            self.plan = plan_migration(nodes, self.target["layers"],
+                                       gb_per_layer=self.target["gb_per_layer"])
             self.ready = set()
             self.phase = "preparing"
             # A real tier migration always wins -- abandon any in-flight self-heal rather than
@@ -169,6 +266,7 @@ class MigrationController:
 
     def _clear_heal(self):
         self.heal_plan, self.heal_ready, self.heal_target, self.heal_mode = [], set(), None, None
+        self.heal_shortfall = 0
 
     def status(self):
         planned = {a["node_id"] for a in self.plan}
@@ -179,6 +277,9 @@ class MigrationController:
                       "ready": a["node_id"] in self.ready} for a in self.plan],
             "ready_count": len(planned & self.ready),
             "plan_size": len(self.plan),
+            # Not None means: a bigger model is qualified, and we are NOT going for it. The
+            # network is healthy and serving; it just cannot hold what it qualifies for.
+            "blocked": self.blocked,
         }
 
     # ----------------------------------------------------------------------- #
@@ -233,9 +334,11 @@ class MigrationController:
 
         # Try each gap in order; heal the first one a proposal can actually cover so an
         # unhealable earlier gap never starves a later, healable one.
+        gb_per_layer = serving.get("gb_per_layer")
         proposal, target_gap = [], None
         for gap_start, gap_end in missing:
-            candidate = plan_migration(surplus, gap_end - gap_start + 1, start=gap_start)
+            candidate = plan_migration(surplus, gap_end - gap_start + 1, start=gap_start,
+                                       gb_per_layer=gb_per_layer)
             if candidate:
                 proposal, target_gap = candidate, (gap_start, gap_end)
                 break
@@ -253,10 +356,19 @@ class MigrationController:
         # non-empty: the pipeline is already broken, so there is no working service to protect.
         # The plan still goes through the same download-then-report-ready handshake as any other
         # heal -- nothing cuts over until every planned node holds its new slice.
+        #
+        # Unlike a tier migration this is NOT gated on capacity. A gap means not one request can
+        # complete, so there is no working service to protect and no smaller model to fall back
+        # to from here -- refusing to re-split would leave the network dark AND unrepaired. The
+        # honest answer to "the survivors cannot hold this model" is to serve a smaller one, and
+        # that is the TierController's demotion, not this machine's. So heal on the best split
+        # the survivors can take and REPORT the shortfall (heal_status) rather than hide it.
         resplit = False
         if not proposal:
-            proposal = plan_migration(nodes, serving["layers"])
+            proposal = plan_migration(nodes, serving["layers"], gb_per_layer=gb_per_layer)
             resplit = bool(proposal)
+        shortfall = (partition_shortfall(nodes, serving["layers"], gb_per_layer)
+                     if resplit else 0)
 
         if not proposal:
             if self.heal_plan and not ({a["node_id"] for a in self.heal_plan} <= elig_ids):
@@ -277,6 +389,7 @@ class MigrationController:
             self.heal_ready = set()
             self.heal_target = {"model_id": serving["model_id"], "layers": serving["layers"]}
             self.heal_mode = "resplit" if resplit else "surplus"
+        self.heal_shortfall = shortfall
 
         planned = {a["node_id"] for a in self.heal_plan}
         if planned and planned <= self.heal_ready:
@@ -298,4 +411,7 @@ class MigrationController:
                       "ready": a["node_id"] in self.heal_ready} for a in self.heal_plan],
             "ready_count": len(planned & self.heal_ready),
             "plan_size": len(self.heal_plan),
+            # Non-zero on a re-split the survivors cannot actually hold: the heal is still the
+            # best available move, but the real fix is a tier demotion onto a smaller model.
+            "capacity_shortfall": self.heal_shortfall,
         }

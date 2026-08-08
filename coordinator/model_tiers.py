@@ -23,6 +23,8 @@ model strictly needs more nodes/RAM, so "highest feasible index" == "biggest ser
 import json
 import os
 
+from coordinator import balancer
+
 
 # A tier = a model + the capacity needed to serve it WITH redundancy.
 #   min_nodes    : online+eligible nodes required (enough to split the pipeline AND
@@ -30,6 +32,34 @@ import os
 #   min_ram_gb   : total RAM across those nodes (must hold every replica's slices).
 #   min_replicas : redundant copies of each layer segment. >=2 means one node can drop
 #                  without an outage — the resilience floor for a production tier.
+#   gb_per_layer : one transformer layer's weights. This is the PER-NODE question, and it is
+#                  a different question from min_ram_gb: "3 nodes · 20 GB" is satisfied by
+#                  8+8+12, and none of those machines can hold a third of a 7B model. Without
+#                  it the network promoted itself onto Qwen2.5-7B on 2026-08-07 and handed
+#                  9-10 layers to an 8 GB laptop. Consumed by balancer.max_layers_for.
+#
+# The gb_per_layer figures are computed from each model's config at the fp16 STORAGE dtype
+# (2 bytes/param), which is the same basis the min_ram_gb column was re-derived on in b5b4f22.
+#
+# **THAT BASIS IS NOT WHAT NODES RUN.** This comment used to justify it with
+# "common.WEIGHT_DTYPE=fp16". It is not: `common.py:62` reads NEURON_WEIGHT_DTYPE and defaults
+# to **fp32**, nothing in the agent or installer sets it, and `cast_linears` is a no-op at fp32.
+# So every figure below describes half of a real node's footprint, and the wrong half was the
+# generous one. Corrected in ONE place -- `balancer.effective_gb_per_layer` scales by the dtype
+# the node actually stores at -- rather than by doubling the numbers here, because the column
+# is a property of the MODEL and the dtype is a property of the NODE. Keeping them separate is
+# what lets a node that really does run fp16 be sized correctly once it says so.
+#   1.5B  hidden 1536, ffn 8960,  28 layers ->  46.8M params/layer -> 0.094 GB
+#   7B    hidden 3584, ffn 18944, 28 layers -> 233.0M params/layer -> 0.466 GB
+#   72B   hidden 8192, ffn 29568, 80 layers -> 877.7M params/layer -> 1.755 GB
+# Cross-check: 28 x 0.466 + embed/head = ~15.2 GB for the 7B, against its 20 GB tier minimum.
+# A node running the fp32 default pays double; the headroom factor in max_layers_for does not
+# cover that, so a network of fp32 nodes on a tier sized this way is still over its head. The
+# 7B tier has been fp16-shaped since b5b4f22 either way.
+#
+# NOT modelled: the driver additionally holds the embedding and lm_head (~2.2 GB for the 7B),
+# so the first node in a plan is under-charged by that much. Worth fixing with a `head_gb`
+# column once a real measurement exists; recorded here rather than guessed.
 # The numbers are illustrative starting points (env-overridable); tune them once real
 # per-model slice sizes are measured. What matters here is the SELECTION LOGIC.
 # GATED MODELS DO NOT WORK HERE. `slice_downloader` fetches byte ranges straight off
@@ -41,13 +71,13 @@ import os
 # the network. Any model added here must be publicly fetchable without a token.
 _DEFAULT_TIERS = [
     {"name": "1.5b", "model_id": "Qwen/Qwen2.5-1.5B-Instruct", "layers": 28,
-     "min_nodes": 2,  "min_ram_gb": 6.0,   "min_replicas": 1,
+     "min_nodes": 2,  "min_ram_gb": 6.0,   "min_replicas": 1, "gb_per_layer": 0.094,
      "description": "Qwen2.5-1.5B — the always-available floor."},
     {"name": "7b",   "model_id": "Qwen/Qwen2.5-7B-Instruct", "layers": 28,
-     "min_nodes": 3,  "min_ram_gb": 20.0,  "min_replicas": 1,
+     "min_nodes": 3,  "min_ram_gb": 20.0,  "min_replicas": 1, "gb_per_layer": 0.466,
      "description": "Qwen2.5-7B — the first model no single volunteer machine can hold."},
     {"name": "70b",  "model_id": "Qwen/Qwen2.5-72B-Instruct", "layers": 80,
-     "min_nodes": 20, "min_ram_gb": 180.0, "min_replicas": 2,
+     "min_nodes": 20, "min_ram_gb": 180.0, "min_replicas": 2, "gb_per_layer": 1.755,
      "description": "Qwen2.5-72B — unlocked by a large network."},
 ]
 
@@ -93,18 +123,52 @@ def _meets(cap, tier, margin=0.0):
             and cap["total_ram_gb"] >= tier["min_ram_gb"] * factor)
 
 
-def feasible_tier_index(cap, margin=0.0):
-    """Highest tier index whose requirements `cap` meets. -1 if even the floor fails."""
+def gb_per_layer_for(model_id):
+    """One layer's weights for a model in the tier table, or None if it isn't one.
+
+    None means "unknown footprint", which every consumer treats as "no memory constraint" —
+    the behaviour from before tiers carried this figure, and the right answer for a model
+    injected via NEURON_MODEL_TIERS with no measurement behind it.
+    """
+    for t in TIERS:
+        if t.get("model_id") == model_id and t.get("gb_per_layer"):
+            return float(t["gb_per_layer"])
+    return None
+
+
+def partition_shortfall(nodes, tier):
+    """Layers of `tier`'s model the online+eligible nodes cannot hold BETWEEN THEM.
+
+    This is the per-node question `_meets` cannot ask. `_meets` sums RAM across the network;
+    a pipeline stage lives on ONE machine, and a machine that cannot hold its slice does not
+    run slowly, it gets OOM-killed.
+    """
+    live = [n for n in nodes if n.get("status") == "online" and n.get("eligible")]
+    return balancer.capacity_shortfall(live, int(tier.get("layers") or 0),
+                                       tier.get("gb_per_layer"))
+
+
+def placeable(nodes, tier):
+    """Can this tier's model actually be laid out across these nodes, one slice per machine?"""
+    return partition_shortfall(nodes, tier) == 0
+
+
+def feasible_tier_index(cap, margin=0.0, nodes=None):
+    """Highest tier index whose requirements `cap` meets. -1 if even the floor fails.
+
+    Pass `nodes` to require a real per-node partition as well as the aggregate numbers. Callers
+    that only have a capacity summary keep the old aggregate-only answer.
+    """
     best = -1
     for i, t in enumerate(TIERS):
-        if _meets(cap, t, margin):
+        if _meets(cap, t, margin) and (nodes is None or placeable(nodes, t)):
             best = i
     return best
 
 
-def best_feasible(cap):
+def best_feasible(cap, nodes=None):
     """The biggest model this capacity can serve right now (no hysteresis). Or None."""
-    i = feasible_tier_index(cap, 0.0)
+    i = feasible_tier_index(cap, 0.0, nodes)
     return TIERS[i] if i >= 0 else None
 
 
@@ -149,20 +213,28 @@ class TierController:
         cap = network_capacity(nodes)
 
         # ---- demotion: is the CURRENT tier still feasible (no margin)? ---------
-        if _meets(cap, TIERS[self.index], 0.0):
+        # Feasible now means BOTH: the aggregate numbers, and a per-node partition that
+        # actually fits. A network whose shape has drifted (the big machine left, four small
+        # ones joined) can still clear "3 nodes · 20 GB" while no node can hold a slice —
+        # and it is the demotion that fixes that, by pointing everyone at a smaller model.
+        if _meets(cap, TIERS[self.index], 0.0) and placeable(nodes, TIERS[self.index]):
             self._infeasible_since = None
         else:
             if self._infeasible_since is None:
                 self._infeasible_since = now
             if now - self._infeasible_since >= DEMOTE_GRACE_S:
-                target = feasible_tier_index(cap, 0.0)   # biggest we can back right now
+                # biggest we can back right now -- and actually place
+                target = feasible_tier_index(cap, 0.0, nodes)
                 self.index = target if target >= 0 else 0
                 self._infeasible_since = None
                 self._promote_candidate = None
                 return self.active()
 
         # ---- promotion: a bigger tier feasible-with-margin, sustained ----------
-        cand = feasible_tier_index(cap, PROMOTE_MARGIN)
+        # `nodes` is what stops the network qualifying for a model it cannot lay out. The
+        # migration controller refuses such a target anyway, but a tier that is qualified and
+        # permanently unreachable is a lie told on the dashboard and in every growth prompt.
+        cand = feasible_tier_index(cap, PROMOTE_MARGIN, nodes)
         if cand > self.index:
             if self._promote_candidate is None or self._promote_candidate[0] != cand:
                 self._promote_candidate = (cand, now)          # start the dwell clock
@@ -194,9 +266,12 @@ def snapshot(nodes, controller, now=None):
         "capacity": cap,
         "next_tier": next_tier_gap(cap, controller.index),
         "tiers": [
+            # `feasible` is the aggregate gate; `placeable` is whether any one machine can hold
+            # a slice. feasible-but-not-placeable is a real state ("you have the RAM, but not
+            # on any single node") and the reason a qualified promotion can sit still.
             {"name": t["name"], "model_id": t["model_id"], "layers": t["layers"],
              "min_nodes": t["min_nodes"], "min_ram_gb": t["min_ram_gb"],
-             "feasible": _meets(cap, t, 0.0)}
+             "feasible": _meets(cap, t, 0.0), "placeable": placeable(nodes, t)}
             for t in TIERS
         ],
     }

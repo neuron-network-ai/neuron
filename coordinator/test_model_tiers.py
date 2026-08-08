@@ -185,6 +185,136 @@ def test_snapshot_shape():
 
 
 # --------------------------------------------------------------------------- #
+# per-node placement: aggregate RAM is not the same question as "does a slice fit"
+#
+# 2026-08-07, live: the network promoted itself to Qwen2.5-7B on "3 nodes · 20 GB" and the even
+# split handed 9-10 layers to machines with 8 GB of total RAM. Every number in this section is
+# derived from the tier table so a threshold change cannot leave a case asserting nothing --
+# the same trap `_below` and `test_next_tier_gap` above were written for.
+# --------------------------------------------------------------------------- #
+def mixed(rams, status="online", eligible=True):
+    """A population of nodes with the given TOTAL RAM.
+
+    RAM figures here are what a real node needs, i.e. against the fp32 footprint
+    `balancer.effective_gb_per_layer` charges -- twice the tier table's fp16 column. Several
+    fixtures below grew when that correction landed; the numbers changed, the gating logic
+    under test did not.
+    """
+    return [{"node_id": f"m{i}", "status": status, "eligible": eligible, "ram_gb": r}
+            for i, r in enumerate(rams)]
+
+
+def test_gb_per_layer_for_known_and_unknown_models():
+    assert mt.gb_per_layer_for(mt.TIERS[1]["model_id"]) == mt.TIERS[1]["gb_per_layer"]
+    assert mt.gb_per_layer_for("someone/not-a-tier") is None      # -> no memory constraint
+
+
+def test_partition_shortfall_is_a_different_question_from_aggregate_ram():
+    """Six 5 GB machines clear the 7b tier's aggregate bar twice over and cannot host it."""
+    tier = mt.TIERS[1]
+    pop = mixed([5.0] * 6)                                        # 6 nodes, 30 GB
+    assert mt._meets(mt.network_capacity(pop), tier), "fixture must PASS the aggregate gate"
+    assert mt.partition_shortfall(pop, tier) > 0                  # ...and fail the real one
+    assert mt.placeable(pop, tier) is False
+    assert mt.placeable(pop, mt.TIERS[0]) is True                 # the floor still fits
+
+
+def test_partition_shortfall_ignores_offline_and_ineligible_nodes():
+    tier = mt.TIERS[1]
+    big = mixed([64.0], status="offline") + mixed([64.0], eligible=False)
+    assert mt.partition_shortfall(mixed([4.0] * 2) + big, tier) > 0
+    assert mt.placeable(mixed([4.0] * 2) + mixed([64.0]), tier) is True
+
+
+def test_a_tier_with_no_measured_footprint_is_always_placeable():
+    """NEURON_MODEL_TIERS can inject a tier with no gb_per_layer. An unknown footprint is not
+    grounds to refuse to serve -- it is the same "no constraint" the code had before it knew
+    anything about memory."""
+    unknown = dict(mt.TIERS[1]); unknown.pop("gb_per_layer")
+    assert mt.placeable(mixed([2.0] * 2), unknown) is True
+
+
+def test_no_promote_when_no_node_can_hold_a_slice():
+    """The gate this section exists for. Sustained far past the dwell, so the ONLY thing
+    holding the promotion back is that the model cannot be laid out."""
+    c = mt.TierController(start_index=0)
+    tier = mt.TIERS[1]
+    pop = mixed([5.0] * 6)
+    cap = mt.network_capacity(pop)
+    assert mt._meets(cap, tier, mt.PROMOTE_MARGIN), "fixture must clear the margin, or this " \
+                                                    "test passes for the wrong reason"
+    for t in range(0, 2000, 60):
+        c.update(pop, now=t)
+    assert c.active()["name"] == mt.TIERS[0]["name"]
+    # and it is reported as such rather than silently withheld
+    snap = mt.snapshot(pop, c)
+    assert snap["tiers"][1]["feasible"] is True and snap["tiers"][1]["placeable"] is False
+
+
+def test_promote_still_happens_when_the_partition_fits():
+    """Control for the case above: same tier, machines that can actually hold a slice.
+
+    Was [8, 8, 12, 16] GB, which holds 4+4+7+10 = 25 of the 28 layers a 7B needs at the
+    real fp32 footprint -- so the "partition fits" control did not fit. Sized to machines
+    that genuinely do."""
+    c = mt.TierController(start_index=0)
+    pop = mixed([13.0, 13.0, 21.0, 27.0])
+    assert mt.placeable(pop, mt.TIERS[1]) is True
+    c.update(pop, now=0)
+    assert c.update(pop, now=mt.PROMOTE_DWELL_S)["name"] == mt.TIERS[1]["name"]
+
+
+def test_demotes_when_the_shape_stops_fitting_even_though_the_ram_is_there():
+    """A network can keep its aggregate RAM and lose the ability to place a slice -- the big
+    machine leaves, several small ones join. Demotion is what fixes that, by pointing everyone
+    at a model they can hold."""
+    c = _at_7b()
+    reshaped = mixed([5.0] * 6)
+    assert mt._meets(mt.network_capacity(reshaped), mt.TIERS[1]), \
+        "fixture must still PASS the aggregate gate, or this tests the old path"
+    c.update(reshaped, now=400)                       # unplaceable from here
+    c.update(reshaped, now=699)                       # 299s < grace -> hold, no flapping
+    assert c.active()["name"] == mt.TIERS[1]["name"]
+    c.update(reshaped, now=700)                       # 300s >= grace -> demote
+    assert c.active()["name"] == mt.TIERS[0]["name"]
+
+
+def test_demotion_lands_on_a_tier_that_can_actually_be_placed():
+    """Thirty 8 GB machines can AFFORD the 72B outright -- 240 GB against a 180 GB bar -- and
+    cannot hold 80 layers of it between them (2 layers each, 60 of 80). Demote to the biggest
+    tier that fits on real machines, not the biggest the aggregate allows."""
+    c = mt.TierController(start_index=2)              # 70b
+    pop = mixed([8.0] * 30)
+    assert mt._meets(mt.network_capacity(pop), mt.TIERS[2]), "fixture must afford the top tier"
+    assert mt.placeable(pop, mt.TIERS[2]) is False
+    c.update(pop, now=0)                              # unplaceable -> grace clock starts
+    c.update(pop, now=mt.DEMOTE_GRACE_S)
+    assert c.active()["name"] == mt.TIERS[1]["name"]
+    assert mt.placeable(pop, c.active()) is True
+
+
+def test_falls_back_to_the_floor_when_nothing_is_placeable():
+    """Documented edge: there is nowhere below the floor to go, so the floor is where a network
+    that can hold nothing lands. Serving badly beats declaring the network non-existent -- and
+    the migration controller refuses the move separately (test_migration.py)."""
+    c = _at_7b()
+    tiny = mixed([3.5] * 4)                           # can barely hold anything at all
+    assert not any(mt.placeable(tiny, t) for t in mt.TIERS)
+    c.update(tiny, now=400)
+    c.update(tiny, now=400 + mt.DEMOTE_GRACE_S)
+    assert c.active()["name"] == mt.TIERS[0]["name"]
+
+
+def test_snapshot_separates_feasible_from_placeable():
+    c = mt.TierController(start_index=0)
+    pop = mixed([13.0, 13.0, 21.0, 27.0])
+    snap = mt.snapshot(pop, c, now=0)
+    assert snap["tiers"][0]["placeable"] is True and snap["tiers"][1]["placeable"] is True
+    assert snap["tiers"][2]["placeable"] is False     # 80 layers of a 72B, on four machines
+    assert all(("feasible" in t and "placeable" in t) for t in snap["tiers"])
+
+
+# --------------------------------------------------------------------------- #
 def _run():
     fns = [v for k, v in sorted(globals().items())
            if k.startswith("test_") and callable(v)]

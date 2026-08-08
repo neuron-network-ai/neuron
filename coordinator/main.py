@@ -19,7 +19,8 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from coordinator import (auth, balancer, config, genesis, ledger, migration,
-                         model_registry, model_tiers, models, nodelogs, payout, router)
+                         model_registry, model_tiers, models, nodelogs, payout, router,
+                         theme)
 import relay_auth
 
 
@@ -32,6 +33,10 @@ class NodeLogBody(BaseModel):
 
 class LogRequestBody(BaseModel):
     nodes: list[str] = []       # empty = every node currently known
+
+
+class SetLayersBody(BaseModel):
+    layers: dict[str, list[int]] = {}    # {node_id: [layer_start, layer_end]}, inclusive
 
 
 class RegisterBody(BaseModel):
@@ -49,8 +54,9 @@ class RegisterBody(BaseModel):
                                         # forms the coarse hardware signature a sybil signal
                                         # groups on. Optional: older agents omit it.
     has_gpu: bool = False               # NVIDIA GPU detected (torch.cuda, else nvidia-smi).
-    gpu_vram_gb: float | None = None    # total VRAM; lets the balancer size a slice against
-                                        # the GPU's memory instead of only system RAM.
+    gpu_vram_gb: float | None = None    # total VRAM. Recorded, and clamped by
+                                        # `balancer.sane_vram_gb` below; it does NOT size a
+                                        # slice while `balancer.GPU_EXECUTION` is off.
     gpu_name: str | None = None         # e.g. "NVIDIA GeForce RTX 4070". Operator-only in
                                         # /node/list — a card model is fingerprinting detail,
                                         # like `platform`.
@@ -212,14 +218,19 @@ async def health_loop():
                 tier = _tier_controller.update(models.list_nodes(), time.time())
                 if tier["name"] != prev:
                     print(f"[tier] network now qualifies for {prev} -> {tier['name']}")
-            # advance any model migration toward the qualified target tier
-            target = {"model_id": tier["model_id"], "layers": tier["layers"]}
+            # advance any model migration toward the qualified target tier. gb_per_layer rides
+            # along so the migration can refuse a target no single node could hold — the tier
+            # gate qualifies on AGGREGATE RAM, which is not the same question.
+            target = {"model_id": tier["model_id"], "layers": tier["layers"],
+                      "gb_per_layer": tier.get("gb_per_layer")}
+            serving = serving_model()
+            serving["gb_per_layer"] = model_tiers.gb_per_layer_for(serving["model_id"])
             with _migration_lock:
                 # self-heal first: closes a coverage gap in the CURRENTLY serving model using
                 # idle surplus nodes, only while no real tier migration is in flight (it's a
                 # no-op the instant update() below starts preparing one).
                 healing_before = _migration.heal_status()["healing"]
-                heal = _migration.self_heal(models.list_nodes(), serving_model(), time.time(),
+                heal = _migration.self_heal(models.list_nodes(), serving, time.time(),
                                             apply_gap_heal)
                 healing_after = heal["healing"]
                 if healing_after and not healing_before:
@@ -227,16 +238,27 @@ async def health_loop():
                             "idle to fill it" if heal["mode"] == "resplit"
                             else "reassigning idle node(s)")
                     print(f"[gap-heal] coverage gap detected, {what} "
-                          f"(serving={serving_model()['model_id']})")
+                          f"(serving={serving['model_id']})")
+                    if heal["capacity_shortfall"]:
+                        print(f"[gap-heal] WARNING: the remaining node(s) cannot hold "
+                              f"{serving['model_id']} — {heal['capacity_shortfall']} layer(s) "
+                              f"over capacity; the tier controller should demote")
                 elif healing_before and not healing_after:
-                    print(f"[gap-heal] coverage restored (serving={serving_model()['model_id']})")
+                    print(f"[gap-heal] coverage restored (serving={serving['model_id']})")
 
                 before = _migration.phase
-                _migration.update(models.list_nodes(), target, serving_model(),
+                blocked_before = _migration.blocked
+                _migration.update(models.list_nodes(), target, serving,
                                   time.time(), apply_migration_cutover)
                 if _migration.phase != before:
                     print(f"[migration] {before} -> {_migration.phase} "
                           f"(serving={serving_model()['model_id']})")
+                blocked = _migration.blocked
+                if blocked and blocked != blocked_before:
+                    print(f"[migration] NOT migrating to {blocked['model_id']}: no per-node "
+                          f"split fits — {blocked['capacity_shortfall']} of "
+                          f"{blocked['layers']} layer(s) have nowhere to live. Still serving "
+                          f"{serving['model_id']}.")
         except Exception as e:  # never let the loop die
             print(f"[health] sweep error: {e}")
 
@@ -360,11 +382,21 @@ def register(body: RegisterBody, x_register_secret: str = Header(default=None),
                        "data_port": config.RELAY_DATA_PORT, "public_port": relay_port,
                        "ticket": ticket}
     known = models.get_node(body.node_id) is not None
+    # `gpu_vram_gb` is the one field in this body that becomes a MEMORY BUDGET -- it is what
+    # `balancer.max_layers_for` would size a slice from -- and under open join this endpoint
+    # takes no credential. Bound it here, at the edge, rather than trusting every later reader.
+    #
+    # Clamped to None, never rejected. A 422 over a cosmetic hardware field would lock a
+    # volunteer out of the network entirely, which is the failure class of [P24]: the machine
+    # is fine, the operator can see nothing wrong, and it simply never joins. An unbelievable
+    # VRAM figure costs nothing if it is dropped -- the node is then sized from its system RAM,
+    # like every node is today.
+    vram = balancer.sane_vram_gb(body.gpu_vram_gb) if body.has_gpu else None
     fingerprint = models.register_node(
         body.node_id, tailscale_ip, port, body.layer_start,
         body.layer_end, body.cores, body.ram_gb, token,
         ms_per_layer=body.ms_per_layer, head_ms=body.head_ms, trusted=trusted,
-        platform=body.platform, has_gpu=body.has_gpu, gpu_vram_gb=body.gpu_vram_gb,
+        platform=body.platform, has_gpu=body.has_gpu, gpu_vram_gb=vram,
         gpu_name=body.gpu_name)
     # Sybil SIGNAL, never a block. One machine registering several node_ids in a day is what a
     # sybil looks like -- and also what a legitimate operator running two nodes on a spare PC
@@ -481,17 +513,24 @@ def unregister(node_id: str, x_node_token: str = Header(default=None),
 # Part 2 — Health check
 # --------------------------------------------------------------------------- #
 @app.get("/node/{node_id}/ping")
-def ping(node_id: str, _node=Depends(require_node_token)):
+def ping(node_id: str, node=Depends(require_node_token)):
     """Heartbeat. Carries `coordinator_url` because this is the one call every live node makes
     continuously — it is how a change of address reaches the whole network within a heartbeat
-    instead of never."""
+    instead of never.
+
+    It carries `standing` for the same reason. A node learned its standing exactly once, in the
+    reply to its registration, and never again — so a node that joined probationary had no way
+    to know it was still excluded from routing, and no way to know when it was promoted. [P24]:
+    one sat that way for three days logging `heartbeat ok — active`. The fact was here the
+    whole time; nothing was sending it."""
     models.touch_node(node_id)
     return {"status": "alive", "node_id": node_id, "last_seen": time.time(),
             "coordinator_url": config.PUBLIC_URL,
-            # And `want_logs`: the heartbeat is the only channel that reaches a node behind
-            # NAT, so anything the coordinator needs to ASK a node to do has to ride on it.
-            # Here it asks for a tail of agent.log -- see coordinator/nodelogs.py for why
-            # that is worth having and what is stripped from it.
+            "standing": node.get("standing", "trusted"),
+            # And `want_logs` for a third variation on the same theme: the heartbeat is the only
+            # channel that reaches a node behind NAT, so anything the coordinator needs to ASK a
+            # node to do has to ride on it. Here it asks for a tail of agent.log — see
+            # coordinator/nodelogs.py for why that is worth having and what is stripped from it.
             "want_logs": nodelogs.wanted(node_id)}
 
 
@@ -849,14 +888,40 @@ def _balanced_plan():
     # so the balancer never assigns layers to a node routing would skip (S12).
     nodes = [n for n in models.online_nodes() if n.get("ms_per_layer") and n.get("eligible")]
     # the driver (carries lm_head, head_ms > 0) goes first, then the rest
-    nodes.sort(key=lambda n: (0 if (n.get("head_ms") or 0) > 0 else 1, n["layer_start"]))
+    nodes.sort(key=lambda n: (0 if (n.get("head_ms") or 0) > 0 else 1, n["layer_start"],
+                              n["node_id"]))
+    # Only PIPELINE_STAGES nodes become stages; the rest replicate one below. The balancer gives
+    # every node it is handed its own contiguous slice, so passing it the whole roster produces a
+    # chain of whatever length the roster happens to be -- and the driver routes exactly three
+    # (config.PIPELINE_STAGES). Handing out a 4-stage chain is the same failure as the 1-stage
+    # one that broke chat on 2026-08-07, just from the other direction.
+    extra = nodes[config.PIPELINE_STAGES:]
+    nodes = nodes[:config.PIPELINE_STAGES]
     bnodes = [{"node_id": n["node_id"], "ms_per_layer": n["ms_per_layer"],
                "head_ms": n.get("head_ms") or 0.0,
                # GPU is a tie-break in the balancer, never a speed multiplier — a node's speed
                # is the ms_per_layer it actually measured. See coordinator/balancer.py.
-               "has_gpu": bool(n.get("has_gpu")), "gpu_vram_gb": n.get("gpu_vram_gb")}
+               "has_gpu": bool(n.get("has_gpu")), "gpu_vram_gb": n.get("gpu_vram_gb"),
+               # Memory, so the balancer's hard cap is live here too. It has taken
+               # `gb_per_layer` since Session 14 and no caller ever passed it, and no caller
+               # passed RAM either — so the cap that exists to stop an OOM has never once been
+               # applied to a real plan. /network/rebalance applies these ranges for real.
+               "ram_gb": n.get("ram_gb")}
               for n in nodes]
-    return balancer.plan(bnodes, serving_model()["layers"])
+    sm = serving_model()
+    p = balancer.plan(bnodes, sm["layers"], model_tiers.gb_per_layer_for(sm["model_id"]))
+    # Replicas go to the thinnest stage. A capped-out machine must still be given work: idle
+    # earns its operator nothing and adds nothing, and replicas are how extra machines turn into
+    # throughput rather than a deeper pipeline ([P16]).
+    stages = [{"layer_start": a["layer_start"], "layer_end": a["layer_end"]}
+              for a in p.get("assignment", [])]
+    if stages and extra:
+        depth = [1] * len(stages)
+        for n in extra:
+            i = min(range(len(stages)), key=lambda k: (depth[k], k))
+            depth[i] += 1
+            p["assignment"].append({"node_id": n["node_id"], "replica": True, **stages[i]})
+    return p
 
 
 @app.get("/network/plan")
@@ -880,6 +945,61 @@ def network_rebalance(_=Depends(require_register_secret)):
     extra = {k: p[k] for k in ("balanced_bottleneck_ms", "equal_split_bottleneck_ms",
                                "speedup_vs_equal") if k in p}
     return {"status": "rebalanced", "assignments": changed, **extra}
+
+
+@app.post("/network/layers")
+def network_set_layers(body: SetLayersBody, _=Depends(require_register_secret)):
+    """Set an EXPLICIT layer range per node, overriding every automatic split.
+
+    The balancer optimises for stage time and will happily produce a split no CLIENT can use:
+    the driver holds a fixed shard (`neuron_driver.S1`, layers 0..S1-1) and rejects any chain
+    whose first stage is not exactly that (node_a.py). So a speed-optimal 0-12 / 13-27 split is
+    unroutable by a driver built for 0-9, and the only ways out were to re-download the driver's
+    shard or to keep re-rolling the balancer until it happened to agree. Neither is a plan.
+
+    Validated as a WHOLE before anything is written: the ranges must be contiguous, non
+    overlapping, start at 0 and end at the serving model's last layer. A partial application
+    would leave the network in a state no chain can be built from, which is the failure this
+    endpoint exists to end rather than to cause.
+
+    Nodes not named are left alone -- they keep whatever range they had, which is how a machine
+    stays a replica of a stage while the stages themselves are pinned.
+    """
+    total = serving_model()["layers"]
+    known = {n["node_id"] for n in models.list_nodes()}
+    spans = []
+    for node_id, span in (body.layers or {}).items():
+        if node_id not in known:
+            raise HTTPException(status_code=404, detail=f"no such node: {node_id}")
+        if not isinstance(span, list) or len(span) != 2:
+            raise HTTPException(status_code=400,
+                                detail=f"{node_id}: expected [start, end], got {span!r}")
+        lo, hi = int(span[0]), int(span[1])
+        if not 0 <= lo <= hi < total:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{node_id}: [{lo}, {hi}] is not inside 0..{total - 1}")
+        spans.append((lo, hi, node_id))
+
+    # Contiguity is checked over the DISTINCT ranges, so two nodes may share one range (they are
+    # replicas of that stage) without that reading as an overlap.
+    stages = sorted({(lo, hi) for lo, hi, _ in spans})
+    if stages:
+        if stages[0][0] != 0 or stages[-1][1] != total - 1:
+            raise HTTPException(
+                status_code=400,
+                detail=f"the ranges given cover {stages[0][0]}..{stages[-1][1]}, "
+                       f"not the whole model 0..{total - 1}")
+        for (a_lo, a_hi), (b_lo, b_hi) in zip(stages, stages[1:]):
+            if b_lo != a_hi + 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"gap or overlap between {a_lo}-{a_hi} and {b_lo}-{b_hi}")
+
+    for lo, hi, node_id in spans:
+        models.update_layers(node_id, lo, hi)
+    return {"status": "set", "stages": [list(s) for s in stages],
+            "assignments": [{"node_id": n, "layers": [lo, hi]} for lo, hi, n in spans]}
 
 
 # --------------------------------------------------------------------------- #
@@ -998,8 +1118,37 @@ def _network_summary():
         "probationary_nodes": len(probationary),
         "total_layers_covered": total_covered,
         "total_layers": sm_layers,
+        # WHICH layers are missing, as [start, end] ranges. "21/28 covered" tells an operator
+        # the chain is broken; this tells them where to put a node to fix it, and it is the
+        # same fact the dashboard's coverage strip and the doctor's failure message use.
+        "uncovered_layers": _ranges(sorted(set(range(sm_layers)) - covered)),
         "network_healthy": total_covered == sm_layers,
     }, nodes
+
+
+def _ago(ts):
+    """"12s ago" / "4m ago" / "3h ago". A raw epoch on a dashboard is not information."""
+    if not ts:
+        return "never"
+    d = max(0, int(time.time() - ts))
+    if d < 60:
+        return f"{d}s ago"
+    if d < 3600:
+        return f"{d // 60}m ago"
+    if d < 86400:
+        return f"{d // 3600}h ago"
+    return f"{d // 86400}d ago"
+
+
+def _ranges(values):
+    """[0,1,2,7,8] -> [[0,2],[7,8]]. Contiguous runs read as one gap, not five."""
+    out = []
+    for v in values:
+        if out and v == out[-1][1] + 1:
+            out[-1][1] = v
+        else:
+            out.append([v, v])
+    return out
 
 
 @app.get("/status")
@@ -1233,28 +1382,70 @@ def dashboard():
     # health only; each node sees its own earnings at /node/{id}/dashboard (token-gated).
 
     healthy = network["network_healthy"]
-    banner_color = "#137333" if healthy else "#c5221f"
-    banner_text = "HEALTHY" if healthy else "DEGRADED — chain incomplete"
+    banner_text = "HEALTHY — every layer has a node" if healthy else \
+        "DEGRADED — chain incomplete, no request can complete"
 
-    standing_colors = {"trusted": "#137333", "verified": "#1a73e8",
-                       "probationary": "#f9ab00", "flagged": "#c5221f"}
     rows = ""
     for n in nodes:
-        badge = "#137333" if n["status"] == "online" else "#c5221f"
         st = n.get("standing", "trusted")
-        sbadge = standing_colors.get(st, "#5f6368")
+        gpu = "<span class='tick'>✓</span>" if n.get("has_gpu") else "<span class='dash'>—</span>"
+        # Ms/layer is what the balancer solves the split from ([P7]); showing it makes an
+        # unbalanced network legible instead of something only /network/plan knows about.
+        ms = n.get("ms_per_layer")
+        speed = f"{ms:.1f}" if isinstance(ms, (int, float)) else "<span class='dash'>—</span>"
+        rep = n.get("reputation")
+        rep_txt = (f"{rep:.0%} <span style='color:#6b7280'>"
+                   f"({n.get('challenges_passed', 0)}/{n.get('challenges_passed', 0) + n.get('challenges_failed', 0)})</span>"
+                   if rep is not None else "<span class='dash'>no challenges yet</span>")
         rows += (
             f"<tr>"
-            f"<td>{n['node_id']}</td>"
-            f"<td>{n['layer_start']}–{n['layer_end']}</td>"
-            f"<td><span style='color:#fff;background:{badge};padding:2px 8px;"
-            f"border-radius:10px;font-size:12px'>{n['status']}</span></td>"
-            f"<td><span style='color:#fff;background:{sbadge};padding:2px 8px;"
-            f"border-radius:10px;font-size:12px'>{st}</span></td>"
-            f"<td>{n.get('cores','-')}</td>"
-            f"<td>{n.get('ram_gb','-')}</td>"
+            f"<td class='id'>{n['node_id']}</td>"
+            f"<td class='nw'>{n['layer_start']}–{n['layer_end']}</td>"
+            f"<td>{theme.pill(n['status'])}</td>"
+            f"<td>{theme.pill(st)}</td>"
+            f"<td>{n.get('cores', '-')}</td>"
+            f"<td>{n.get('ram_gb', '-')}</td>"
+            f"<td>{gpu}</td>"
+            f"<td>{speed}</td>"
+            f"<td>{rep_txt}</td>"
+            f"<td style='color:#6b7280'>{_ago(n.get('last_seen'))}</td>"
             f"</tr>"
         )
+
+    # Coverage strip: which layers actually have an eligible node behind them. The number
+    # alone ("21/28") never said where the hole was, so the one question it raises -- where do
+    # I put a node -- could only be answered by reading /node/list by hand.
+    gaps = {i for lo, hi in network["uncovered_layers"] for i in range(lo, hi + 1)}
+    cells = "".join(f"<i class='gap' title='layer {i}: no node'>{i}</i>" if i in gaps
+                    else f"<i title='layer {i}: covered'>{i}</i>"
+                    for i in range(network["total_layers"]))
+    if gaps:
+        missing = ", ".join(f"{lo}–{hi}" if lo != hi else f"{lo}"
+                            for lo, hi in network["uncovered_layers"])
+        cov_key = (f"<span style='color:#b91c1c;font-weight:600'>Missing: layers {missing}</span>"
+                   f" — a node placed here makes the network able to serve again. "
+                   f"Joining nodes are auto-placed into the gap.")
+    else:
+        cov_key = ("Every layer of the serving model has at least one eligible node behind it. "
+                   "Layers with more than one node are served by whichever replica is free.")
+
+    # Aggregate capacity, from the nodes that can actually take traffic. Per-node hardware is
+    # already in the table; the sum is what tells a visitor whether this is a demo or a network.
+    usable = [n for n in nodes if n["status"] == "online" and n.get("eligible")]
+    cap = (f"{sum(n.get('cores') or 0 for n in usable)} cores &middot; "
+           f"{sum(n.get('ram_gb') or 0 for n in usable)} GB RAM &middot; "
+           f"{sum(1 for n in usable if n.get('has_gpu'))} GPU(s) "
+           f"across {len(usable)} eligible node(s)")
+    waiting = network["probationary_nodes"]
+    waiting_line = ""
+    if waiting:
+        # [P24]: a node can be online, healthy and excluded from every chain. That fact only
+        # existed in the standing column of one table row; here it is stated.
+        waiting_line = (
+            f"<p class='callout'><b>{waiting} node(s) awaiting verification</b> — they are "
+            f"online but serve no requests and earn no NRN until proof-of-compute confirms "
+            f"them. Verification is automatic; a node stuck here for hours means the "
+            f"network's verifiers are not running.</p>")
 
     # Model tier (auto-model-tiering): the biggest model this network can back, plus the
     # ladder and the "grow to unlock the next model" prompt. Read-only here (now=None) —
@@ -1263,18 +1454,19 @@ def dashboard():
     serv = serving_model()
     serv_name = next((t["name"] for t in tier["tiers"] if t["model_id"] == serv["model_id"]),
                      serv["model_id"])
-    # serving = what nodes run now; ready = capacity qualifies but not yet migrated; locked = not enough.
-    tstate_colors = {"serving": "#137333", "ready": "#1a73e8", "locked": "#9aa0a6"}
+    # serving = what nodes run now; ready = capacity qualifies but not yet migrated; locked = not
+    # enough; won't fit = the network HAS the RAM but not on any single machine, so no per-node
+    # split of that model exists and the migration will (correctly) never start. Calling that
+    # "ready" was the dashboard promising an upgrade that could not happen.
     ladder = ""
     for t in tier["tiers"]:
         tstate = ("serving" if t["name"] == serv_name
+                  else "won't fit" if t["feasible"] and not t["placeable"]
                   else "ready" if t["feasible"] else "locked")
-        tc = tstate_colors[tstate]
         ladder += (
-            f"<tr><td>{t['name']}</td><td style='font-size:13px'>{t['model_id']}</td>"
+            f"<tr><td><b>{t['name']}</b></td><td class='id'>{t['model_id']}</td>"
             f"<td>{t['min_nodes']} nodes · {t['min_ram_gb']:.0f} GB</td>"
-            f"<td><span style='color:#fff;background:{tc};padding:2px 8px;"
-            f"border-radius:10px;font-size:12px'>{tstate}</span></td></tr>"
+            f"<td>{theme.pill(tstate)}</td></tr>"
         )
     gap = tier["next_tier"]
     gap_line = ""
@@ -1282,7 +1474,7 @@ def dashboard():
         need = f"+{gap['need_nodes']} node(s)"
         if gap["need_ram_gb"] > 0:
             need += f" and +{gap['need_ram_gb']:.0f} GB RAM"
-        gap_line = (f"<p style='color:#5f6368;font-size:14px'>Grow the network by "
+        gap_line = (f"<p class='callout'>Grow the network by "
                     f"<b>{need}</b> and it auto-upgrades to the <b>{gap['name']}</b> model.</p>")
 
     # Migration status: was invisible before (only the raw /network/migration JSON showed it,
@@ -1292,58 +1484,66 @@ def dashboard():
     migration_line = ""
     if mstatus["phase"] == "preparing":
         migration_line = (
-            f"<p style='color:#1a73e8;font-size:14px'>Migrating to "
+            f"<p class='callout'>Migrating to "
             f"<b>{mstatus['target']['model_id']}</b> — "
             f"{mstatus['ready_count']}/{mstatus['plan_size']} node(s) ready "
             f"(still serving <b>{serv_name}</b> until cutover).</p>")
+    elif mstatus["blocked"]:
+        # A qualified upgrade that is not happening needs a reason on the page, or the network
+        # looks stuck. It isn't stuck — it is declining to OOM-kill the machines it runs on.
+        b = mstatus["blocked"]
+        migration_line = (
+            f"<p class='callout'>Not upgrading to <b>{b['model_id']}</b>: the network has the "
+            f"total RAM, but no single node can hold its share — {b['capacity_shortfall']} of "
+            f"{b['layers']} layer(s) have nowhere to live. Bigger machines (not just more of "
+            f"them) unlock it. Still serving <b>{serv_name}</b>.</p>")
 
-    return f"""<!doctype html><html><head><meta charset="utf-8">
-<meta http-equiv="refresh" content="5">
-<title>NEURON Coordinator</title>
-<style>
- body{{font-family:system-ui,Arial,sans-serif;margin:2rem;color:#202124}}
- h1{{margin:0 0 .25rem}} .sub{{color:#5f6368;margin-bottom:1.5rem}}
- .banner{{color:#fff;background:{banner_color};padding:.6rem 1rem;border-radius:8px;
-   font-weight:600;display:inline-block;margin-bottom:1.25rem}}
- table{{border-collapse:collapse;width:100%;max-width:920px}}
- th,td{{border:1px solid #dadce0;padding:.5rem .7rem;text-align:left;font-size:14px}}
- th{{background:#f1f3f4}}
- .cards{{display:flex;gap:1rem;margin:1.25rem 0}}
- .card{{border:1px solid #dadce0;border-radius:8px;padding:.8rem 1.2rem;min-width:150px}}
- .card .n{{font-size:1.7rem;font-weight:700}} .card .l{{color:#5f6368;font-size:13px}}
-</style></head><body>
-<h1>NEURON Coordinator</h1>
-<div class="sub">Network of Existing Utilised Resources — Open Nodes · auto-refresh 5s</div>
-<div class="banner">{banner_text}</div>
-<div class="cards">
-  <div class="card" style="border-color:#137333"><div class="n">{serv_name}</div>
-    <div class="l">serving now</div></div>
-  <div class="card"><div class="n">{network['online_nodes']}/{network['total_nodes']}</div>
-    <div class="l">nodes online</div></div>
-  <div class="card"><div class="n">{network['total_layers_covered']}/{network['total_layers']}</div>
+    body = f"""
+<h1>Live network</h1>
+<div class="sub">Network of Existing Utilised Resources — open nodes ·
+  serving <b>{serv['model_id']}</b> · agent v{config.AGENT_VERSION} · auto-refresh 5s</div>
+{theme.banner(healthy, banner_text)}
+<div class="stats">
+  <div class="stat"><div class="n">{serv_name}</div><div class="l">serving now</div></div>
+  <div class="stat"><div class="n">{network['eligible_nodes']}/{network['online_nodes']}</div>
+    <div class="l">nodes serving / online</div></div>
+  <div class="stat"><div class="n">{network['total_layers_covered']}/{network['total_layers']}</div>
     <div class="l">layers covered</div></div>
-  <div class="card"><div class="n">{stats['total_requests_served']}</div>
+  <div class="stat"><div class="n">{stats['total_requests_served']}</div>
     <div class="l">requests served</div></div>
-  <div class="card"><div class="n">{round(stats['total_nrn_distributed'],2)}</div>
+  <div class="stat"><div class="n">{round(stats['total_nrn_distributed'], 2)}</div>
     <div class="l">NRN distributed</div></div>
 </div>
-<h2 style="font-size:1.05rem;margin:1.5rem 0 .5rem">Model tier — scales with the network</h2>
-<table style="max-width:920px">
+
+<h2>Layer coverage — every layer needs a node</h2>
+<div class="panel" style="padding:1.1rem">
+  <div class="cov">{cells}</div>
+  <div class="cov-key">{cov_key}</div>
+</div>
+
+<h2>Model tier — scales with the network</h2>
+<div class="panel"><div class="table-wrap"><table>
   <tr><th>tier</th><th>model</th><th>needs</th><th>state</th></tr>
   {ladder}
-</table>
+</table></div></div>
 {gap_line}
 {migration_line}
-<h2 style="font-size:1.05rem;margin:1.5rem 0 .5rem">Nodes</h2>
-<table>
+
+<h2>Nodes — {cap}</h2>
+<div class="panel"><div class="table-wrap"><table>
   <tr><th>node</th><th>layers</th><th>status</th><th>standing</th><th>cores</th>
-      <th>RAM GB</th></tr>
+      <th>RAM GB</th><th>GPU</th><th>ms/layer</th><th>proof-of-compute</th><th>last seen</th></tr>
   {rows}
-</table>
-<p style="color:#5f6368;font-size:13px;margin-top:1rem">
-  Earnings and node addresses are private: each node operator sees their own numbers in the
-  NEURON app (tray &rarr; My Dashboard) — authenticated with that node's own token.</p>
-</body></html>"""
+</table></div></div>
+{waiting_line}
+
+<div class="note">
+  <strong>What is not on this page.</strong> Earnings and node addresses are private — each
+  operator sees their own numbers in the NEURON app (tray &rarr; My Dashboard), authenticated
+  with that node's own token. {stats['total_tokens_generated']:,} tokens have been generated
+  across {stats['total_requests_served']} request(s). NRN has no cash value.
+</div>"""
+    return theme.page("NEURON — live network", body)
 
 
 # --------------------------------------------------------------------------- #
@@ -1360,54 +1560,83 @@ def node_dashboard(node_id: str, token: str = None,
     network, _ = _network_summary()
     spent = round(led["total_earned"] - led["balance"], 4)   # real once wallet debits land (§11)
     st = node.get("standing", "trusted")
-    st_color = {"trusted": "#137333", "verified": "#1a73e8",
-                "probationary": "#f9ab00", "flagged": "#c5221f"}.get(st, "#5f6368")
     rep = node.get("reputation")
     bound = models.get_payout_address(node_id)
     payout_html = (
         f"<code>{bound['payout_address']}</code> "
-        f"<span style='color:#5f6368'>(where your NRN goes if the ledger moves on-chain)</span>"
+        f"<span style='color:#6b7280'>(where your NRN goes if the ledger moves on-chain)</span>"
         if bound else
-        "<span style='color:#5f6368'>not set — your NRN has nowhere to go on-chain. "
+        "<span style='color:#6b7280'>not set — your NRN has nowhere to go on-chain. "
         "The agent binds one automatically; see INSTALL.md.</span>")
-    return f"""<!doctype html><html><head><meta charset="utf-8">
-<meta http-equiv="refresh" content="5">
-<title>NEURON — {node_id}</title>
-<style>
- body{{font-family:system-ui,Arial,sans-serif;margin:2rem;color:#202124}}
- h1{{margin:0 0 .25rem}} .sub{{color:#5f6368;margin-bottom:1.5rem}}
- .badge{{color:#fff;background:{st_color};padding:2px 10px;border-radius:10px;font-size:13px}}
- .cards{{display:flex;gap:1rem;margin:1.25rem 0;flex-wrap:wrap}}
- .card{{border:1px solid #dadce0;border-radius:8px;padding:.8rem 1.2rem;min-width:150px}}
- .card .n{{font-size:1.7rem;font-weight:700}} .card .l{{color:#5f6368;font-size:13px}}
- table{{border-collapse:collapse;max-width:560px}}
- th,td{{border:1px solid #dadce0;padding:.45rem .7rem;text-align:left;font-size:14px}}
- th{{background:#f1f3f4;width:190px}}
- .note{{color:#5f6368;font-size:13px;margin-top:1.25rem}}
-</style></head><body>
-<h1>{node_id}</h1>
-<div class="sub">your node's private dashboard · auto-refresh 5s ·
-  <span class="badge">{st}</span></div>
-<div class="cards">
-  <div class="card"><div class="n">{round(led['balance'], 3)}</div><div class="l">NRN balance</div></div>
-  <div class="card"><div class="n">{round(led['total_earned'], 3)}</div><div class="l">total earned</div></div>
-  <div class="card"><div class="n">{spent}</div><div class="l">spent (usage)</div></div>
-  <div class="card"><div class="n">{led['requests_served']}</div><div class="l">requests served</div></div>
+    gpu_row = ""
+    if node.get("has_gpu"):
+        vram = node.get("gpu_vram_gb")
+        gpu_row = (f"<tr><td class='key'>GPU</td><td>{node.get('gpu_name') or 'detected'}"
+                   f"{f' · {vram} GB VRAM' if vram else ''} "
+                   f"<span style='color:#6b7280'>(reported as capacity; visible only to "
+                   f"you)</span></td></tr>")
+    ms = node.get("ms_per_layer")
+    # What this node's standing actually MEANS for it, rather than a bare word. A probationary
+    # operator's real question is "why is my balance not moving?" ([P24]).
+    if st == "probationary":
+        standing_note = ("<p class='callout'>Your node is <b>online but not yet serving</b>. "
+                         "It answers verification challenges only, and earns nothing, until "
+                         "proof-of-compute confirms it — normally within minutes. Nothing on "
+                         "your machine needs changing.</p>")
+    elif st == "flagged":
+        standing_note = ("<p class='callout'>Your node has <b>failed proof-of-compute</b> often "
+                         "enough to be excluded from routing. A wrong answer is usually a "
+                         "half-downloaded slice: stop the agent, delete the slice directory, "
+                         "and let it re-download.</p>")
+    else:
+        standing_note = ""
+
+    body = f"""
+<h1 style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:20px">{node_id}</h1>
+<div class="sub">your node's private dashboard · auto-refresh 5s · {theme.pill(st)}</div>
+<div class="stats">
+  <div class="stat"><div class="n">{round(led['balance'], 3)}</div>
+    <div class="l">NRN balance</div></div>
+  <div class="stat"><div class="n">{round(led['total_earned'], 3)}</div>
+    <div class="l">total earned</div></div>
+  <div class="stat"><div class="n">{spent}</div><div class="l">spent (usage)</div></div>
+  <div class="stat"><div class="n">{led['requests_served']}</div>
+    <div class="l">requests served</div></div>
 </div>
-<table>
-  <tr><th>status</th><td>{node['status']}</td></tr>
-  <tr><th>layers served</th><td>{node['layer_start']}–{node['layer_end']}</td></tr>
-  <tr><th>your endpoint</th><td>{node['tailscale_ip']}:{node['port']}
-      <span style="color:#5f6368">(how the network reaches you — private to this page)</span></td></tr>
-  <tr><th>reputation</th><td>{rep if rep is not None else 'no challenges yet'}
+{standing_note}
+
+<h2>This node</h2>
+<div class="panel"><div class="table-wrap"><table>
+  <tr><td class="key">status</td><td>{theme.pill(node['status'])}
+      <span style="color:#6b7280">last seen {_ago(node.get('last_seen'))}</span></td></tr>
+  <tr><td class="key">layers served</td><td>{node['layer_start']}–{node['layer_end']}
+      of {network['total_layers']}</td></tr>
+  <tr><td class="key">your endpoint</td><td><code>{node['tailscale_ip']}:{node['port']}</code>
+      <span style="color:#6b7280">(how the network reaches you — private to this page)</span></td></tr>
+  <tr><td class="key">hardware</td><td>{node.get('cores', '-')} cores ·
+      {node.get('ram_gb', '-')} GB RAM{f" · {ms:.1f} ms/layer measured" if isinstance(ms, (int, float)) else ""}</td></tr>
+  {gpu_row}
+  <tr><td class="key">proof-of-compute</td><td>{f'{rep:.0%}' if rep is not None else 'no challenges yet'}
       (passed {node.get('challenges_passed', 0)} / failed {node.get('challenges_failed', 0)})</td></tr>
-  <tr><th>network</th><td>{network['online_nodes']} nodes online ·
-      {network['total_layers_covered']}/{network['total_layers']} layers covered</td></tr>
-  <tr><th>payout address</th><td>{payout_html}</td></tr>
-</table>
-<p class="note">Keep this URL private — it contains your node token, which is what makes
-this page yours alone. "Spent" becomes live once wallet spending ships.</p>
-</body></html>"""
+  <tr><td class="key">payout address</td><td>{payout_html}</td></tr>
+</table></div></div>
+
+<h2>The network you are part of</h2>
+<div class="panel"><div class="table-wrap"><table>
+  <tr><td class="key">nodes</td><td>{network['eligible_nodes']} serving ·
+      {network['online_nodes']} online · {network['total_nodes']} registered</td></tr>
+  <tr><td class="key">coverage</td><td>{network['total_layers_covered']}/{network['total_layers']}
+      layers{'' if network['network_healthy'] else ' — the chain is incomplete, so no request can complete right now'}</td></tr>
+  <tr><td class="key">full picture</td><td><a href="/dashboard">the live network dashboard</a>
+      (no earnings, no addresses)</td></tr>
+</table></div></div>
+
+<div class="note"><strong>Keep this URL private.</strong> It contains your node token, which is
+what makes this page yours alone — anyone holding it can read these numbers. "Spent" becomes
+live once wallet spending ships.</div>"""
+    # nav_links=False + no_referrer: this URL carries the node's token, so no link on the page
+    # may hand it to a third party through the Referer header.
+    return theme.page(f"NEURON — {node_id}", body, nav_links=False, no_referrer=True)
 
 
 # --------------------------------------------------------------------------- #

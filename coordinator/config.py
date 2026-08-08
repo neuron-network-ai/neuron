@@ -68,6 +68,21 @@ COORDINATOR_LEDGER_ID = "__coordinator__"
 # `neuronnet.duckdns.org` rather than move off it, precisely so this never has to change.
 PUBLIC_URL = os.environ.get("NEURON_PUBLIC_URL", "https://neuronnet.duckdns.org")
 
+# How many STAGES a routed chain may have. Not a tuning knob -- it is the shape the inference
+# path is built out of: `node_a.py` embeds and runs layers 0..s1-1, `node_c.py` runs the middle
+# and forwards, `node_b.py` runs the tail plus the final norm. Three programs, three roles, and
+# `node_a.coord_get_chain` refuses anything else outright ("expected a 3-node chain, got N").
+#
+# Extra machines are meant to become REPLICAS of existing stages, not extra stages -- that is
+# exactly what router.suggest_placement does, and how added machines turn into throughput rather
+# than a deeper pipeline ([P16]). The planners have to honour the same rule: on 2026-08-07 a
+# migration split the model across however many nodes happened to be eligible, cut over onto a
+# ONE-stage plan, and left the network reporting 28/28 healthy while every chat failed on
+# "expected a 3-node chain, got 1".
+#
+# Raising this requires generalising the driver first, not just this number.
+PIPELINE_STAGES = int(os.environ.get("NEURON_PIPELINE_STAGES", "3"))
+
 AGENT_VERSION = os.environ.get("NEURON_AGENT_VERSION", "0.18.0")
 # Where a node fetches that version, and the hash it must match before anything is run.
 # The download is NOT served from here: this VM has 1 GB of RAM and the installer is ~200 MB,
