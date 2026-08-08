@@ -83,7 +83,7 @@ PUBLIC_URL = os.environ.get("NEURON_PUBLIC_URL", "https://neuronnet.duckdns.org"
 # Raising this requires generalising the driver first, not just this number.
 PIPELINE_STAGES = int(os.environ.get("NEURON_PIPELINE_STAGES", "3"))
 
-AGENT_VERSION = os.environ.get("NEURON_AGENT_VERSION", "0.18.0")
+AGENT_VERSION = os.environ.get("NEURON_AGENT_VERSION", "0.19.0")
 # Where a node fetches that version, and the hash it must match before anything is run.
 # The download is NOT served from here: this VM has 1 GB of RAM and the installer is ~200 MB,
 # so the coordinator only advertises metadata and GitHub Releases does the bandwidth.

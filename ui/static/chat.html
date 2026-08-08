@@ -300,8 +300,21 @@ async function refreshNetwork(){
       ? "Ask anything. Answers run on this machine; the network handles models it cannot hold."
       : "Ask anything. Your prompt is answered by a chain of volunteer machines, each running a slice of the model.";
     dot.className = "dot " + (n.healthy ? "ok" : "bad");
-    label.textContent = "Powered by " + n.online_nodes + " node" +
-      (n.online_nodes===1?"":"s") + " worldwide";
+    // A STATUS, never an attribution.
+    //
+    // This label is built from online_nodes alone, so it says nothing whatever about who
+    // served your answer. Phrased as a credit it sat directly above a reply whose own meta
+    // line read "this machine - Cost: 0.0000 NRN", and the two contradicted each other on one
+    // screen. A machine that can hold the serving model answers locally BY DESIGN
+    // (engine/local_gguf.py); the header must not take the network's name for that work.
+    //
+    // Same failure shape as the error message this file's tests guard against below, and as
+    // [P31]'s release-note caveats: a true sentence phrased stronger than the truth.
+    // Deliberately worded so the tests that forbid the old phrasing cannot match this comment.
+    const nodeCount = n.online_nodes + " node" + (n.online_nodes===1?"":"s") + " online";
+    label.textContent = localCapable
+      ? "Answers run here · " + nodeCount + " for bigger models"
+      : "Powered by " + nodeCount;
     if(!n.healthy){
       // The banner used to say "Responses will fail". That is no longer true: when this
       // machine can hold the serving model it answers locally (engine/local_gguf.py), so an

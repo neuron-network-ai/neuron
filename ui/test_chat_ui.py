@@ -174,6 +174,27 @@ def main():
           and "because the answer was finished" in SRC)
     check("...with a continue affordance", "→ continue" in SRC)
 
+    print("\n-- the header is a status, not a claim about who answered")
+    # Observed on a real screen: the header read "Powered by 2 nodes worldwide" directly above
+    # a reply whose own meta line said "this machine · Cost: 0.0000 NRN". Both true; together
+    # they read as a contradiction, and the louder one took credit the network had not earned.
+    # A locally-capable machine answers locally BY DESIGN (engine/local_gguf.py), so the header
+    # has to describe the network's state, not attribute the answer.
+    # No `or` fallbacks in these: this file has already shipped one vacuous check
+    # (`or ">" in priv`, always true), so each assertion below has exactly one condition.
+    check("the node count is phrased as a status, not an attribution",
+          '" online"' in SRC and "worldwide" not in SRC,
+          "'N nodes online' is a fact about the network; 'powered by N nodes worldwide' "
+          "reads as 'N nodes answered you', which is false whenever this machine served it")
+    check("a locally-capable machine does not credit the network for its own answer",
+          '"Answers run here ' in SRC,
+          "when this machine serves the model, the header must say so")
+    check("...and the network count is still shown, as capacity for bigger models",
+          "for bigger models\"" in SRC)
+    check("'Powered by' remains only on the branch where the network really does answer",
+          SRC.count('"Powered by ') == 1,
+          "exactly one use, in the else branch of localCapable")
+
     print("\n-- never send into a chain that cannot answer")
     check("a block state exists", "function setBlocked" in SRC)
     check("it is driven by real coverage, not a guess",

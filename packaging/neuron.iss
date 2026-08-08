@@ -8,7 +8,7 @@
 ; and on uninstall deregisters the node + deletes its slice/config.
 
 #define AppName "NEURON"
-#define AppVersion "0.18.0"
+#define AppVersion "0.19.0"
 #define AppExe "neuron-agent.exe"
 
 [Setup]
