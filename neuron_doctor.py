@@ -28,6 +28,8 @@ WHAT IT CHECKS, IN THE ORDER A REQUEST DEPENDS ON THEM
   3. nodes online and eligible        -- registered but offline is not capacity
   4. spare capacity for failover      -- RESILIENCE.md [R2]: recovery needs somewhere to go
   5. a model is actually serving      -- covered layers but no serving tier is still dead
+  6. the operator's verifier is alive -- only where it runs; a dead one means every node
+                                         that joins stays probationary forever ([P24])
 
 Deliberately NOT a correctness test. `selftest_shard.py` proves the maths; this proves the
 network is up. Different questions, different runtimes -- this one takes a second and needs
@@ -36,7 +38,9 @@ no model in RAM, so it can run anywhere, including on a stranger's machine after
 
 import argparse
 import json
+import os
 import sys
+import time
 
 try:
     import requests
@@ -48,6 +52,11 @@ DEFAULT_COORDINATOR = "https://neuronnet.duckdns.org"
 
 OK, WARN, BAD = "ok", "warn", "bad"
 MARK = {OK: "  OK  ", WARN: " WARN ", BAD: " FAIL "}
+
+# The operator's verifier writes an "alive" line every ~30 minutes (verify_service.ALIVE_EVERY).
+# Three missed heartbeats is dead, not slow.
+VERIFIER_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "verify_service.log")
+VERIFIER_STALE_S = 90 * 60
 
 
 class Report:
@@ -95,8 +104,14 @@ def check_network(base, rep):
     elif covered >= total:
         rep.add(OK, "model layers covered", f"{covered}/{total}")
     else:
+        # Name the gap when the coordinator reports it. "7 layers have no node" tells you the
+        # chain is broken; "layers 21-27" tells you where to put one. Older coordinators do
+        # not send `uncovered_layers`, so its absence is not an error.
+        gaps = net.get("uncovered_layers") or []
+        where = ", ".join(f"{lo}-{hi}" if lo != hi else f"{lo}" for lo, hi in gaps)
         rep.add(BAD, "model layers covered", f"{covered}/{total} -- "
-                f"{total - covered} layer(s) have no node. NO request can complete.",
+                f"{total - covered} layer(s) have no node"
+                f"{f' (missing: {where})' if where else ''}. NO request can complete.",
                 "POST /network/rebalance (admin) to re-split across the nodes that are "
                 "online, or bring another node up. See RESILIENCE.md [R6].")
 
@@ -171,6 +186,29 @@ def check_serving_model(base, rep):
                 "not enough nodes or RAM for any tier; see the dashboard")
 
 
+def check_verifier(rep):
+    """Is the OPERATOR's verifier still alive? Local check, skipped where it does not apply.
+
+    Only the machine running verify_service.py has this log, so a stranger running the doctor
+    sees nothing about it. On the operator's machine it is the check that would have caught
+    [P24] two days early: the service had been dead since 17:27 on 2026-08-03, and the only
+    evidence was a log file that had stopped growing — which nobody was looking at, and which
+    looked the same as a quiet, healthy verifier until it started writing an alive line.
+    """
+    if not os.path.exists(VERIFIER_LOG):
+        return
+    age = time.time() - os.path.getmtime(VERIFIER_LOG)
+    mins = int(age // 60)
+    if age > VERIFIER_STALE_S:
+        rep.add(BAD, "verifier alive", f"verify_service.log has not been written for {mins} "
+                f"minutes -- the verifier is almost certainly dead",
+                "restart it (python verify_service.py) and make sure something supervises it. "
+                "While it is down, every node that joins stays probationary forever: it earns "
+                "nothing and serves nothing. See PROBLEMS.md [P24].")
+    else:
+        rep.add(OK, "verifier alive", f"last wrote {mins} minute(s) ago")
+
+
 def render(rep, quiet=False):
     width = max(len(r["check"]) for r in rep.rows) if rep.rows else 20
     for r in rep.rows:
@@ -203,6 +241,7 @@ def main():
     rep = Report()
     if check_network(args.coordinator, rep) is not None:
         check_serving_model(args.coordinator, rep)
+    check_verifier(rep)
 
     if args.json:
         print(json.dumps({"healthy": not rep.failed, "checks": rep.rows}, indent=1))

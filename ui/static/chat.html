@@ -5,36 +5,66 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NEURON — distributed chat</title>
 <style>
+  /* Palette. The light values are the landing page's and the coordinator dashboards'
+     (docs/index.html, coordinator/theme.py) so the three surfaces read as one product — the
+     brand was indigo #4f46e5 here and green everywhere else, and the status colours were
+     Google's console palette left over from the first version.
+
+     Dark mode is this page's alone: neither the site nor the dashboards have one, so the dark
+     values are derived rather than copied. #15803d is a text colour ON WHITE and would be
+     nearly unreadable on #0e1116, so dark uses a lifted green at the same role.
+
+     --on-brand is what goes ON TOP of a brand-filled surface (the Send button). It cannot be
+     hardcoded white: white on the dark theme's light green is ~1.8:1, unreadable. Light theme
+     puts white on dark green, dark theme puts near-black on light green; both clear AA. */
   :root{
-    --bg:#f6f7f9; --panel:#ffffff; --ink:#1f2328; --muted:#6a737d; --line:#e3e6ea;
-    --user:#eef2ff; --user-ink:#1e293b; --bot:#ffffff; --brand:#4f46e5;
-    --ok:#137333; --bad:#c5221f; --warn:#a16207; --code-bg:#f0f1f4; --hover:#eef0f3;
+    --bg:#f6fdf7; --panel:#ffffff; --ink:#1a2e1c; --muted:#6b7280; --line:#d1fae5;
+    --user:#f0fdf4; --user-ink:#166534; --bot:#ffffff; --brand:#15803d; --on-brand:#ffffff;
+    --ok:#15803d; --bad:#b91c1c; --warn:#92400e; --warn-bg:#fffbeb;
+    --code-bg:#f0fdf4; --hover:#f0fdf4;
   }
   @media (prefers-color-scheme: dark){
     :root{ --bg:#0e1116; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e; --line:#2a2f37;
-      --user:#1f2a44; --user-ink:#dbe4ff; --bot:#161b22; --brand:#8b8cf7;
+      --user:#12251a; --user-ink:#dcfce7; --bot:#161b22; --brand:#4ade80; --on-brand:#052e16;
+      --ok:#4ade80; --bad:#f87171; --warn:#fbbf24; --warn-bg:#2a2113;
       --code-bg:#0d1117; --hover:#1c2128; }
   }
   :root[data-theme="light"]{
-    --bg:#f6f7f9; --panel:#ffffff; --ink:#1f2328; --muted:#6a737d; --line:#e3e6ea;
-    --user:#eef2ff; --user-ink:#1e293b; --bot:#ffffff; --brand:#4f46e5;
-    --ok:#137333; --bad:#c5221f; --warn:#a16207; --code-bg:#f0f1f4; --hover:#eef0f3;
+    --bg:#f6fdf7; --panel:#ffffff; --ink:#1a2e1c; --muted:#6b7280; --line:#d1fae5;
+    --user:#f0fdf4; --user-ink:#166534; --bot:#ffffff; --brand:#15803d; --on-brand:#ffffff;
+    --ok:#15803d; --bad:#b91c1c; --warn:#92400e; --warn-bg:#fffbeb;
+    --code-bg:#f0fdf4; --hover:#f0fdf4;
   }
   :root[data-theme="dark"]{
     --bg:#0e1116; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e; --line:#2a2f37;
-    --user:#1f2a44; --user-ink:#dbe4ff; --bot:#161b22; --brand:#8b8cf7;
+    --user:#12251a; --user-ink:#dcfce7; --bot:#161b22; --brand:#4ade80; --on-brand:#052e16;
+    --ok:#4ade80; --bad:#f87171; --warn:#fbbf24; --warn-bg:#2a2113;
     --code-bg:#0d1117; --hover:#1c2128;
   }
   *{box-sizing:border-box}
   html,body{height:100%}
   body{margin:0;background:var(--bg);color:var(--ink);
     font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
-  .app{display:flex;height:100vh}
+  /* dvh, with vh kept as the fallback for browsers without it: on a phone, 100vh is the
+     viewport WITHOUT the address bar, so the composer sat under it and the last line of an
+     answer was permanently hidden behind the keyboard. */
+  .app{display:flex;height:100vh;height:100dvh}
 
   /* -------- sidebar -------- */
   .sidebar{width:260px;flex:none;background:var(--panel);border-right:1px solid var(--line);
     display:flex;flex-direction:column;overflow:hidden}
   .sidebar.hide{display:none}
+  /* There was no width breakpoint in this file at all -- only prefers-color-scheme and
+     prefers-reduced-motion -- so the 260px sidebar stayed in the flex row on a phone.
+     Measured at 375px: 67px of horizontal overflow, the thread squeezed to ~115px and the
+     Send button pushed off-screen. Below this width the sidebar floats OVER the thread
+     instead of sitting beside it, so it costs no layout width at all. #sidebtn is unchanged
+     and still just toggles .hide; the only difference is that it starts closed here, which
+     the matchMedia call next to that listener does. */
+  @media (max-width:768px){
+    .sidebar{position:fixed;top:0;left:0;bottom:0;z-index:40;width:min(260px,82vw);
+      box-shadow:0 0 0 100vmax rgba(0,0,0,.5)}
+  }
   .newchat{margin:.7rem;padding:.55rem .7rem;border:1px solid var(--line);border-radius:10px;
     background:transparent;color:var(--ink);font-weight:600;cursor:pointer;text-align:left;
     display:flex;align-items:center;gap:.4rem}
@@ -58,15 +88,20 @@
     padding:.7rem 1rem;display:flex;align-items:center;gap:.75rem;flex-wrap:wrap}
   .sidebtn{border:1px solid var(--line);background:transparent;color:var(--ink);
     border-radius:8px;width:30px;height:30px;cursor:pointer;flex:none}
-  .logo{font-weight:800;letter-spacing:.5px}
+  /* The mark is inline SVG in currentColor, so it inherits the theme and needs no image
+     request — the same mark the site and the dashboards use. */
+  .logo{font-weight:800;letter-spacing:.5px;display:flex;align-items:center;gap:.45rem;
+    color:var(--ink)}
+  .logo svg{flex:none;color:var(--brand)}
   .logo span{color:var(--brand)}
   .tag{color:var(--muted);font-size:12.5px}
   .net{margin-left:auto;display:flex;align-items:center;gap:.5rem;font-size:13px;
     color:var(--muted)}
   .dot{width:9px;height:9px;border-radius:50%;background:var(--muted);flex:none}
   .dot.ok{background:var(--ok)} .dot.bad{background:var(--bad)}
-  #warn{display:none;background:#fff7e6;color:var(--warn);border-bottom:1px solid var(--line);
-    padding:.5rem 1rem;font-size:13px}
+  /* was a hardcoded #fff7e6, which stayed a near-white block in dark mode */
+  #warn{display:none;background:var(--warn-bg);color:var(--warn);
+    border-bottom:1px solid var(--line);padding:.5rem 1rem;font-size:13px}
   #warn.show{display:block}
   .themebtn{border:1px solid var(--line);background:transparent;color:var(--ink);
     border-radius:8px;width:30px;height:30px;cursor:pointer;font-size:14px}
@@ -96,16 +131,39 @@
   .msgbtn:hover{background:var(--hover);color:var(--ink)}
   .cursor::after{content:"▋";color:var(--brand);animation:blink 1s steps(2) infinite}
   @keyframes blink{50%{opacity:0}}
+
+  /* Waiting for the first token. On this network that wait is the defining moment of the
+     experience -- a chain has to be built across volunteer machines, each loads its slice, and
+     the prompt crosses every hop before one character comes back. It was represented by a
+     blinking cursor and nothing else, which is indistinguishable from a hung page. The `meta`
+     event already tells us the chain that was built; this shows it while it is still useful. */
+  .pipe{display:flex;align-items:center;gap:.5rem;color:var(--muted);font-size:13px;
+    flex-wrap:wrap}
+  .pipe .spin{width:12px;height:12px;border:2px solid var(--line);border-top-color:var(--brand);
+    border-radius:50%;animation:spin .8s linear infinite;flex:none}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .pipe-t{font-variant-numeric:tabular-nums;opacity:.8}
+  .pipe-hint{color:var(--muted);font-size:12px;margin-top:.35rem;line-height:1.5}
+  @media (prefers-reduced-motion:reduce){
+    .pipe .spin{animation:none;border-top-color:var(--line)}
+    .cursor::after{animation:none}
+  }
+
+  /* A partially-received answer that then failed. It used to be REPLACED by the error text,
+     throwing away everything the user had already been given (and paid for). */
+  .partial-note{margin-top:.5rem;padding-top:.5rem;border-top:1px dashed var(--line);
+    color:var(--warn);font-size:12.5px}
+  .blocked{color:var(--muted);font-size:12.5px;text-align:center;margin-top:.35rem}
   .empty{color:var(--muted);text-align:center;margin-top:3rem;font-size:14px}
   footer{background:var(--panel);border-top:1px solid var(--line);padding:.7rem 1rem;
     display:flex;justify-content:center}
   .bar{width:100%;max-width:760px;display:flex;gap:.5rem}
   textarea{flex:1;resize:none;border:1px solid var(--line);border-radius:10px;
     padding:.6rem .7rem;font:inherit;background:var(--panel);color:var(--ink);max-height:140px}
-  button{border:0;border-radius:10px;padding:0 1.1rem;background:var(--brand);color:#fff;
-    font-weight:600;cursor:pointer}
+  button{border:0;border-radius:10px;padding:0 1.1rem;background:var(--brand);
+    color:var(--on-brand);font-weight:600;cursor:pointer}
   button:disabled{opacity:.5;cursor:not-allowed}
-  #send.stop{background:var(--bad)}
+  #send.stop{background:var(--bad);color:#fff}
   .foothint{max-width:760px;width:100%;margin:.35rem auto 0;color:var(--muted);font-size:11.5px;
     text-align:center}
   .auth{display:flex;align-items:center;gap:.6rem;font-size:13px}
@@ -113,6 +171,20 @@
   .auth a:hover{text-decoration:underline}
   .auth .balance{color:var(--muted)}
   .auth .balance b{color:var(--ink)}
+  /* A zero balance is not a statistic, it is a broken account: every message will be refused
+     by /infer before a chain is even built. Rendered in --bad so it reads as a fault at a
+     glance, next to the strip below which says what to do about it. */
+  .auth .balance b.empty-bal{color:var(--bad)}
+  /* Sits directly above the composer rather than in #warn, which the network poller rewrites
+     on every tick and would clobber this within a second. */
+  #lowbal{display:none;max-width:760px;width:100%;margin:0 auto .45rem;
+    background:var(--warn-bg);color:var(--warn);border-radius:8px;
+    padding:.5rem .7rem;font-size:12.5px;text-align:center}
+  #lowbal.show{display:block}
+  /* Inherit --warn rather than --brand: on --warn-bg the green fails contrast, and this link
+     is an invitation inside a notice, not a primary action competing with Send. */
+  #lowbal a{color:var(--warn);font-weight:600;text-decoration:underline}
+  #lowbal b{color:var(--warn)}
 </style>
 </head>
 <body>
@@ -123,30 +195,47 @@
   </aside>
   <div class="col">
     <header>
-      <button class="sidebtn" id="sidebtn" title="Toggle sidebar">☰</button>
-      <div class="logo">NE<span>U</span>RON</div>
+      <button class="sidebtn" id="sidebtn" title="Toggle sidebar"
+              aria-label="Toggle conversation sidebar">☰</button>
+      <div class="logo"><svg width="22" height="22" viewBox="0 0 28 28" aria-hidden="true">
+        <circle cx="5" cy="14" r="4" fill="currentColor"/>
+        <circle cx="23" cy="5" r="3" fill="none" stroke="currentColor" stroke-width="1.5"/>
+        <circle cx="23" cy="23" r="3" fill="none" stroke="currentColor" stroke-width="1.5"/>
+        <circle cx="14" cy="14" r="4.5" fill="currentColor" opacity=".75"/>
+        <line x1="18.5" y1="14" x2="20.5" y2="7" stroke="currentColor" stroke-width="1.5"/>
+        <line x1="18.5" y1="14" x2="20.5" y2="21" stroke="currentColor" stroke-width="1.5"/>
+      </svg>NE<span>U</span>RON</div>
       <div class="tag" id="tag">distributed inference</div>
-      <div class="net">
+      <div class="net" role="status">
         <span class="dot" id="netdot"></span>
         <span id="netlabel">checking network…</span>
       </div>
-      <button class="themebtn" id="themebtn" title="Toggle theme">🌓</button>
+      <button class="themebtn" id="themebtn" title="Toggle theme"
+              aria-label="Toggle light, dark or system theme">🌓</button>
       <div class="auth" id="auth"></div>
     </header>
-    <div id="warn"></div>
+    <div id="warn" role="status"></div>
 
     <main>
-      <div class="thread" id="thread">
+      <!-- aria-live: answers arrive a token at a time over seconds or minutes, so without it a
+           screen-reader user gets silence and then, if they happen to navigate back, a finished
+           block of text with no indication it ever started. -->
+      <div class="thread" id="thread" aria-live="polite" aria-atomic="false">
         <div class="empty" id="empty">Ask anything.</div>
       </div>
     </main>
 
     <footer>
       <div>
+        <!-- role=status, not alert: it appears on load for an out-of-credit account, and an
+             assertive live region would interrupt a screen reader every time refreshAuth runs. -->
+        <div id="lowbal" role="status"></div>
         <div class="bar">
-          <textarea id="input" rows="1" placeholder="Type a message and press Enter…"></textarea>
+          <textarea id="input" rows="1" aria-label="Message"
+                    placeholder="Type a message and press Enter…"></textarea>
           <button id="send">Send</button>
         </div>
+        <div class="blocked" id="blocked" hidden></div>
         <div class="foothint" id="hint"><label style="cursor:pointer"><input type="checkbox" id="rag"> 🌐 Web search — answer with current info</label> &nbsp;·&nbsp; Cost is metered by response length, shown after each reply. NRN has no cash value.</div>
       </div>
     </footer>
@@ -161,6 +250,10 @@ let onlineNodes = 0;
 // set from /network: true when this machine can run the serving model itself
 let localCapable = false;
 let loggedIn = false;
+// Below this, /infer's pre-dispatch hold cannot be covered and the request is refused with
+// 402 before any chain is built. Measured: a short prompt held 0.158 NRN on 2026-08-07, and
+// the hold scales with max_tokens, so this is a floor to warn at rather than an exact price.
+const MIN_SENDABLE_NRN = 0.25;
 let currentConversationId = null;
 let currentController = null;   // AbortController for the in-flight stream
 let lastUserPrompt = null;      // for regenerate
@@ -180,6 +273,11 @@ $("#themebtn").addEventListener("click", () => {
 
 // ---- sidebar toggle -----------------------------------------------------
 $("#sidebtn").addEventListener("click", () => $("#sidebar").classList.toggle("hide"));
+// On a narrow screen the sidebar overlays the thread (see the max-width:768px block), so
+// leaving it open on load would cover the conversation the page exists to show. Read once at
+// load rather than on resize: flipping it under someone who has deliberately opened it is
+// worse than the stale state, and a phone does not change width mid-session.
+if (matchMedia("(max-width:768px)").matches) $("#sidebar").classList.add("hide");
 
 // ---- live network status --------------------------------------------------
 async function refreshNetwork(){
@@ -209,22 +307,67 @@ async function refreshNetwork(){
       // machine can hold the serving model it answers locally (engine/local_gguf.py), so an
       // incomplete chain only means the NETWORK is short of nodes, not that chat is broken.
       warn.className = localCapable ? "" : "show";
+      // Name the missing layers rather than only the count, and take the total from the
+      // coordinator instead of a hardcoded 28 that goes stale on the next model tier.
+      const total = n.total_layers || 28;
+      const where = (n.uncovered_layers || [])
+        .map(r => r[0] === r[1] ? r[0] : r[0] + "–" + r[1]).join(", ");
       warn.textContent = localCapable ? "" :
-        ("Network degraded — only " + n.layers_covered +
-         "/28 model layers are online, and this machine cannot run the model on its own yet. " +
-         "Responses will fail until the chain is complete.");
+        ("Network degraded — " + n.layers_covered + "/" + total +
+         " model layers are online" + (where ? " (missing " + where + ")" : "") +
+         ", and this machine cannot run the model on its own yet. " +
+         "Sending is paused until the chain is complete.");
     } else {
       warn.className = ""; warn.textContent = "";
     }
+    // A prompt sent into an incomplete chain cannot be answered, so it costs the user a wait
+    // and an error rather than telling them up front. The page already knows.
+    setBlocked(!n.healthy && !localCapable
+      ? "The network is short of nodes right now, so there is nothing to send this to."
+      : null);
   }catch(e){
     $("#netdot").className = "dot bad";
     $("#netlabel").textContent = "network status unavailable";
+    // Deliberately NOT blocking here: this only means the status poll failed. The chat
+    // endpoint may be perfectly fine, and refusing to send on a failed poll would be a
+    // self-inflicted outage.
   }
 }
 refreshNetwork();
 setInterval(refreshNetwork, 10000);
 
 // ---- login state / wallet balance -----------------------------------------
+// `bal` null means "could not read it" -- say nothing rather than accuse an account of being
+// empty on the strength of a failed fetch.
+function noteBalance(bal){
+  const el = $("#lowbal");
+  if(bal === null || bal >= MIN_SENDABLE_NRN){ el.className = ""; el.textContent = ""; return; }
+  el.className = "show";
+  // Tone matters more here than anywhere else on the page. This is the moment a person who
+  // has been using NEURON discovers they cannot any more, and the wrong words make a shared
+  // network read as a bait-and-switch. So: say plainly that it is an account limit and not a
+  // fault in the network (they will otherwise assume it is broken, exactly as happened on
+  // 2026-08-07), then invite rather than charge.
+  //
+  // Every claim here is one the code actually keeps: the agent serves only while the machine
+  // is idle and pauses on user activity or CPU pressure (agent.py's donation ceiling and
+  // idle_threshold_seconds), and the network really is other people's existing computers.
+  // Nothing about energy saved or carbon is claimed, because nothing here measures that --
+  // an unmeasured green claim would be the actual dishonesty.
+  const join = "<a href='https://github.com/neuron-network-ai/neuron/releases/latest' "
+             + "target='_blank' rel='noopener'>Add your computer</a>";
+  el.innerHTML = bal <= 0
+    ? "<b>Your starting NRN is spent.</b> "
+      + "This is an account limit, not a fault in the network. "
+      + "NEURON has no paywall — it runs on computers people already own. Share "
+      + "your machine's idle time and it earns NRN by answering other people's questions, "
+      + "on hardware that already exists instead of another datacenter. "
+      + "It only runs while you are not using it. " + join + " →"
+    : "Low balance: <b>" + bal.toFixed(2) + " NRN</b> — a reply costs about 0.16 NRN and up, "
+      + "so the next message may be refused. Share your machine's idle time to keep "
+      + "earning. " + join + " →";
+}
+
 async function refreshAuth(){
   const auth = $("#auth");
   try{
@@ -240,13 +383,23 @@ async function refreshAuth(){
         auth.innerHTML = "<span class='balance'>sign-in unavailable</span>";
       }
       renderSidebarLoggedOut();
+      noteBalance(null);          // logged out: the sign-in prompt is the message, not a balance
       return;
     }
     loggedIn = true;
     const bal = await (await fetch("/wallet/balance")).json();
     const shown = (bal.balance!==undefined) ? bal.balance.toFixed(2) : "?";
+    // A balance too low to cover the hold /infer takes is a HARD block: the coordinator
+    // refuses before any chain is built, so the request never reaches a node. Until this
+    // existed the only signal was a small grey number in the header, and the failure that
+    // followed read as a network fault -- on 2026-08-07 that cost an hour of restarting a
+    // machine that was serving perfectly. Say it before the message is sent, not after.
+    const known = bal.balance !== undefined;
+    const empty = known && bal.balance < MIN_SENDABLE_NRN;
     auth.innerHTML = "<span class='balance'>" + (me.email || "logged in") +
-      " · <b>" + shown + " NRN</b></span> · <a href='#' id='logoutlink'>Log out</a>";
+      " · <b" + (empty ? " class='empty-bal'" : "") + ">" + shown +
+      " NRN</b></span> · <a href='#' id='logoutlink'>Log out</a>";
+    noteBalance(known ? bal.balance : null);
     $("#logoutlink").addEventListener("click", async (e) => {
       e.preventDefault();
       await fetch("/auth/logout", {method:"POST"});
@@ -411,18 +564,100 @@ function wireMsgActions(msgEl, rawText){
 }
 
 // ---- send + stream --------------------------------------------------------
+// How long an answer may run. Hardcoded in the request body before, so a reply simply stopped
+// dead at 128 tokens with nothing saying why -- indistinguishable from the model having
+// finished, or from a node dropping mid-sentence.
+const MAX_TOKENS = 128;
+
+let blockedReason = null;
+function setBlocked(reason){
+  blockedReason = reason;
+  const el = $("#blocked");
+  el.hidden = !reason;
+  el.textContent = reason || "";
+  // Never disable while busy: that button is the Stop button, and taking it away would leave
+  // a running request with no way to cancel it.
+  $("#send").disabled = !!reason && !busy;
+}
+
 function setBusy(v){
   busy = v;
   const btn = $("#send");
   btn.textContent = v ? "Stop" : "Send";
   btn.classList.toggle("stop", v);
-  btn.disabled = false;
+  btn.disabled = !!blockedReason && !v;
+}
+
+// ---- a node died and the network carried on -------------------------------
+function noteReroute(body, d){
+  // Deliberately understated, and deliberately not styled as an error. Recovery here is
+  // token-identical (test_node_death.py kills a node with SIGKILL mid-generation and requires
+  // the output to match an uninterrupted run exactly), so nothing about the answer is wrong.
+  // What IS true is that the stream paused while a new chain was built and the conversation so
+  // far was replayed into it. Saying that turns a mysterious stall into the system working.
+  let el = body.parentElement.querySelector(".reroute-live");
+  if(!el){
+    el = document.createElement("div");
+    el.className = "pipe reroute-live";
+    el.setAttribute("role", "status");
+    el.innerHTML = "<span class='spin'></span><span class='pipe-txt'></span>";
+    body.parentElement.appendChild(el);
+  }
+  el.querySelector(".pipe-txt").textContent =
+    "a machine dropped out — rebuilding the chain and picking up where it left off…";
+  clearTimeout(el._t);
+  // Removed a moment after tokens resume; finishBot reports the count for the record.
+  el._t = setTimeout(() => el.remove(), 6000);
+}
+
+// ---- the wait before the first token --------------------------------------
+function startPipeline(body){
+  const el = document.createElement("div");
+  el.className = "pipe";
+  el.setAttribute("role", "status");
+  el.innerHTML = "<span class='spin'></span><span class='pipe-txt'>reaching the network…</span>"
+               + "<span class='pipe-t'></span>";
+  body.appendChild(el);
+  const txt = el.querySelector(".pipe-txt"), clock = el.querySelector(".pipe-t");
+  const t0 = Date.now();
+  let hinted = false;
+  const tick = setInterval(() => {
+    const s = Math.round((Date.now() - t0) / 1000);
+    clock.textContent = s < 1 ? "" :
+      (s < 60 ? s + "s" : Math.floor(s/60) + "m " + String(s%60).padStart(2,"0") + "s");
+    // Said once, after the point where a normal chat app would already have answered. This is
+    // the honest explanation, not an apology: the wait is what distributed inference costs.
+    if(s >= 8 && !hinted){
+      hinted = true;
+      const hint = document.createElement("div");
+      hint.className = "pipe-hint";
+      hint.textContent = "The first token takes longest: every machine in the chain loads its "
+                       + "slice of the model and your prompt crosses all of them before one "
+                       + "character comes back. Later tokens arrive faster.";
+      el.parentElement.appendChild(hint);
+    }
+  }, 500);
+  return {
+    meta(d){
+      if(d && d.local){
+        txt.textContent = "running on this machine · loading the model…";
+      } else if(d && typeof d.nodes === "number" && d.nodes > 0){
+        txt.textContent = "chain built across " + d.nodes + " machine"
+                        + (d.nodes === 1 ? "" : "s") + " · waiting for the first token";
+      } else {
+        txt.textContent = "waiting for the first token";
+      }
+    },
+    stop(){ clearInterval(tick); el.remove();
+            const h = body.parentElement.querySelector(".pipe-hint"); if(h) h.remove(); }
+  };
 }
 
 async function send(){
   const input = $("#input");
   const prompt = input.value.trim();
   if(!prompt || busy) return;
+  if(blockedReason) return;          // the button is already disabled; belt and braces
   input.value = ""; input.style.height = "auto";
   await sendPrompt(prompt, false);
 }
@@ -433,15 +668,15 @@ async function sendPrompt(prompt, isRegenerate){
   const useRag = $("#rag").checked;
   if(!isRegenerate) addMsg("user","you").textContent = prompt;
   const body = addMsg("bot","neuron");
-  body.classList.add("cursor");
-  let meta = null, gotToken = false, rawText = "";
+  let meta = null, gotToken = false, rawText = "", reroutes = 0, shownError = false;
+  const pipeline = startPipeline(body);
 
   currentController = new AbortController();
   try{
     const res = await fetch("/chat", {
       method:"POST", headers:{"Content-Type":"application/json"},
       signal: currentController.signal,
-      body: JSON.stringify({prompt, max_tokens:128, use_rag:useRag,
+      body: JSON.stringify({prompt, max_tokens:MAX_TOKENS, use_rag:useRag,
                             conversation_id: currentConversationId})
     });
     const reader = res.body.getReader();
@@ -462,24 +697,60 @@ async function sendPrompt(prompt, isRegenerate){
         const d = data ? JSON.parse(data) : {};
         if(event==="meta"){
           meta = d;
+          pipeline.meta(d);          // show the chain WHILE it is still the only news
           if(d.conversation_id && d.conversation_id !== currentConversationId){
             currentConversationId = d.conversation_id;
             loadSidebar();
           }
         }
         else if(event==="sources"){ renderSources(body, d); }
-        else if(event==="token"){ gotToken = true; rawText += d.text; body.textContent = rawText; scroll(); }
-        else if(event==="done"){ finishBot(body, meta, d, rawText); refreshAuth(); loadSidebar(); }
-        else if(event==="error"){ showError(body, d.detail, d.code); }
+        else if(event==="reroute"){
+          // NOT an error. A machine in the chain died and the network rebuilt around it;
+          // the answer continues exactly where it left off, token for token. The only thing
+          // the user can perceive is the pause, so name the pause and move on.
+          reroutes++;
+          noteReroute(body, d);
+        }
+        else if(event==="token"){
+          if(!gotToken){ pipeline.stop(); body.classList.add("cursor"); }
+          gotToken = true; rawText += d.text; body.textContent = rawText; scroll();
+        }
+        else if(event==="done"){
+          pipeline.stop();
+          const live = body.parentElement.querySelector(".reroute-live");
+          if(live) live.remove();
+          finishBot(body, meta, d, rawText); refreshAuth(); loadSidebar();
+        }
+        else if(event==="error"){ pipeline.stop(); shownError = true;
+          showError(body, d.detail, d.code, rawText); }
       }
     }
-    if(!gotToken && body.textContent==="") body.textContent = "…";
+    // The stream ended without a `done` and without a single token. That used to render as
+    // "…", which says nothing at all to the person who just waited for it.
+    //
+    // `shownError` guards it. An `error` event ALSO ends the stream with no token and no .meta,
+    // so this ran straight after showError() and replaced a precise, actionable message with a
+    // vague guess about a different failure. Live on 2026-08-07: the coordinator refused with
+    // "insufficient NRN balance; this request needs 0.158 NRN held" -- the server logged it and
+    // the page said a node had dropped out while loading its slice. That sent the founder to
+    // restart a machine that was never at fault. This fallback is for genuine silence only.
+    if(!gotToken && !shownError && !body.querySelector(".meta")){
+      pipeline.stop();
+      showError(body, "The chain accepted the request but returned no tokens. This usually "
+                    + "means a node dropped out while loading its slice.", "no_tokens", "");
+    }
   }catch(e){
+    pipeline.stop();
     if(e.name === "AbortError"){
       body.classList.remove("cursor");
+      body.innerHTML = renderMarkdown(rawText);
+      const note = document.createElement("div");
+      note.className = "partial-note";
+      note.textContent = "Stopped. You were charged only for what had been generated.";
+      body.appendChild(note);
       wireMsgActions(body.parentElement, rawText);
     } else {
-      showError(body, "connection lost: " + e.message);
+      showError(body, "connection lost: " + e.message, "connection_lost", rawText);
     }
   }finally{
     body.classList.remove("cursor");
@@ -518,17 +789,75 @@ function finishBot(body, meta, d, rawText){
   const cost = (d.cost_nrn!==undefined && d.cost_nrn!==null) ? d.cost_nrn.toFixed(4) : "?";
   const m = document.createElement("div");
   m.className = "meta";
+  // A recovered answer is still a degraded one (RESILIENCE.md), so the recovery is recorded
+  // here rather than nowhere: the driver has always tracked `reroutes` and the UI dropped it,
+  // which made surviving two node deaths look identical to an uneventful request.
+  const rr = (typeof d.reroutes === "number") ? d.reroutes : 0;
   m.innerHTML =
     (localRun ? "<span>⛓ this machine</span>"
               : "<span>⛓ " + n + " nodes</span>") +
     "<span>◈ Cost: " + cost + " NRN</span>" +
-    "<span>" + d.tokens + " tokens · " + d.tok_per_s + " tok/s</span>";
+    "<span>" + d.tokens + " tokens · " + d.tok_per_s + " tok/s</span>" +
+    (rr ? "<span title='A machine dropped out and the network rebuilt the chain. The answer "
+          + "is unaffected — recovery replays the conversation so far into the new chain.'>"
+          + "↻ recovered from " + rr + " node drop" + (rr === 1 ? "" : "s") + "</span>" : "");
   body.parentElement.appendChild(m);
   wireMsgActions(body.parentElement, rawText);
+  // An answer that hit the cap is not a finished answer, and it looked exactly like one --
+  // the model appeared to stop mid-sentence for no reason. Say so, and offer the obvious
+  // next move rather than making the user retype "continue".
+  if(typeof d.tokens === "number" && d.tokens >= MAX_TOKENS){
+    const note = document.createElement("div");
+    note.className = "partial-note";
+    note.textContent = "Stopped at the " + MAX_TOKENS + "-token limit for one reply, not "
+                     + "because the answer was finished.";
+    const go = document.createElement("button");
+    go.className = "msgbtn"; go.textContent = "→ continue";
+    go.style.marginLeft = ".5rem";
+    // The conversation is held server-side under conversation_id, so a plain instruction
+    // continues it with the full history already in context.
+    go.addEventListener("click", () => {
+      if(busy) return;
+      sendPrompt("Continue exactly where you stopped, without repeating anything.", false);
+    });
+    note.appendChild(go);
+    body.parentElement.appendChild(note);
+  }
   scroll();
 }
 
-function showError(body, detail, code){
+function showError(body, detail, code, partial){
+  // A failure AFTER tokens have arrived is a different event from a failure instead of them.
+  // This used to overwrite the message body in both cases, throwing away an answer the user
+  // had already been given and already paid for -- on a volunteer network a node dropping
+  // mid-answer is expected, not exceptional (RESILIENCE.md [R2]).
+  if(partial){
+    body.innerHTML = renderMarkdown(partial);
+    const note = document.createElement("div");
+    note.className = "partial-note";
+    // A single node dying does NOT produce this message: the driver rebuilds the chain, replays
+    // the conversation into it and continues token-identically (that is what the `reroute`
+    // event above reports). Reaching here means recovery itself failed -- every retry lost its
+    // chain too, or the answer outran the junction cache that recovery replays from. Naming a
+    // node going offline as the cause would be wrong AND would teach people to distrust the
+    // one thing the network handles best.
+    note.textContent = "⚠ The answer stopped early — " +
+      (code === "connection_lost"
+        ? "the connection to this machine dropped."
+        : "NEURON retried on other machines and could not finish it. The network may be short "
+          + "of spare nodes right now.") +
+      " What is above is what arrived, and it is correct as far as it goes.";
+    body.appendChild(note);
+    const retry = document.createElement("button");
+    retry.className = "msgbtn"; retry.textContent = "↻ ask again";
+    retry.addEventListener("click", () => { if(!busy && lastUserPrompt){
+      body.parentElement.remove(); sendPrompt(lastUserPrompt, true); } });
+    const bar = document.createElement("div");
+    bar.className = "meta"; bar.appendChild(retry);
+    body.parentElement.appendChild(bar);
+    scroll();
+    return;
+  }
   body.parentElement.classList.add("err");
   if(code === "login_required"){
     body.innerHTML = "⚠ " + (detail || "please log in") +

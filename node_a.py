@@ -72,8 +72,23 @@ class InsufficientFunds(Exception):
 # Coordinator client (Session 6; wallet/hold wiring added Workstream B)
 # --------------------------------------------------------------------------- #
 def coord_get_chain(base, prompt, max_tokens, expected_s1, wallet_id, prompt_tokens_estimate=None):
-    """POST /infer -> (host_c, port_c, host_b, port_b, s2, node_ids, request_id, complete_token,
-    hold_amount). Assumes a 3-node chain matching node_a's loaded shard (layers 0..expected_s1-1).
+    """POST /infer -> (next_host, next_port, host_b, port_b, s2, node_ids, request_id,
+    complete_token, hold_amount), for a chain whose FIRST stage is this node's own shard
+    (layers 0..expected_s1-1).
+
+    Accepts a chain of TWO or THREE stages. Two is not a degraded case, it is the ordinary
+    shape of a three-machine network with one machine away -- which on a network built from
+    other people's spare computers is most evenings. This used to demand exactly three and
+    raise `expected a 3-node chain, got 2`, so the coordinator would correctly re-split the
+    model across the survivors, report the network healthy, and every request would still fail.
+    The recovery machinery worked; nothing could use what it produced.
+
+    `host_b` is the hop AFTER the next one, or None when there isn't one. That is the whole
+    difference: with it, the next hop plays node_c's middle-relay role and forwards; without
+    it, the next hop plays node_b's last-stage role and returns the normed hidden itself.
+    `agent/node_server.py` already serves whichever role the config implies, so both shapes
+    were always speakable on the wire -- only this function refused to speak them.
+
     The complete_token authenticates the later /complete call ([P12]); wallet_id is who pays
     (Workstream B — /infer now holds the worst-case cost from this wallet before dispatch)."""
     body = {"prompt": prompt, "max_tokens": max_tokens, "wallet_id": wallet_id}
@@ -94,13 +109,19 @@ def coord_get_chain(base, prompt, max_tokens, expected_s1, wallet_id, prompt_tok
         raise RuntimeError(f"coordinator /infer {r.status_code}: {detail}")
     data = r.json()
     chain, request_id = data["chain"], data["request_id"]
-    if len(chain) != 3:
-        raise RuntimeError(f"expected a 3-node chain, got {len(chain)}")
-    a, c, b = chain
+    if not 2 <= len(chain) <= 3:
+        raise RuntimeError(
+            f"cannot route a {len(chain)}-stage chain (this driver handles 2 or 3). "
+            f"chain={[n.get('layers') for n in chain]}")
+    a, rest = chain[0], chain[1:]
     if a["layers"] != [0, expected_s1 - 1]:
         raise RuntimeError(f"chain assigns node_a {a['layers']} but shard is 0..{expected_s1-1}")
-    return c["ip"], c["port"], b["ip"], b["port"], c["layers"][1] + 1, \
-        [a["node_id"], c["node_id"], b["node_id"]], request_id, data.get("complete_token"), \
+    nxt, last = rest[0], rest[-1]
+    # Only a 3-stage chain has a hop beyond the next one. `s2` is where the LAST stage begins
+    # either way, which is what both roles slice on.
+    host_b, port_b = (last["ip"], last["port"]) if len(rest) == 2 else (None, None)
+    return nxt["ip"], nxt["port"], host_b, port_b, last["layers"][0], \
+        [n["node_id"] for n in chain], request_id, data.get("complete_token"), \
         data.get("hold_amount")
 
 
@@ -190,11 +211,18 @@ def _run(idx, prompt, model, tok, s1, s2, host_c, port_c, host_b, port_b,
     # The config itself goes out in the legacy format -- it is the one message whose reader
     # might predate wire_codec, and it is tiny. Its "wire" field is the offer; the ack names
     # the codec the peer picked, or omits it, in which case codec stays None (legacy).
-    common.send_msg(sock, {"type": "config", "s1": s1, "s2": s2,
-                           "host_b": host_b, "port_b": port_b,
-                           "wire": wire_codec.preference(model.config.hidden_size)})
+    cfg = {"type": "config", "s1": s1, "s2": s2,
+           "wire": wire_codec.preference(model.config.hidden_size)}
+    # OMIT host_b when there is no hop beyond the next one -- do not send None. The receiver
+    # decides its role with `"host_b" in msg` (agent/node_server.py), so a None value still
+    # reads as "you are a middle relay" and sends it to socket.create_connection((None, None)).
+    # coord_get_chain was widened to accept a 2-stage chain; this path was not, and would have
+    # failed exactly there. neuron_driver._connect already builds the config this way.
+    if host_b:
+        cfg["host_b"], cfg["port_b"] = host_b, port_b
+    common.send_msg(sock, cfg)
     ack = common.recv_msg(sock)
-    assert ack.get("ok"), f"node_c refused: {ack}"
+    assert ack.get("ok"), f"next hop refused: {ack}"
     codec = wire_codec.negotiate([ack["wire"]] if ack.get("wire") else None)
     sock.settimeout(common.HOT_TIMEOUT_S)
 
@@ -213,16 +241,20 @@ def _run(idx, prompt, model, tok, s1, s2, host_c, port_c, host_b, port_b,
         h1 = stage_batcher.submit(token_block, cache, past)
         a_ms += (time.time() - t) * 1000
         t = time.time()
-        common.send_msg(sock, {"type": "act", "hidden": h1}, codec=codec)
+        common.send_msg(sock, {"type": "act", "hidden": common._to_cpu(h1)}, codec=codec)
         resp = common.recv_msg(sock)
         rt = (time.time() - t) * 1000
         past += token_block.shape[1]
         th = time.time()
         tok_id = int(head_batcher.submit(resp["hidden"], None, 0).argmax(-1))
         head_ms += (time.time() - th) * 1000
-        c_ms += resp["c_compute_ms"]
-        b_ms += resp["b_compute_ms"]
-        net_ms += max(rt - resp["c_compute_ms"] - resp["b_compute_ms"], 0.0)
+        # .get, not [] -- only a MIDDLE relay reports c_compute_ms. On a 2-stage chain the reply
+        # comes straight from the last stage and carries b_compute_ms alone, so subscripting
+        # here raised KeyError on every token.
+        c, b = resp.get("c_compute_ms", 0.0), resp.get("b_compute_ms", 0.0)
+        c_ms += c
+        b_ms += b
+        net_ms += max(rt - c - b, 0.0)
         return tok_id
 
     generated = [step(input_ids)]
@@ -251,8 +283,10 @@ def _run(idx, prompt, model, tok, s1, s2, host_c, port_c, host_b, port_b,
 
 def warmup(host_c, port_c, s1, s2, host_b, port_b):
     s = socket.create_connection((host_c, port_c), timeout=common.COLD_CONNECT_TIMEOUT_S)
-    common.send_msg(s, {"type": "config", "s1": s1, "s2": s2,
-                        "host_b": host_b, "port_b": port_b})
+    cfg = {"type": "config", "s1": s1, "s2": s2}
+    if host_b:                                  # omitted, never None -- see _run for why
+        cfg["host_b"], cfg["port_b"] = host_b, port_b
+    common.send_msg(s, cfg)
     common.recv_msg(s)
     common.send_msg(s, {"type": "bye"})
     s.close()

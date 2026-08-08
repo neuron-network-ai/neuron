@@ -26,6 +26,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import uuid
 from urllib.parse import urlparse
 
@@ -43,14 +44,123 @@ if getattr(sys, "frozen", False):
 else:
     HERE = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, os.path.dirname(HERE))             # repo root
-from agent import gpu                                     # noqa: E402
-from agent import local_chat                               # noqa: E402
-from agent import resource_guard                          # noqa: E402
-from agent.node_server import NodeServer                  # noqa: E402
-import slice_downloader                                   # noqa: E402
 
 CONFIG_PATH = os.path.join(HERE, "config.json")
 LOG_PATH = os.path.join(HERE, "agent.log")
+
+
+def crash_log(what):
+    """Append `what` + the current traceback to agent.log using nothing but the stdlib.
+
+    Deliberately NOT a logging handler. This has to work in the three situations where the
+    logging config cannot help: before `_setup_logging()` has run, when the import that
+    logging config itself depends on is the thing that just failed, and inside the frozen
+    tray app, where the console is hidden so stderr goes nowhere a person can see.
+
+    [P24]: v0.18 produced NO log file at all on a stranger's machine. A run that leaves no
+    trace is indistinguishable from a run that never happened, and there was nothing the
+    owner could send. Every path that can die before logging exists now calls this first.
+    """
+    try:
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"\n{time.strftime('%Y-%m-%d %H:%M:%S')} [CRASH] {what}\n")
+            f.write(traceback.format_exc())
+    except Exception:
+        pass                       # best effort by definition — there is nothing further to try
+    try:
+        # ASCII only: this goes to a console whose codepage may not be UTF-8, unlike the file.
+        print(f"NEURON: {what} - details in {LOG_PATH}", file=sys.stderr)
+    except Exception:
+        pass
+
+
+def _config_path_from_argv(argv=None):
+    """The --config value if one was passed, else CONFIG_PATH. Needed at IMPORT time.
+
+    argparse has not run yet and cannot: see _apply_device_preference for why this has to
+    happen before main(). Deliberately forgiving -- a malformed --config is argparse's error to
+    report properly a moment later, not a reason to fail here.
+    """
+    argv = list(sys.argv[1:] if argv is None else argv)
+    for i, a in enumerate(argv):
+        if a == "--config" and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith("--config="):
+            return a.split("=", 1)[1]
+    return CONFIG_PATH
+
+
+def _apply_device_preference(argv=None, environ=None):
+    """Turn the config's `device` setting into NEURON_DEVICE. Returns a note for the log.
+
+    **This must run before `common` is imported anywhere in this process**, and that is why it
+    sits at module level instead of in main(). `common.DEVICE` is resolved exactly once, at
+    import (`common.py:113`), and `from agent.node_server import NodeServer` below imports
+    `common` — so by the time main() reads the config the device has already been chosen. A
+    setting applied in main() would be read, saved, displayed in the tray, and do nothing.
+
+    Rules, in order:
+      * An explicit NEURON_DEVICE in the environment always wins. An operator who set it on the
+        command line is not overruled by a file.
+      * "auto" (or absent) sets nothing and lets `common._resolve_device()` decide, which is
+        exactly the behaviour before this setting existed.
+      * "cpu" pins the CPU.
+      * "gpu" is honoured ONLY if torch reports a usable CUDA device. It is not enough that a
+        card exists: `torch.device("cuda:0")` is accepted by torch without checking anything,
+        so pinning it on a `+cpu` build would hand `common` a device that fails on first use.
+        The shipped build IS a `+cpu` build, so this path returns the "detected but unusable"
+        note -- said out loud rather than silently ignored, which is the whole point.
+
+    Never raises: a device preference must not be the reason a node fails to start.
+    """
+    environ = os.environ if environ is None else environ
+    try:
+        if environ.get("NEURON_DEVICE", "").strip():
+            return f"device: NEURON_DEVICE={environ['NEURON_DEVICE']} (environment wins)"
+        try:
+            with open(_config_path_from_argv(argv)) as f:
+                pref = (json.load(f).get("device") or "auto").strip().lower()
+        except (OSError, ValueError, AttributeError):
+            return None                     # no config yet (first run) -- auto is correct
+        if pref in ("", "auto"):
+            return None
+        if pref == "cpu":
+            environ["NEURON_DEVICE"] = "cpu"
+            return "device: cpu (from config)"
+        if pref != "gpu":
+            return f"device: {pref!r} is not one of auto/cpu/gpu — ignoring it, using auto"
+        try:
+            import torch
+            usable = bool(torch.cuda.is_available())
+        except Exception:                                           # noqa: BLE001
+            usable = False
+        if usable:
+            environ["NEURON_DEVICE"] = "cuda:0"
+            return "device: cuda:0 (from config)"
+        return ("device: GPU requested, but THIS BUILD COMPUTES ON CPU — it ships a CPU-only "
+                "torch, so no card can be used. Running on CPU.")
+    except Exception:                                               # noqa: BLE001
+        return None
+
+
+# Read before the heavy imports below, because one of them (`node_server` -> `common`) resolves
+# the execution device at import and never reconsiders it. Logged in main(), once logging is up.
+_DEVICE_NOTE = _apply_device_preference()
+
+# The imports below are the heavy ones (node_server and local_chat pull in torch), and they
+# run at MODULE level — before main(), before any config is read, before logging exists. A
+# failure here used to be completely silent. It is the single most likely place for a version
+# that "does nothing" to be dying, so it records itself before re-raising.
+try:
+    from agent import gpu                                 # noqa: E402
+    from agent import local_chat                          # noqa: E402
+    from agent import resource_guard                      # noqa: E402
+    from agent.node_server import NodeServer              # noqa: E402
+    import slice_downloader                               # noqa: E402
+except BaseException:
+    crash_log("the agent could not import its own modules — it never got as far as starting")
+    raise
+
 RETRY_SECONDS = 60
 PING_SECONDS = 30
 MIGRATION_POLL_SECONDS = 20
@@ -67,6 +177,10 @@ RELAY_PROBE_TIMEOUT_S = 20
 # a favour to the network, not this node's job, and a newcomer waiting an extra minute costs
 # nothing next to needing a human to be awake.
 PEER_VERIFY_POLL_SECONDS = 60
+# How many heartbeats a node may sit PROBATIONARY before it says so, and keeps saying so.
+# 60 x 30 s = 30 minutes, comfortably longer than a healthy promotion takes (a peer verifier
+# polls every 60 s) and far shorter than the three days [P24]'s stranger waited in silence.
+PROBATION_WARN_BEATS = 60
 
 # Written on first run if no config exists (so a freshly-installed app just works): open join,
 # auto-placement, green idle donation, relay on. Matches agent/config.json.
@@ -77,7 +191,16 @@ DEFAULT_CONFIG = {
     # the coordinator when its slice turns out to duplicate someone else's.
     "layer_start": None, "layer_end": None, "layers_pinned": False,
     "slice_dir": "./model_slice/",
-    "donation_mode": "idle", "idle_threshold_seconds": 60,
+    # "balanced" donates while you work (yielding above 50% CPU, AC only) rather than only
+    # when the machine is idle. A node that only ever runs when nobody is at the keyboard
+    # contributes very little on a personal PC, and the network is small enough that the
+    # difference matters. Existing configs are untouched -- this is the FRESH-install default.
+    "donation_mode": "balanced", "idle_threshold_seconds": 60,
+    # "auto" | "cpu" | "gpu". Which device this node computes on. Set at install time from
+    # what the machine actually has, changeable from the tray. See _apply_device_preference():
+    # it must be applied before common.py is imported, so it is read at module import, not in
+    # main(). NOTE: this build cannot use a GPU whatever this says -- see agent/gpu.py.
+    "device": "auto",
     "behind_nat": True, "log_level": "INFO",
     # Check daily for a newer build, verify its published SHA-256, and install it. On by
     # default because a stranger will not reinstall to pick up a fix, so a node that never
@@ -115,6 +238,39 @@ def ensure_config(path=CONFIG_PATH):
     return path
 
 
+def load_config(path):
+    """Read the config, falling back to the last known-good copy if it is unreadable.
+
+    A truncated config.json is not a hypothetical: `_save()` used to truncate-then-write, so
+    any interrupted save left one, and the agent then died before logging on every start
+    ([P24]). Recovery matters more than it looks — the file holds `node_id` and `node_token`,
+    which ARE the node's identity and its claim on everything it has earned. Regenerating them
+    silently would orphan the owner's balance and register a stranger's machine as a brand-new
+    node, so a broken config is repaired from `.prev` where possible and reported loudly where
+    not. Never silently replaced with defaults.
+    """
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError) as first:
+        prev = path + ".prev"
+        try:
+            with open(prev) as f:
+                cfg = json.load(f)
+        except (OSError, ValueError):
+            raise first             # nothing to fall back to; main() crash_logs the real reason
+        log.error("%s is unreadable (%s) — recovered the previous copy from %s. The node keeps "
+                  "its identity and earnings; anything changed since that copy was written is "
+                  "lost.", path, first, prev)
+        try:
+            shutil.copy2(path, path + ".corrupt")     # keep the evidence, do not just bin it
+        except OSError:
+            pass
+        with open(path, "w") as f:
+            json.dump(cfg, f, indent=2)
+        return cfg
+
+
 log = logging.getLogger("neuron.agent")
 
 
@@ -142,6 +298,20 @@ def _setup_logging(level="INFO"):
         parent.addHandler(h)
 
 
+def _version():
+    """This build's version string, or "unknown". Cheap, lazy and never fatal.
+
+    The first line of the log has to say which build wrote it. [P24] is a regression between
+    two versions, and the log from the machine could not answer "which one is this?" — the
+    answer had to be inferred from which lines were present.
+    """
+    try:
+        from agent import updater
+        return updater.LOCAL_VERSION
+    except Exception:
+        return "unknown"
+
+
 def detect_tailscale_ip():
     """Best-effort Tailscale IPv4 (100.64.0.0/10). Falls back to a 100.x interface addr."""
     for cmd in (["tailscale", "ip", "-4"],
@@ -163,8 +333,16 @@ class Agent:
     def __init__(self, config_path=CONFIG_PATH):
         self.config_path = config_path
         ensure_config(config_path)
-        self.cfg = json.load(open(config_path))
-        self.base = self.cfg["coordinator"].rstrip("/")
+        self.cfg = load_config(config_path)
+        # An in-place upgrade reads the PREVIOUS version's config ([P24]: 0.18 was installed
+        # over 0.17 and kept %LOCALAPPDATA%\NEURON). A key this build expects and the older one
+        # never wrote must not be a KeyError in the constructor — that fires before anything
+        # is logged and takes the whole agent down with no explanation. Missing keys fall back
+        # to DEFAULT_CONFIG here; they are NOT written into the user's file, because injecting
+        # defaults an operator deliberately left out has its own failure mode (see
+        # install.py's write_config).
+        self.base = (self.cfg.get("coordinator")
+                     or DEFAULT_CONFIG["coordinator"]).rstrip("/")
         # donation level (how much spare capacity to give); max_cpu_pct kept as a
         # back-compat explicit ceiling override for older configs.
         overrides = None
@@ -188,10 +366,41 @@ class Agent:
         # "Chat UI (starting…)", disabled, forever, with no hint that it had already given up.
         self.local_chat_state = "pending"
         self.local_chat_error = None           # the reason, when state becomes "failed"
+        # Standing as the COORDINATOR sees it, refreshed by every heartbeat. None until the
+        # first ping answers. `_probation_beats` counts heartbeats spent probationary so the
+        # agent can eventually say out loud that it is serving nothing (see note_standing).
+        self.standing = None
+        self._probation_beats = 0
 
     # -- config persistence -------------------------------------------------- #
     def _save(self):
-        json.dump(self.cfg, open(self.config_path, "w"), indent=2)
+        """Write the config so it can never be observed half-written.
+
+        It used to be `json.dump(cfg, open(path, "w"))`: the open TRUNCATES immediately, the
+        handle was never explicitly closed, and this runs from eight places including
+        registration and migration cutover. Anything that stopped the process mid-write — an
+        OS shutdown, a task kill, installing a new version over a running agent — left a
+        truncated config.json. On the next start `json.load` raises, and in v0.18 that happened
+        *before* logging existed, so the agent died silently with no file, on every start,
+        forever. That is [P24]'s exact signature, and this is the most plausible mechanism found
+        for it (unproven without the machine, but a real defect either way).
+
+        Write to a temp file in the SAME directory, flush to disk, then os.replace() — which is
+        atomic on both Windows and POSIX. The previous good copy is kept as .prev, because the
+        thing at risk is node_id and node_token: that is the node's identity and its earnings,
+        and regenerating it would silently orphan the owner's balance.
+        """
+        tmp = self.config_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(self.cfg, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())        # the rename is atomic; the CONTENT still has to be there
+        if os.path.exists(self.config_path):
+            try:
+                shutil.copy2(self.config_path, self.config_path + ".prev")
+            except OSError:
+                pass                    # a missing backup must never block saving the real file
+        os.replace(tmp, self.config_path)
 
     # -- coordinator calls --------------------------------------------------- #
     def ensure_placement(self):
@@ -276,10 +485,24 @@ class Agent:
             layers = list(model.model.layers)[layer_start:layer_end + 1]
             cache = common.new_cache()
             x = torch.zeros(1, 1, h, dtype=common.DTYPE)
+
+            def _sync():
+                """CUDA kernels are queued, not run, so `perf_counter` around them measures
+                how fast this machine can ENQUEUE work — a number that has nothing to do with
+                how fast it computes. Without this a GPU node reports an absurdly low
+                ms_per_layer, `balancer.solve` reads that as the fastest machine in the
+                network and hands it nearly every layer, and the node is over-assigned into
+                the same OOM [P31] is about — by a second route, through the speed field
+                instead of the memory one. No-op on CPU."""
+                if common.DEVICE.type == "cuda":
+                    torch.cuda.synchronize()
+
             common._run_layers(model, layers, x, cache, 0)      # warm: first pass allocates
+            _sync()                                             # ...and finish warming before t0
             t0 = time.perf_counter()
             for i in range(iters):
                 common._run_layers(model, layers, x, cache, 1 + i)
+            _sync()
             per_pass_ms = (time.perf_counter() - t0) / iters * 1000
             return round(per_pass_ms / n_layers, 4)
         except Exception as e:
@@ -352,9 +575,11 @@ class Agent:
             # host:port. That is the whole of "a stranger can be in the pipeline".
             "behind_nat": self.use_relay(),
         }
-        # GPU capability. Reported so the coordinator can size a node's slice against VRAM
-        # instead of only system RAM. It does NOT mean this node computes on the GPU — the
-        # pipeline in common.py is CPU-only — so nothing here should be read as a speed claim.
+        # GPU capability. Reported for the operator's roster and for the day the pipeline can
+        # use a card. It does NOT size this node's slice: `balancer.GPU_EXECUTION` is off,
+        # because the shipped build ships a CPU-only torch and a loader that never moves
+        # weights to a device, so a card cannot be used regardless of what is detected here.
+        # Nothing in this block is a speed claim or a capacity claim.
         try:
             info = gpu.detect_gpu()
             body["has_gpu"] = info["has_gpu"]
@@ -412,6 +637,7 @@ class Agent:
         log.info("registered as %s [%s], assigned layers %s (%d cores, %d GB%s, %s)",
                  body["node_id"], standing, data["assigned_layers"],
                  body["cores"], body["ram_gb"], gpu_note, ip)
+        self.standing = standing
         # A probationary node's placement is the one that can still be wrong AND still be fixed
         # for free: wrong because it was chosen before the coordinator counted unverified nodes,
         # free because nothing routes to us yet. Re-ask once, and if the answer moved, register
@@ -438,6 +664,7 @@ class Agent:
         except ValueError:
             return                  # a ping that isn't JSON is still a successful heartbeat
         self.adopt_coordinator_url(data)
+        self.note_standing(data.get("standing"))
         if data.get("want_logs"):
             self.upload_log()
 
@@ -473,6 +700,36 @@ class Agent:
                      len(body.encode("utf-8")))
         except requests.RequestException as e:
             log.debug("log upload failed (%s) — will retry on the next heartbeat", e)
+
+    def note_standing(self, standing):
+        """Track what the coordinator says this node's standing is, and SAY when it is stuck.
+
+        [P24]: a stranger's node registered, downloaded its slice, bound its port, opened its
+        relay tunnel and then logged `heartbeat ok — active` for three days. It was
+        probationary the whole time — serving no requests, earning no NRN — because the
+        operator's verifier had died. Every signal the owner could see said the machine was
+        fine, and the one fact that mattered was never mentioned again after the registration
+        line scrolled away. An agent that cannot say "I am online and useless" is why that
+        went unnoticed for three days.
+        """
+        if not standing:
+            return                  # older coordinator: it does not report standing at all
+        if standing != "probationary":
+            if self.standing == "probationary":
+                log.info("VERIFIED — this node now receives live requests and earns NRN")
+            self.standing, self._probation_beats = standing, 0
+            return
+        self.standing = "probationary"
+        self._probation_beats += 1
+        # Repeats rather than firing once: a log that scrolls has to keep saying it, and the
+        # owner may only ever look at the tail.
+        if self._probation_beats % PROBATION_WARN_BEATS == 0:
+            log.warning(
+                "still PROBATIONARY after %d minutes — this machine is healthy and reachable, "
+                "but it serves no requests and earns no NRN until a verifier confirms it. "
+                "Nothing here needs fixing; the network operator's verifier may be down. "
+                "See PROBLEMS.md [P24].",
+                round(self._probation_beats * PING_SECONDS / 60))
 
     @staticmethod
     def _normalize_url(url):
@@ -537,24 +794,60 @@ class Agent:
 
     # -- slice download ------------------------------------------------------ #
     @staticmethod
-    def slice_layers_on_disk(weights):
-        """Which decoder layers a downloaded slice actually contains.
+    def slice_tensors_on_disk(weights):
+        """Every tensor name inside a downloaded slice, or None if the file is unreadable.
 
         Read from the safetensors header (an 8-byte little-endian length then JSON), so it
         reflects the bytes on disk rather than what some config claims about them.
-        Returns (lo, hi) or None if it cannot be determined.
         """
         try:
             with open(weights, "rb") as f:
                 n = int.from_bytes(f.read(8), "little")
                 if not 0 < n < 100 * 1024 * 1024:
                     return None
-                header = json.loads(f.read(n).decode())
-            idx = {int(k.split(".")[2]) for k in header
-                   if k.startswith("model.layers.") and k.split(".")[2].isdigit()}
-            return (min(idx), max(idx)) if idx else None
-        except (OSError, ValueError, KeyError, IndexError):
+                return set(json.loads(f.read(n).decode()))
+        except (OSError, ValueError):
             return None
+
+    @staticmethod
+    def slice_layers_on_disk(weights):
+        """Which decoder layers a downloaded slice actually contains, as (lo, hi) or None."""
+        keys = Agent.slice_tensors_on_disk(weights)
+        if not keys:
+            return None
+        idx = set()
+        for k in keys:
+            parts = k.split(".")
+            if k.startswith("model.layers.") and len(parts) > 2 and parts[2].isdigit():
+                idx.add(int(parts[2]))
+        return (min(idx), max(idx)) if idx else None
+
+    @staticmethod
+    def _slice_covers(weights, have, want, info):
+        """Does the slice on disk hold everything this node's NEW assignment needs?
+
+        The layer range containing `want` is necessary but not sufficient: a first node also
+        needs the embedding (and the tokenizer, which lives in separate files), and a last node
+        needs the final norm. A slice downloaded as a MIDDLE has neither, so a middle promoted
+        to first or last must still re-download however many layers it already holds.
+        """
+        if not (have[0] <= want[0] and have[1] >= want[1]):
+            return False
+        keys = Agent.slice_tensors_on_disk(weights)
+        if not keys:
+            return False
+        if info.get("is_last_node") and "model.norm.weight" not in keys:
+            return False
+        if info.get("is_first_node"):
+            # lm_head is deliberately NOT required separately: with tie_word_embeddings (Qwen's
+            # default) it IS embed_tokens and never appears as its own tensor.
+            if "model.embed_tokens.weight" not in keys:
+                return False
+            d = os.path.dirname(weights)
+            if not any(os.path.exists(os.path.join(d, f))
+                       for f in ("tokenizer.json", "tokenizer_config.json")):
+                return False
+        return True
 
     def ensure_slice(self, info):
         slice_dir = os.path.join(HERE, os.path.normpath(self.cfg["slice_dir"]))
@@ -571,6 +864,19 @@ class Agent:
             want = (info["layer_start"], info["layer_end"])
             if have == want:
                 log.info("slice already present (%s) — skipping download", slice_dir)
+                return slice_dir
+            if have and self._slice_covers(weights, have, want, info):
+                # A slice that CONTAINS the assigned range is as good as an exact one, and
+                # re-downloading it is pure waste. `load_slice_model` builds a full model
+                # skeleton and fills in whatever the file holds (strict=False), and this node
+                # then runs only layers[lo:hi] -- the extra layers cost resident RAM and
+                # nothing else. Worth the check because re-splitting is now routine: a node
+                # that has been through a couple of re-splits has usually already downloaded
+                # a superset of whatever it is asked for next, and throwing that away is how
+                # a stranger's PC ends up downloading the same weights four times in an
+                # afternoon (observed live 2026-08-07, ~20 GB wasted on one 8 GB machine).
+                log.info("cached slice holds layers %d-%d, which covers this node's %d-%d — "
+                         "reusing it, no download needed", have[0], have[1], want[0], want[1])
                 return slice_dir
             log.warning("cached slice holds layers %s but this node serves %d-%d — "
                         "discarding it and downloading the right one",
@@ -613,8 +919,13 @@ class Agent:
                 slice_dir = self.ensure_slice(info)
                 port = self.cfg.get("port", 50999)
                 if self.server is None:
+                    # The SAME Event the tray's Pause toggles. Without it NodeServer built its
+                    # own, `self.paused` was never read by anything, and pausing only skipped
+                    # the heartbeat -- so a paused node kept serving live requests for up to
+                    # HEARTBEAT_TIMEOUT_S (~90 s) while its owner believed it had stopped.
                     self.server = NodeServer(slice_dir, info["layer_start"], info["layer_end"],
-                                             info.get("total_layers", 28))
+                                             info.get("total_layers", 28),
+                                             paused_flag=self.user_paused)
                 threading.Thread(target=self.server.run, args=("0.0.0.0", port),
                                  daemon=True).start()
                 # Do not proceed until the listener is genuinely accepting. run() reports a
@@ -881,8 +1192,16 @@ class Agent:
                     log.info("paused (%s) — not advertising availability", "; ".join(reasons))
                 else:
                     self.ping()
-                    self.state.update(status="active", detail="earning")
-                    log.info("heartbeat ok — active")
+                    if self.standing == "probationary":
+                        # "active" would be a lie here: the coordinator excludes probationary
+                        # nodes from routing, so this beat advertises availability nobody can
+                        # use. Say which of the two it is ([P24]).
+                        self.state.update(status="active",
+                                          detail="awaiting verification — not yet earning")
+                        log.info("heartbeat ok — probationary, not yet serving or earning")
+                    else:
+                        self.state.update(status="active", detail="earning")
+                        log.info("heartbeat ok — active")
             except requests.RequestException as e:
                 self.state.update(status="error", detail=f"coordinator unreachable: {e}")
                 log.warning("heartbeat failed: %s", e)
@@ -1033,6 +1352,17 @@ class Agent:
 
 
 def main():
+    # FIRST STATEMENT, before argparse and before the config is read. It used to run after
+    # both, because the log level comes from the config -- so a config this build could not
+    # read took the agent down with no log file, and [P24]'s "0.18 produced no log at all"
+    # had no way to be diagnosed remotely. The level is re-applied from the config below;
+    # starting at INFO and adjusting is strictly better than starting at nothing.
+    _setup_logging()
+    # Decided at import (it had to be — see _apply_device_preference), reported here, once
+    # there is somewhere for it to go. A node that is told it will use a GPU and then does not
+    # should be able to find out why from its own log.
+    if _DEVICE_NOTE:
+        log.info("%s", _DEVICE_NOTE)
     ap = argparse.ArgumentParser(description="Run a NEURON node agent.")
     # One machine could only ever run ONE agent, because the config path was a module
     # constant. That is fine for a stranger donating one PC, and wrong for anyone holding the
@@ -1062,8 +1392,15 @@ def main():
                          "machine must not fight the first one for the chat port)")
     args = ap.parse_args()
 
-    path = ensure_config(args.config)
-    cfg = json.load(open(path))
+    try:
+        path = ensure_config(args.config)
+        cfg = load_config(path)
+    except Exception:
+        # The prime suspect for a version that starts and vanishes: an in-place upgrade reads
+        # the previous version's config file. Unreadable JSON, a path that is not writable in
+        # the frozen app's state dir, a half-written file -- all of it used to be silent.
+        crash_log(f"could not read the config at {args.config}")
+        raise
     dirty = False
     if args.donation_mode:
         cfg["donation_mode"], dirty = args.donation_mode, True
@@ -1085,15 +1422,30 @@ def main():
         with open(path, "w") as f:
             json.dump(cfg, f, indent=2)
 
-    _setup_logging(cfg.get("log_level", "INFO"))
-    log.info("NEURON agent starting | config=%s | coordinator=%s | mode=%s",
-             path, cfg["coordinator"], cfg.get("donation_mode"))
-    agent = Agent(config_path=path)
+    _setup_logging(cfg.get("log_level", "INFO"))     # now apply the level the config asks for
+    log.info("NEURON agent v%s starting | config=%s | coordinator=%s | mode=%s",
+             _version(), path, cfg.get("coordinator", DEFAULT_CONFIG["coordinator"]),
+             cfg.get("donation_mode"))
+    # A config written by an older build is missing whatever this one added. That is not an
+    # error -- every lookup falls back to DEFAULT_CONFIG -- but it belongs in the log, because
+    # "upgraded in place over an older install" is the first thing to know when a version that
+    # worked stops working ([P24]).
+    missing = [k for k in DEFAULT_CONFIG if k not in cfg]
+    if missing:
+        log.info("config predates this build; using built-in defaults for: %s",
+                 ", ".join(sorted(missing)))
     try:
+        agent = Agent(config_path=path)
         agent.run()
     except KeyboardInterrupt:
         agent.stop()
         log.info("agent stopped")
+    except BaseException:
+        # Logging is up by now, so this reaches agent.log — but crash_log also puts it in the
+        # file when the logging stack itself is what broke, and costs nothing.
+        log.exception("the agent stopped with an unhandled error")
+        crash_log("the agent stopped with an unhandled error")
+        raise
 
 
 if __name__ == "__main__":

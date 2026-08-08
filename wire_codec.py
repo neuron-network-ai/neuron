@@ -99,7 +99,11 @@ def fwht(x):
     the difference between the rotation paying for itself and not: at 8192 wide the loop
     cost 1.26 ms per call against ~6.4 ms of wire time saved, and this costs 0.045 ms.
     """
-    return x @ _hadamard_matrix(x.shape[-1]).to(x.dtype)
+    # The cached matrix is built once, on CPU. Following `x` rather than pinning it there is
+    # what lets this be called on a CUDA tensor at all -- a matmul between a CUDA operand and
+    # a CPU one raises. `.to()` returns self when device and dtype already match, so on a
+    # CPU-only machine this is the identity and the arithmetic is unchanged.
+    return x @ _hadamard_matrix(x.shape[-1]).to(device=x.device, dtype=x.dtype)
 
 
 # --------------------------------------------------------------------------- #
@@ -127,7 +131,10 @@ def _encode_i8h(t):
     rot = fwht(flat.reshape(rows, dp // BLOCK, BLOCK)).reshape(-1, BLOCK)
     scale = rot.abs().amax(dim=1).clamp_min(1e-12)
     q = torch.round(rot / scale[:, None] * 127.0).clamp(-127, 127).to(torch.int8)
-    return scale.numpy().tobytes() + q.numpy().tobytes(), {"d": d, "rows": rows}
+    # .cpu() before .numpy(): numpy() raises TypeError on a CUDA tensor. This is the wire
+    # boundary, so CPU is where these have to end up regardless. Identity on a CPU tensor.
+    return (scale.cpu().numpy().tobytes() + q.cpu().numpy().tobytes(),
+            {"d": d, "rows": rows})
 
 
 def _decode_i8h(blob, shape, extra):
@@ -144,7 +151,7 @@ def _decode_i8h(blob, shape, extra):
 def _encode_raw(t, dtype):
     c = t.to(dtype).contiguous()
     view = c.view(torch.int16) if dtype is torch.float16 else c
-    return view.numpy().tobytes(), {}
+    return view.cpu().numpy().tobytes(), {}     # numpy() raises on CUDA; see _encode_i8h
 
 
 def _decode_raw(blob, shape, dtype):

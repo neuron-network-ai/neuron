@@ -151,15 +151,18 @@ class NSNodeServer:
                     past += q
 
                     if role == "middle":
-                        common.send_msg(bconn, {"type": "act", "hidden": out}, codec=bcodec)
+                        common.send_msg(bconn, {"type": "act", "hidden": common._to_cpu(out)},
+                                        codec=bcodec)
                         resp = common.recv_msg(bconn)
-                        common.send_msg(conn, {"hidden": resp["hidden"], "c_compute_ms": ms,
+                        common.send_msg(conn, {"hidden": common._to_cpu(resp["hidden"]), "c_compute_ms": ms,
                                                "b_compute_ms": resp["b_compute_ms"]},
                                         codec=codec)
                     elif role == "probe":
-                        common.send_msg(conn, {"hidden": out, "c_compute_ms": ms}, codec=codec)
+                        common.send_msg(conn, {"hidden": common._to_cpu(out), "c_compute_ms": ms},
+                                        codec=codec)
                     else:
-                        common.send_msg(conn, {"hidden": out, "b_compute_ms": ms}, codec=codec)
+                        common.send_msg(conn, {"hidden": common._to_cpu(out), "b_compute_ms": ms},
+                                        codec=codec)
 
                 elif mtype == "stats":
                     # tok/s this node sustained, so a driver or the coordinator can compare

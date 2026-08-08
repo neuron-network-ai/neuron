@@ -22,7 +22,7 @@ from PIL import Image, ImageDraw
 import pystray
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from agent.agent import Agent, _setup_logging   # noqa: E402
+from agent.agent import Agent, _setup_logging, crash_log   # noqa: E402
 from agent import resource_guard                 # noqa: E402
 
 log = logging.getLogger("neuron.agent")   # same file as the agent's own log
@@ -34,6 +34,26 @@ DONATION_LABELS = [
     ("generous", "Generous — donate more"),
     ("max", "Max — always on"),
 ]
+
+# compute device shown in the tray (value -> menu label). Mirrors DONATION_LABELS above.
+# "Automatic" is the honest default: it uses a GPU when one is genuinely usable and the CPU
+# otherwise, which on this build is always the CPU — see _device_note().
+DEVICE_LABELS = [
+    ("auto", "Automatic — use a GPU if one works"),
+    ("cpu", "CPU only"),
+    ("gpu", "GPU"),
+]
+
+def _gpu_is_usable():
+    """Can this build actually compute on a GPU? Not "is a card present" — that is a different
+    question, and answering it instead is what produced a release announcing GPU support that
+    could never run. Never raises: the tray must open on any machine."""
+    try:
+        import torch
+        return bool(torch.cuda.is_available())
+    except Exception:                                               # noqa: BLE001
+        return False
+
 
 COLORS = {
     "active": (46, 160, 67),        # green — earning
@@ -54,6 +74,10 @@ def icon_image(color):
 class Tray:
     def __init__(self, config_path=None):
         self.agent = Agent(config_path) if config_path else Agent()
+        # What the device was when this process started. `common.DEVICE` is resolved at import
+        # and never revisited, so choosing a different one in the menu cannot take effect until
+        # a restart — comparing against this is how the menu knows to say so.
+        self._device_at_start = self.agent.cfg.get("device", "auto")
         self.ledger = {"balance": 0.0, "total_earned": 0.0}
         self._ledger_error = None            # last non-200 from the ledger poll, if any
         self._last_logged_ledger_error = None   # so one bad status isn't logged every 30s
@@ -94,6 +118,7 @@ class Tray:
             return f"⚠ balance unavailable (HTTP {self._ledger_error})"
 
         donation = pystray.Menu(*[self._mode_item(m, label) for m, label in DONATION_LABELS])
+        device_menu = pystray.Menu(*[self._device_item(d, label) for d, label in DEVICE_LABELS])
         return pystray.Menu(
             pystray.MenuItem(title, None, enabled=False),
             pystray.MenuItem(status, None, enabled=False),
@@ -106,6 +131,12 @@ class Tray:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(pause_label, self._toggle_pause),
             pystray.MenuItem("Donation level", donation),
+            pystray.MenuItem("Compute device", device_menu),
+            # Callable text, like `title`/`status` above: the menu object is built once and
+            # re-rendered by update_menu(), so a plain string would freeze at its first value
+            # and the note would still claim "applies on restart" after a restart.
+            pystray.MenuItem(lambda item: self._device_note(), None, enabled=False,
+                             visible=lambda item: bool(self._device_note())),
             pystray.MenuItem("My Dashboard", self._open_my_dashboard),
             pystray.MenuItem("Network Dashboard", self._open_dashboard),
             pystray.Menu.SEPARATOR,
@@ -133,6 +164,36 @@ class Tray:
             checked=lambda item, m=mode: self.agent.cfg.get("donation_mode", "idle") == m,
             radio=True,
         )
+
+    def _device_item(self, device, label):
+        return pystray.MenuItem(
+            label, self._set_device(device),
+            checked=lambda item, d=device: self.agent.cfg.get("device", "auto") == d,
+            radio=True,
+        )
+
+    def _set_device(self, device):
+        def handler(icon, item):
+            self.agent.cfg["device"] = device
+            self.agent._save()
+            self.icon.update_menu()
+        return handler
+
+    def _device_note(self):
+        """The line under the device menu. Empty when there is nothing worth saying.
+
+        Two honest statements, never a silent no-op. Picking GPU on this build changes the
+        config and changes nothing else, because the shipped torch is CPU-only — a menu that
+        appears to work and does not is worse than one that says so. And because
+        `common.DEVICE` is resolved at import, ANY change here needs a restart; the tray is the
+        only place a user finds that out.
+        """
+        want = self.agent.cfg.get("device", "auto")
+        if want == "gpu" and not _gpu_is_usable():
+            return "GPU selected — this build computes on CPU"
+        if want != self._device_at_start:
+            return "Device change applies on restart"
+        return ""
 
     def _set_mode(self, mode):
         def handler(icon, item):
@@ -226,7 +287,15 @@ class Tray:
 
 def main():
     _setup_logging("INFO")   # the tray hides the console, so keep a record in agent.log
-    Tray().run()
+    try:
+        Tray().run()
+    except BaseException:
+        # Constructing the Tray reads the config and builds an Agent, either of which can
+        # throw on an in-place upgrade ([P24]). In windowed mode that traceback has no console
+        # to land in, so it must reach the file explicitly.
+        log.exception("the tray app failed to start")
+        crash_log("the tray app failed to start")
+        raise
 
 
 if __name__ == "__main__":

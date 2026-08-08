@@ -148,6 +148,11 @@ def network():
         "online_nodes": net["online_nodes"],
         "total_nodes": net["total_nodes"],
         "layers_covered": net["total_layers_covered"],
+        # The page hardcoded "/28" in its degraded banner, which silently becomes a lie the
+        # moment the network migrates to a bigger tier. It also had no way to say WHICH layers
+        # are missing, which is the only part of that message anyone can act on.
+        "total_layers": net["total_layers"],
+        "uncovered_layers": net.get("uncovered_layers", []),
         "healthy": net["network_healthy"],
         "requests_served": st["stats"]["total_requests_served"],
         "nrn_distributed": round(st["stats"]["total_nrn_distributed"], 3),
@@ -176,6 +181,14 @@ def _drive(prompt: str, max_new: int, wallet_id: str, use_rag: bool = False,
         yield sse("error", {"detail": "This request was blocked by NEURON's acceptable-use "
                                       "policy (see SAFETY.md).", "code": "content_policy_violation"})
         return
+    if not verdict.screened:
+        # Passed the gate only because the gate has nothing to say about this script. That is
+        # NOT the same as "clean", and reporting the two identically made the share of traffic
+        # going through unexamined unmeasurable. Recorded locally (never sent to the
+        # coordinator, like every other moderation line) so the coverage gap has evidence
+        # behind it instead of being an assumption. No snippet: this is not a violation.
+        moderation.log_event("in", f"unscreened_script:{verdict.script}",
+                             f"unscreened-{uuid.uuid4().hex[:12]}")
 
     # Real multi-turn memory (Workstream: Chat UI redesign) -- load prior turns from the
     # driver-side conversation store (ui/conversations.py) BEFORE augmenting/dispatching the
@@ -241,6 +254,11 @@ def _drive(prompt: str, max_new: int, wallet_id: str, use_rag: bool = False,
                                "local": ev.get("local", False)})
         elif ev["type"] == "token":
             yield sse("token", {"text": ev["text"]})
+        elif ev["type"] == "reroute":
+            # A node died and the driver recovered onto a fresh chain. The answer is unchanged
+            # (token-identical, per test_node_death.py); only the timing is. Forwarded so the
+            # page can say why the stream paused instead of appearing to hang.
+            yield sse("reroute", {"at_token": ev["at_token"], "nodes": ev["nodes"]})
         elif ev["type"] == "done":
             full_text = ev.get("text", "")
             # Persist the real exchange only on a genuine completion -- never a blocked or
@@ -251,7 +269,13 @@ def _drive(prompt: str, max_new: int, wallet_id: str, use_rag: bool = False,
             conversations.add_message(conversation_id, wallet_id, "assistant", full_text)
             yield sse("done", {"tokens": ev["completion_tokens"],
                                "latency_ms": ev["latency_ms"], "tok_per_s": ev["tok_per_s"],
-                               "cost_nrn": ev.get("cost_nrn")})
+                               "cost_nrn": ev.get("cost_nrn"),
+                               # The driver records these deliberately ("a recovered answer is
+                               # still a degraded one"). They were dropped here, so a request
+                               # that survived two node deaths looked identical to one that
+                               # sailed through -- the opposite of RESILIENCE.md's rule that a
+                               # fallback must be visible in the response metadata.
+                               "reroutes": len(ev.get("reroutes") or [])})
         elif ev["type"] == "error":
             # a dropped/offline node mid-chain surfaces here — previously silent server-side,
             # so the founder would only learn about a real stranger's failed request if they

@@ -24,7 +24,9 @@ def main():
     real_cache = moderation._cache
     moderation._cache = moderation._load_blocklist(moderation.BLOCKLIST_PATH)
     try:
-        with open(moderation.BLOCKLIST_PATH) as f:
+        # encoding is required, not cosmetic: the blocklist holds non-ASCII terms and the
+        # default here is the locale codepage (cp1252 on Windows), which cannot decode them.
+        with open(moderation.BLOCKLIST_PATH, encoding="utf-8") as f:
             blocklist = json.load(f)
 
         check("benign text passes", not moderation.check_text("What's the weather like today?").blocked)

@@ -5,8 +5,9 @@
   "layer_start": null,
   "layer_end": null,
   "slice_dir": "./model_slice/",
-  "donation_mode": "idle",
+  "donation_mode": "balanced",
   "idle_threshold_seconds": 60,
+  "device": "auto",
   "behind_nat": true,
   "log_level": "INFO",
   "auto_update": true

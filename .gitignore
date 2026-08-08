@@ -32,6 +32,14 @@ agent/model_slice*/
 agent/*.log
 agent/config.test.json
 agent/config.bad.json
+# every local agent config, not just the test ones -- config.driver.json holds this machine's
+# node_token and relay ticket. `agent/config.node-*.json` below did not match config.driver.json.
+agent/config.*.json
+# the atomic _save() keeps the previous config alongside the new one, node_token included
+agent/*.prev
+# holds a wallet private_key. The `*.key` rule further down does NOT match a .json filename,
+# and this repo is public.
+agent/payout_key.json
 
 # --- moderation log (driver-local, holds prompt snippets -- never commit) ---
 safety/*.log
@@ -126,3 +134,6 @@ agent/agent.log
 # off-box coordinator backups (pulled copies of the live ledger)
 backups-offbox/
 coordinator/backups/
+
+# personal run helper — local paths and shell layout, not part of the product
+neuron.bat

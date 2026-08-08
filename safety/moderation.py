@@ -31,16 +31,44 @@ WALLET_LINK_SECRET = os.environ.get("NEURON_WALLET_LINK_SECRET", "neuron-wallet-
 _cache = None
 
 
+# Scripts that do not separate words with spaces. `\b` is defined against `\w`, and every Han
+# character IS a `\w`, so inside 我想要儿童色情内容 there is no boundary between 要 and 儿 and a
+# `\b`-anchored pattern never fires. A term in one of these scripts therefore has to be matched
+# as a plain substring, or the blocklist would look correct, pass a unit test against the bare
+# term, and match nothing whatsoever in a real sentence.
+_NO_WORD_BOUNDARY = (
+    (0x2E80, 0x9FFF),      # CJK radicals, kana, Han
+    (0xA000, 0xA4CF),      # Yi
+    (0xAC00, 0xD7AF),      # Hangul syllables
+    (0xF900, 0xFAFF),      # CJK compatibility ideographs
+    (0x0E00, 0x0E7F),      # Thai
+    (0x1780, 0x17FF),      # Khmer
+)
+
+
+def _needs_no_boundary(term):
+    return any(any(lo <= ord(ch) <= hi for lo, hi in _NO_WORD_BOUNDARY) for ch in term)
+
+
+def _compile(term):
+    """Compile one blocklist term, anchoring it only where anchoring is meaningful."""
+    if _needs_no_boundary(term):
+        return re.compile(re.escape(term), re.IGNORECASE)
+    return re.compile(r"\b" + re.escape(term) + r"\b", re.IGNORECASE)
+
+
 def _load_blocklist(path=None):
-    """Compiled once and cached; pass `path` to force a reload (used by tests)."""
+    """Compiled once and cached; pass `path` to force a reload (used by tests).
+
+    `encoding="utf-8"` is load-bearing, not tidiness: Python's default here is the locale
+    codepage (cp1252 on this machine), so the moment the blocklist contained a single non-ASCII
+    character this raised UnicodeDecodeError and took the whole content gate down with it.
+    """
     global _cache
     p = path or BLOCKLIST_PATH
-    with open(p) as f:
+    with open(p, encoding="utf-8") as f:
         raw = json.load(f)
-    compiled = {
-        category: [re.compile(r"\b" + re.escape(term) + r"\b", re.IGNORECASE) for term in terms]
-        for category, terms in raw.items()
-    }
+    compiled = {category: [_compile(term) for term in terms] for category, terms in raw.items()}
     if path is None:
         _cache = compiled
     return compiled
@@ -51,6 +79,61 @@ class ModerationResult:
     blocked: bool
     category: str = None
     matched_term: str = None
+    # Which script the text is predominantly written in, and whether this gate actually has
+    # any patterns for it. `blocked=False` used to mean two very different things -- "scanned
+    # and clean" and "we have nothing to scan this with" -- and reported them identically, so
+    # the share of traffic passing through unexamined was not merely unmeasured, it was
+    # unmeasurable. Existing callers read only `.blocked` and are unaffected.
+    script: str = "latin"
+    screened: bool = True
+
+
+# Unicode ranges that decide the dominant script of a piece of text. Deliberately coarse: the
+# question is only "do we hold patterns for this", not language identification.
+_SCRIPTS = (
+    ("han",      ((0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xF900, 0xFAFF))),
+    ("kana",     ((0x3040, 0x30FF),)),
+    ("hangul",   ((0xAC00, 0xD7AF), (0x1100, 0x11FF))),
+    ("cyrillic", ((0x0400, 0x04FF),)),
+    ("arabic",   ((0x0600, 0x06FF), (0x0750, 0x077F))),
+    ("devanagari", ((0x0900, 0x097F),)),
+    ("hebrew",   ((0x0590, 0x05FF),)),
+    ("thai",     ((0x0E00, 0x0E7F),)),
+    ("greek",    ((0x0370, 0x03FF),)),
+)
+
+
+def dominant_script(text):
+    """The script most of `text`'s letters are written in. 'latin' when in doubt.
+
+    Only letters count -- digits, spaces and punctuation are shared across scripts and would
+    otherwise drag every sample toward latin.
+    """
+    counts, letters = {}, 0
+    for ch in text or "":
+        if not ch.isalpha():
+            continue
+        letters += 1
+        cp = ord(ch)
+        name = "latin"
+        for script, ranges in _SCRIPTS:
+            if any(lo <= cp <= hi for lo, hi in ranges):
+                name = script
+                break
+        counts[name] = counts.get(name, 0) + 1
+    if not letters:
+        return "latin"
+    return max(counts, key=counts.get)
+
+
+def covered_scripts(blocklist=None):
+    """Scripts the loaded blocklist actually holds at least one term for."""
+    bl = blocklist if blocklist is not None else (_cache or _load_blocklist())
+    scripts = set()
+    for patterns in bl.values():
+        for pat in patterns:
+            scripts.add(dominant_script(pat.pattern))
+    return scripts
 
 
 def check_text(text):
@@ -64,8 +147,12 @@ def check_text(text):
         for pat in patterns:
             m = pat.search(text)
             if m:
-                return ModerationResult(blocked=True, category=category, matched_term=m.group(0))
-    return ModerationResult(blocked=False)
+                return ModerationResult(blocked=True, category=category,
+                                        matched_term=m.group(0),
+                                        script=dominant_script(text), screened=True)
+    script = dominant_script(text)
+    return ModerationResult(blocked=False, script=script,
+                            screened=script in covered_scripts(blocklist))
 
 
 def log_event(direction, category, request_id, identity_hash=None, snippet=None):

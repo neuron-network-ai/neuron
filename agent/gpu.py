@@ -13,11 +13,22 @@ Two separate questions, deliberately answered by two different mechanisms:
                      processes, which is exactly the load we must yield to.
 
 **Scope, stated plainly because it is easy to over-read.** Nothing here makes inference run
-on the GPU. `common.py` builds every shard on CPU and there is no device selection anywhere
-in the pipeline, so a GPU node today computes on its CPU like every other node. What this
-module provides is honest capability *reporting* (so the coordinator knows the hardware
-exists and how much VRAM it has) and a *yield signal* (so a node backs off when its owner
-starts a game). Actual GPU execution is a `common.py` change and is not implemented.
+on the GPU, and **the shipped build cannot run on one at all**: it packages `torch 2.4.1+cpu`
+and a `llama-cpp-python` with no GPU backend compiled in, so a card is unreachable regardless
+of what this module detects. That is a PACKAGING fact, not a missing test machine — the usual
+caveat blames the absent NVIDIA card here, which reads as "untested" when the truth is
+"impossible in this binary".
+
+Two further gaps behind even that. `common.py` does resolve a device, but the loader every
+volunteer node actually uses (`slice_downloader.load_slice_model`) returns the model without
+moving it — see `slice_downloader.py:299`. And `coordinator/balancer.GPU_EXECUTION` is off, so
+VRAM does not size a slice either; it was on, and it OOM-killed the sizing it was meant to
+protect.
+
+What this module provides is honest capability *reporting* (so the coordinator knows the
+hardware exists and how much VRAM it has) and a *yield signal* (so a node backs off when its
+owner starts a game). Both of those work today. Actual GPU execution needs a CUDA wheel and a
+loader that moves weights, and is not implemented.
 
 ARM-compatible: pure Python, no x86 assumptions, no compiled extension. Every entry point
 is failure-tolerant — a machine with no GPU, no driver, a broken driver, or an nvidia-smi
@@ -173,4 +184,6 @@ if __name__ == "__main__":       # quick manual check
     print("busy(50):", gpu_busy(50.0))
     if info["has_gpu"] and not info["torch_cuda"]:
         print("note: GPU present but torch has no CUDA — reported, not usable by torch")
-    print("note: NEURON does not run inference on the GPU yet (CPU-only pipeline)")
+    print("note: NEURON does not run inference on the GPU. This build ships a CPU-only torch "
+          "and a llama.cpp with no GPU backend, so a card cannot be used regardless of the "
+          "hardware above.")

@@ -1,37 +1,55 @@
 {
-  "csam": [
-    "child sexual abuse material",
-    "csam",
-    "sexual content involving minors",
-    "child pornography"
-  ],
-  "weapons_cbrn": [
-    "how to make a nerve agent",
-    "how to synthesize sarin",
-    "how to build a nuclear weapon",
-    "how to make a bioweapon",
-    "how to weaponize anthrax",
-    "how to enrich uranium at home"
-  ],
-  "malware_attack": [
-    "write ransomware",
-    "build a botnet",
-    "write a ddos attack script",
-    "write a self-spreading computer virus"
-  ],
-  "self_harm": [
-    "how to commit suicide",
-    "best way to kill myself",
-    "how to self harm"
-  ],
-  "nonconsensual_sexual": [
-    "deepfake nudes of",
-    "revenge porn",
-    "nonconsensual sexual images"
-  ],
-  "serious_violence_threats": [
-    "how to build a bomb",
-    "how to plan a mass shooting",
-    "how to commit an act of terrorism"
-  ]
+ "csam": [
+  "child sexual abuse material",
+  "csam",
+  "sexual content involving minors",
+  "child pornography",
+  "儿童色情",
+  "儿童性虐待",
+  "未成年人色情"
+ ],
+ "weapons_cbrn": [
+  "how to make a nerve agent",
+  "how to synthesize sarin",
+  "how to build a nuclear weapon",
+  "how to make a bioweapon",
+  "how to weaponize anthrax",
+  "how to enrich uranium at home",
+  "如何制造神经毒剂",
+  "如何合成沙林",
+  "如何制造核武器",
+  "如何制造生物武器"
+ ],
+ "malware_attack": [
+  "write ransomware",
+  "build a botnet",
+  "write a ddos attack script",
+  "write a self-spreading computer virus",
+  "编写勒索软件",
+  "制作僵尸网络",
+  "编写病毒程序"
+ ],
+ "self_harm": [
+  "how to commit suicide",
+  "best way to kill myself",
+  "how to self harm",
+  "如何自杀",
+  "自杀方法",
+  "如何自残"
+ ],
+ "nonconsensual_sexual": [
+  "deepfake nudes of",
+  "revenge porn",
+  "nonconsensual sexual images",
+  "深度伪造裸照",
+  "报复性色情"
+ ],
+ "serious_violence_threats": [
+  "how to build a bomb",
+  "how to plan a mass shooting",
+  "how to commit an act of terrorism",
+  "如何制造炸弹",
+  "如何策划枪击",
+  "如何实施恐怖袭击"
+ ]
 }

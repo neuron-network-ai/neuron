@@ -17,6 +17,7 @@ Usage (normally launched by agent.py):
   python node_server.py --slice-dir ./model_slice --layer-start 10 --layer-end 18 --port 50999
 """
 import argparse
+import gc
 import os
 import socket
 import sys
@@ -36,6 +37,33 @@ from slice_downloader import load_slice_model    # noqa: E402
 # batching.MicroBatcher, which serves a whole batch of requests in one forward pass instead
 # of serialising them.
 compute_lock = threading.Lock()
+
+
+def _layers_in_slice(slice_dir):
+    """(lo, hi) of the decoder layers actually present in a downloaded slice, or None.
+
+    Read straight from the safetensors header (8-byte little-endian length, then JSON) so the
+    BYTES decide what this node can serve, not a config file or a coordinator's claim. Returns
+    None when it cannot be determined, which is treated as "do not block" -- a node that cannot
+    read its own header has a bigger problem than a range check, and refusing to start on an
+    unreadable header would take working nodes down for a check that is meant to catch a
+    mismatch, not a corrupt file.
+    """
+    import json
+    try:
+        with open(os.path.join(slice_dir, "model.safetensors"), "rb") as f:
+            n = int.from_bytes(f.read(8), "little")
+            if not 0 < n < 100 * 1024 * 1024:
+                return None
+            keys = json.loads(f.read(n).decode())
+    except (OSError, ValueError):
+        return None
+    idx = set()
+    for k in keys:
+        parts = k.split(".")
+        if k.startswith("model.layers.") and len(parts) > 2 and parts[2].isdigit():
+            idx.add(int(parts[2]))
+    return (min(idx), max(idx)) if idx else None
 
 # Is this machine in the middle of serving somebody? Used by the auto-updater, which must never
 # replace the app underneath a request in flight -- a dropped hop shows up to the driver as
@@ -78,6 +106,57 @@ def is_busy(idle_seconds=120):
         return (time.time() - _last_activity) < idle_seconds
 
 
+# A never-set Event, used as the default for `self._reloading`. Test helpers construct a
+# NodeServer without running __init__ (the point being to exercise reload/serve without a
+# model), and a missing attribute there would raise AttributeError from the request path --
+# turning a diagnostic into the outage it was added to describe.
+_NOT_RELOADING = threading.Event()
+
+
+def _empty_device_cache():
+    """Return freed GPU blocks to the driver. A no-op on CPU, and never fatal.
+
+    torch keeps a caching allocator: freeing a tensor returns its memory to torch, not to the
+    GPU, so the card still reports it as in use. During a migration that is the difference
+    between the new slice fitting and not — and `nvidia-smi` showing memory the owner cannot
+    use is also what makes a volunteer think the agent is leaking.
+    """
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:                                               # noqa: BLE001
+        pass
+
+
+def _weights_device(model):
+    """Where this slice's weights ACTUALLY are, read off the loaded tensors.
+
+    Deliberately NOT `common.DEVICE`. That is the configured *intent* -- what the process
+    resolved at import -- and the gap between that intent and where the bytes really ended up
+    is the whole reason `balancer.GPU_EXECUTION` had to be turned back off: the coordinator
+    sized volunteers by VRAM for weights that were sitting in system RAM the entire time.
+    A number nobody can check is how that survived a whole release, so this reads the tensors.
+
+    `INSTALL.md` used to ask a first GPU volunteer to send back a `device: cuda:0` line that
+    **cannot appear on any machine** -- it comes from `common.device_name()`, whose only caller
+    is on the bench path an agent never reaches. This line replaces that request with one the
+    node actually prints.
+
+    Meta tensors are skipped: `load_slice_model` fills a full skeleton with `strict=False`, so
+    every layer this node does NOT hold stays meta, and those are not where the weights are.
+    Never raises -- a diagnostic that can stop a node from starting is worse than no
+    diagnostic.
+    """
+    try:
+        for p in model.parameters():
+            if p.device.type != "meta":
+                return str(p.device)
+        return "meta (no materialized weights)"
+    except Exception:                                               # noqa: BLE001
+        return "unknown"
+
+
 class NodeServer:
     def __init__(self, slice_dir, layer_start, layer_end, total_layers, paused_flag=None):
         self.lo = self.hi = self.n = None
@@ -93,6 +172,10 @@ class NodeServer:
         # checking this first.
         self.listening = threading.Event()
         self.bind_error = None
+        # Set while the served slice is being swapped. reload() releases the old model before
+        # loading the new one, so there is a real window with no weights; requests arriving in
+        # it get a named refusal instead of an AttributeError from somewhere deep in a batcher.
+        self._reloading = threading.Event()
         self.reload(slice_dir, layer_start, layer_end, total_layers)
 
     def reload(self, slice_dir, layer_start, layer_end, total_layers):
@@ -103,16 +186,56 @@ class NodeServer:
         next request after the swap is served by the new slice with no reconnect needed."""
         print(f"[node] loading slice from {slice_dir} (layers {layer_start}-{layer_end}) ...")
         t0 = time.time()
-        model = load_slice_model(slice_dir)
-        with compute_lock:
-            self.model = model
-            self.lo, self.hi, self.n = layer_start, layer_end, total_layers
-            # Batchers close over the OLD model, so they must go with it. The next request
-            # rebuilds one against the new slice.
-            for b in getattr(self, "_batchers", {}).values():
-                b.stop()
-            self._batchers = {}
-        print(f"[node] slice ready in {time.time()-t0:.1f}s | serving layers {layer_start}-{layer_end}")
+        # Refuse to serve layers this slice does not contain. `load_slice_model` builds a FULL
+        # model skeleton from config.json and fills in whatever the file holds (strict=False),
+        # so a missing layer is not an error -- it stays an uninitialized meta tensor and the
+        # forward pass runs on garbage. No exception, no wrong-looking output at this end: the
+        # node answers confidently and the user gets fluent nonsense.
+        #
+        # Seen live 2026-08-07 on agent-optinovate-67e4eb: the coordinator had it on 0-27 after
+        # a re-split, the disk held only 19-27 from an earlier assignment, and it started up,
+        # announced "serving layers 0-27", passed its own ms/layer benchmark and reported
+        # healthy. Two thirds of the model it claimed to serve was never downloaded.
+        held = _layers_in_slice(slice_dir)
+        if held and not (held[0] <= layer_start and layer_end <= held[1]):
+            raise RuntimeError(
+                f"refusing to serve layers {layer_start}-{layer_end}: this slice holds "
+                f"{held[0]}-{held[1]}. Serving the gap would run uninitialized weights and "
+                f"return plausible nonsense. Delete {slice_dir} to re-download the right range.")
+        # RELEASE THE OLD SLICE BEFORE LOADING THE NEW ONE.
+        #
+        # This used to be `model = load_slice_model(...)` with `self.model` still holding the
+        # previous slice, so both existed at once and the node peaked at ~150% of one slice —
+        # during a migration, on machines chosen precisely because they had room for one. The
+        # peak is the number that decides whether a volunteer gets OOM-killed, not the steady
+        # state.
+        #
+        # The cost of this ordering, stated rather than discovered later: a load that FAILS now
+        # leaves the node with no model instead of still serving the old slice. That is the
+        # right trade here — the node is being migrated off that slice anyway, and the
+        # coordinator's re-placement is what recovers it — but it is a real change, which is
+        # why the failure path below is explicit rather than incidental.
+        if getattr(self, "_reloading", None) is None:
+            self._reloading = threading.Event()   # subclasses in tests bypass __init__
+        self._reloading.set()
+        try:
+            with compute_lock:
+                for b in getattr(self, "_batchers", {}).values():
+                    b.stop()                     # batchers close over the OLD model
+                self._batchers = {}
+                self.model = None
+            gc.collect()                         # drop the last reference before allocating
+            _empty_device_cache()
+            model = load_slice_model(slice_dir)
+            with compute_lock:
+                self.model = model
+                self.lo, self.hi, self.n = layer_start, layer_end, total_layers
+        finally:
+            # Cleared whether the load worked or not: a node stuck reporting "reloading"
+            # forever is a node that never recovers and never says why.
+            self._reloading.clear()
+        print(f"[node] slice ready in {time.time()-t0:.1f}s | serving layers "
+              f"{layer_start}-{layer_end} | weights on {_weights_device(model)}")
 
     def _batcher(self, role, lo, hi):
         """One MicroBatcher per (role, layer range). Keyed rather than global because a
@@ -150,6 +273,36 @@ class NodeServer:
                 mtype = msg.get("type")
 
                 if mtype == "config":
+                    # PAUSE IS CHECKED HERE, not at accept(), and only on `config`.
+                    #
+                    # `config` is the message that starts a NEW request; `act` continues one
+                    # already in flight. Refusing here therefore stops new work while letting
+                    # an answer somebody is already waiting for finish — which is the whole
+                    # point of a pause that does not punish the user who asked first.
+                    #
+                    # It is a typed reply rather than a closed socket on purpose. The driver's
+                    # DEAD_PEER tuple is (ConnectionError, TimeoutError, EOFError, OSError),
+                    # and ConnectionRefusedError is a subclass of ConnectionError — so
+                    # refusing the TCP connection is indistinguishable from this machine
+                    # dying. The driver would tear the chain down, ask for a new one, replay
+                    # the whole junction cache into it, and tell the user "a machine dropped
+                    # out" ([P28]'s complaint, self-inflicted). A named refusal lets the peer
+                    # say what actually happened.
+                    if self.paused.is_set():
+                        common.send_msg(conn, {"ok": False, "error": "paused",
+                                               "detail": "this node is paused by its owner; "
+                                                         "it is not accepting new requests"})
+                        return
+                    # Same typed-refusal mechanism, different reason: mid-reload this node
+                    # genuinely has no weights (reload() frees the old slice before loading
+                    # the new one, to halve the migration peak). Named, so the driver reroutes
+                    # instead of reading an AttributeError as a crash.
+                    if (getattr(self, "_reloading", _NOT_RELOADING).is_set()
+                            or self.model is None):
+                        common.send_msg(conn, {"ok": False, "error": "reloading",
+                                               "detail": "this node is loading a new model "
+                                                         "slice; try another node"})
+                        return
                     cache, past = common.new_cache(), 0
                     is_true_last = (self.hi == self.n - 1)
                     # Negotiated per hop and per connection: the caller lists what it can
@@ -193,6 +346,16 @@ class NodeServer:
                                                **ack_wire})
 
                 elif mtype == "act":
+                    # An in-flight request whose node started reloading underneath it. Before
+                    # the release-then-load change the old model stayed alive by reference and
+                    # this could not happen; now it can, and it must not surface as an
+                    # AttributeError from inside a batcher — which reaches the driver as a
+                    # closed socket with no explanation.
+                    if self.model is None:
+                        common.send_msg(conn, {"ok": False, "error": "reloading",
+                                               "detail": "this node released its slice to load "
+                                                         "another; this request must reroute"})
+                        return
                     hidden = msg["hidden"]
                     q = hidden.shape[1]
                     # Submitting instead of locking is the whole change: concurrent requests
@@ -206,22 +369,32 @@ class NodeServer:
                         h2 = self._batcher("middle", s1, s2).submit(hidden, cache, past)
                         c_ms = (time.time() - tc) * 1000
                         past += q
-                        common.send_msg(bconn, {"type": "act", "hidden": h2}, codec=bcodec)
+                        # _to_cpu at the wire boundary, on every tensor leaving this node.
+                        # The batched stages already return CPU, but `codec` is None whenever
+                        # negotiation falls back — and the legacy path is a bare torch.save,
+                        # which happily serialises a CUDA tensor. The peer then fails to
+                        # deserialise it, so a GPU node would break its CPU neighbour rather
+                        # than itself. Identity on a CPU-only machine.
+                        common.send_msg(bconn, {"type": "act", "hidden": common._to_cpu(h2)},
+                                        codec=bcodec)
                         resp = common.recv_msg(bconn)
-                        common.send_msg(conn, {"hidden": resp["hidden"], "c_compute_ms": c_ms,
+                        common.send_msg(conn, {"hidden": common._to_cpu(resp["hidden"]),
+                                               "c_compute_ms": c_ms,
                                                "b_compute_ms": resp["b_compute_ms"]}, codec=codec)
                     elif role == "probe":
                         tc = time.time()
                         h2 = self._batcher("probe", s1, s2).submit(hidden, cache, past)
                         c_ms = (time.time() - tc) * 1000
                         past += q
-                        common.send_msg(conn, {"hidden": h2, "c_compute_ms": c_ms}, codec=codec)
+                        common.send_msg(conn, {"hidden": common._to_cpu(h2),
+                                               "c_compute_ms": c_ms}, codec=codec)
                     else:  # last
                         tb = time.time()
                         out = self._batcher("last", s2, self.n).submit(hidden, cache, past)
                         b_ms = (time.time() - tb) * 1000
                         past += q
-                        common.send_msg(conn, {"hidden": out, "b_compute_ms": b_ms}, codec=codec)
+                        common.send_msg(conn, {"hidden": common._to_cpu(out),
+                                               "b_compute_ms": b_ms}, codec=codec)
 
                 elif mtype == "bye":
                     if bconn:

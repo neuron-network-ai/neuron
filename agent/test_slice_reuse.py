@@ -30,18 +30,24 @@ def check(label, cond):
         print(f"  FAIL  {label}")
 
 
-def _fake_slice(path, lo, hi):
+def _fake_slice(path, lo, hi, embed=True, norm=True, tokenizer=True):
     """A minimal safetensors file: 8-byte LE header length, then the JSON header."""
     header = {f"model.layers.{i}.self_attn.q_proj.weight":
               {"dtype": "F32", "shape": [2, 2], "data_offsets": [0, 16]}
               for i in range(lo, hi + 1)}
-    header["model.norm.weight"] = {"dtype": "F32", "shape": [2], "data_offsets": [0, 8]}
+    if norm:
+        header["model.norm.weight"] = {"dtype": "F32", "shape": [2], "data_offsets": [0, 8]}
+    if embed:
+        header["model.embed_tokens.weight"] = {"dtype": "F32", "shape": [2, 2],
+                                               "data_offsets": [0, 16]}
     blob = json.dumps(header).encode()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "wb") as f:
         f.write(struct.pack("<Q", len(blob)))
         f.write(blob)
         f.write(b"\0" * 16)
+    if tokenizer:
+        open(os.path.join(os.path.dirname(path), "tokenizer.json"), "w").write("{}")
 
 
 def main():
@@ -55,14 +61,15 @@ def main():
           agentmod.Agent.slice_layers_on_disk(os.path.join(tmp, "nope.safetensors")) is None)
 
     # --- ensure_slice: matching range keeps the slice, mismatch re-downloads --------- #
-    def make_agent(slice_lo, slice_hi):
-        cfgp = os.path.join(tmp, f"cfg-{slice_lo}-{slice_hi}.json")
+    def make_agent(slice_lo, slice_hi, dirname=None, **slice_kw):
+        dirname = dirname or f"slice-{slice_lo}-{slice_hi}"
+        cfgp = os.path.join(tmp, f"cfg-{dirname}.json")
         cfg = dict(agentmod.DEFAULT_CONFIG)
-        cfg.update(node_id="n", node_token="t", slice_dir=f"./slice-{slice_lo}-{slice_hi}/")
+        cfg.update(node_id="n", node_token="t", slice_dir=f"./{dirname}/")
         json.dump(cfg, open(cfgp, "w"))
         a = agentmod.Agent(config_path=cfgp)
-        _fake_slice(os.path.join(agentmod.HERE, f"slice-{slice_lo}-{slice_hi}",
-                                 "model.safetensors"), slice_lo, slice_hi)
+        _fake_slice(os.path.join(agentmod.HERE, dirname, "model.safetensors"),
+                    slice_lo, slice_hi, **slice_kw)
         return a
 
     downloads = []
@@ -84,6 +91,57 @@ def main():
                         "is_last_node": False})
         check("a slice for the WRONG range is discarded and re-downloaded",
               downloads == [(0, 9)])
+
+        # ---- a slice that CONTAINS the new range is reused, not re-fetched ------ #
+        # This is the fix for the thing that made a stranger's 8 GB PC download ~20 GB in one
+        # afternoon: after a re-split, a node has usually already got a superset of whatever it
+        # is asked for next. The loader fills a full model skeleton and the node runs only
+        # layers[lo:hi], so extra layers cost resident RAM and nothing else.
+        downloads.clear()
+        c = make_agent(0, 27)                       # holds the whole model
+        c.ensure_slice({"model_id": "m", "layer_start": 14, "layer_end": 27,
+                        "estimated_download_gb": 1.4, "is_first_node": False,
+                        "is_last_node": True})
+        check("a slice covering the new range is reused with NO download", downloads == [])
+
+        downloads.clear()
+        c.ensure_slice({"model_id": "m", "layer_start": 0, "layer_end": 13,
+                        "estimated_download_gb": 1.4, "is_first_node": True,
+                        "is_last_node": False})
+        check("...including when the node becomes the FIRST stage", downloads == [])
+
+        # ---- but never reuse one that is missing what the new role needs -------- #
+        downloads.clear()
+        d = make_agent(0, 27, dirname="slice-nonorm", norm=False)   # a middle's slice: no norm
+        d.ensure_slice({"model_id": "m", "layer_start": 14, "layer_end": 27,
+                        "estimated_download_gb": 1.4, "is_first_node": False,
+                        "is_last_node": True})
+        check("a slice without the final norm is NOT reused for the last stage",
+              downloads == [(14, 27)])
+
+        downloads.clear()
+        e = make_agent(0, 27, dirname="slice-noembed", embed=False)  # no embedding
+        e.ensure_slice({"model_id": "m", "layer_start": 0, "layer_end": 13,
+                        "estimated_download_gb": 1.4, "is_first_node": True,
+                        "is_last_node": False})
+        check("a slice without the embedding is NOT reused for the first stage",
+              downloads == [(0, 13)])
+
+        downloads.clear()
+        g = make_agent(0, 27, dirname="slice-notok", tokenizer=False)  # no tokenizer
+        g.ensure_slice({"model_id": "m", "layer_start": 0, "layer_end": 13,
+                        "estimated_download_gb": 1.4, "is_first_node": True,
+                        "is_last_node": False})
+        check("a slice without the tokenizer is NOT reused for the first stage",
+              downloads == [(0, 13)])
+
+        downloads.clear()
+        h = make_agent(10, 18)                      # only partly covers what is wanted
+        h.ensure_slice({"model_id": "m", "layer_start": 5, "layer_end": 20,
+                        "estimated_download_gb": 1.4, "is_first_node": False,
+                        "is_last_node": False})
+        check("a slice that only PARTLY covers the new range is re-downloaded",
+              downloads == [(5, 20)])
     finally:
         agentmod.slice_downloader.download_slice = real_dl
         for d in os.listdir(agentmod.HERE):

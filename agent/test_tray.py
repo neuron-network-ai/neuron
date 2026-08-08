@@ -160,6 +160,53 @@ def main():
     check("a disabled chat says disabled", "disabled" in labels["disabled"].lower())
     check("a genuinely starting chat still says starting", "starting" in labels["pending"])
 
+    # 4) the compute-device dial (Phase 3). The menu must not merely LOOK like it worked:
+    #    picking GPU on a build with a CPU-only torch has to say so, because that is exactly
+    #    the class of silent no-op v0.18.0 shipped ([P31]).
+    t4, path4 = _tray(tmpdir)
+
+    def device_menu(tray):
+        for i in tray._menu().items:
+            if isinstance(i, traymod.pystray.MenuItem) and i.text == "Compute device":
+                return i.action
+        return None
+
+    def note(tray):
+        for i in tray._menu().items:
+            if (isinstance(i, traymod.pystray.MenuItem) and callable(i.text)
+                    and i.action is None and i.kw.get("enabled") is False):
+                txt = i.text(None)
+                if txt and ("device" in txt.lower() or "GPU" in txt):
+                    return txt
+        return ""
+
+    dm = device_menu(t4)
+    check("the menu offers a Compute device submenu", dm is not None)
+    check("...with automatic, CPU and GPU",
+          [d for d, _ in traymod.DEVICE_LABELS] == ["auto", "cpu", "gpu"])
+    check("...as radio items that tick the configured device",
+          all(i.kw.get("radio") for i in dm.items)
+          and dm.items[0].kw["checked"](None) is True)      # DEFAULT_CONFIG device is "auto"
+
+    # selecting a device persists it, so it survives the restart it requires
+    dm.items[1].action(None, None)                          # "CPU only"
+    check("choosing a device saves it to the config file",
+          json.load(open(path4))["device"] == "cpu")
+    check("...and the menu now ticks it",
+          device_menu(t4).items[1].kw["checked"](None) is True)
+    check("...and says the change needs a restart, since common.DEVICE is import-time",
+          "restart" in note(t4).lower())
+
+    dm2 = device_menu(t4)
+    dm2.items[2].action(None, None)                         # "GPU"
+    if not traymod._gpu_is_usable():
+        check("choosing GPU on a CPU-only build says so instead of silently doing nothing",
+              "computes on CPU" in note(t4))
+
+    dm3 = device_menu(t4)
+    dm3.items[0].action(None, None)                         # back to "Automatic"
+    check("returning to the starting device clears the restart note", note(t4) == "")
+
     print(f"\n{ok} passed, {fail} failed")
     return fail == 0
 

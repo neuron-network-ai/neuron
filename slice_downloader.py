@@ -296,6 +296,20 @@ def load_slice_model(target_dir):
           for k, v in load_file(os.path.join(target_dir, WEIGHTS_FILE)).items()}
     model.load_state_dict(sd, strict=False, assign=True)
     model.tie_weights()
+    # NO DEVICE MOVE HERE, AND THAT IS DELIBERATE — this is the one line between NEURON and
+    # GPU execution, and it is left alone on purpose.
+    #
+    # `common.move_model_to_device` exists and works, and adding it here would put a
+    # volunteer's shard in VRAM. It would also turn a network that silently computes on the
+    # CPU into one that CRASHES ON THE FIRST TOKEN, because the rest of the pipeline was
+    # written when every tensor was CPU: the wire codec's `.numpy()` calls raise on CUDA, the
+    # batched stages' auxiliary tensors have to follow the activations, and the legacy
+    # `torch.save` framing lets a GPU node break its CPU neighbour. That work is done
+    # (Phase 4a) but has never run on real GPU hardware, because there is none here.
+    #
+    # `test_device_path.py` fails if this line starts moving weights, and says what to verify
+    # first. Do not delete the test to make the change pass — the test is the reason the change
+    # is survivable. See PROBLEMS.md [P31].
     return common.cast_linears(model)
 
 

@@ -56,6 +56,18 @@ MAX_TOKENS_CAP = int(os.environ.get("NEURON_MAX_TOKENS", "512"))
 MAX_REROUTES = int(os.environ.get("NEURON_MAX_REROUTES", "3"))
 
 
+class PeerUnavailable(ConnectionError):
+    """A peer that declined this request BY NAME, rather than dying.
+
+    A node paused by its owner, or reloading its slice mid-migration, is not a failure: it is
+    a machine saying "not me, not now". Subclassing ConnectionError is the load-bearing part —
+    `DEAD_PEER` already contains ConnectionError, so this is recoverable through the existing
+    reroute path with no change to the error handling, while staying distinguishable in the
+    reason string. The alternative, closing the socket, is literally indistinguishable from a
+    crash: ConnectionRefusedError is itself a ConnectionError.
+    """
+
+
 def log_chain_failure(node_ids, err):
     """A node dropping mid-generation used to be invisible unless the user complained
     ([P14] noted the same gap in ui/app.py). It is the single most common failure on a
@@ -163,7 +175,8 @@ class _Driver:
         yield {"type": "meta", "request_id": request_id, "node_ids": node_ids,
                "nodes": len(node_ids), "cost_nrn": hold_amount}
 
-        # 2) open + configure the chain (node_a -> node_c -> node_b)
+        # 2) open + configure the chain: this node -> [middle ->] last. Two stages is the
+        #    ordinary shape when one machine of three is away, not a degraded one.
         sock = None
         # State that a mid-generation reroute has to be able to replace. `chain` is rebound by
         # _reroute(), so `step` closes over the names rather than the values.
@@ -182,13 +195,27 @@ class _Driver:
             # might predate wire_codec -- and offers the codecs we can decode. The ack names
             # the peer's pick, or omits it, in which case codec stays None and this
             # connection keeps using the legacy format for the whole request.
-            common.send_msg(s, {"type": "config", "s1": S1, "s2": chain["s2"],
-                                "host_b": chain["host_b"], "port_b": chain["port_b"],
-                                "wire": wire_codec.preference(model.config.hidden_size)})
+            cfg = {"type": "config", "s1": S1, "s2": chain["s2"],
+                   "wire": wire_codec.preference(model.config.hidden_size)}
+            # host_b present -> the next hop relays to a further stage (node_c's role); absent
+            # -> it IS the final stage and returns the normed hidden itself (node_b's role).
+            # Sending host_b=None would satisfy `"host_b" in msg` at the far end and send it
+            # looking for a hop that does not exist, so the keys are omitted, not nulled.
+            if chain["host_b"]:
+                cfg["host_b"], cfg["port_b"] = chain["host_b"], chain["port_b"]
+            common.send_msg(s, cfg)
             a = common.recv_msg(s)
             if not a.get("ok"):
                 s.close()
-                raise RuntimeError(f"node_c refused config: {a}")
+                # PeerUnavailable subclasses ConnectionError, which is already in DEAD_PEER —
+                # so a node that refuses BY NAME (paused by its owner, reloading a slice) is
+                # recoverable exactly like one that vanished, and _reroute picks a different
+                # chain instead of the whole answer failing on a RuntimeError nothing catches.
+                # The distinction is kept in the reason string, because "paused" and "died"
+                # are different events and reporting one as the other is [P28].
+                raise PeerUnavailable(f"next hop refused config: "
+                                      f"{a.get('error') or a}"
+                                      + (f" ({a['detail']})" if a.get("detail") else ""))
             c = wire_codec.negotiate([a["wire"]] if a.get("wire") else None)
             s.settimeout(common.HOT_TIMEOUT_S)
             return s, c
@@ -240,7 +267,8 @@ class _Driver:
             # block, which for causal attention is identical to replaying each token in turn
             # but costs one round trip instead of N.
             replay = jcache.replay_block()
-            common.send_msg(sock, {"type": "act", "hidden": replay}, codec=codec)
+            common.send_msg(sock, {"type": "act", "hidden": common._to_cpu(replay)},
+                            codec=codec)
             resp = common.recv_msg(sock)
             reroutes.append({"reason": why, "at_token": tokens_now,
                              "replayed_tokens": int(replay.shape[1]), "node_ids": nids})
@@ -264,7 +292,8 @@ class _Driver:
             for attempt in range(MAX_REROUTES + 1):
                 try:
                     if attempt == 0:
-                        common.send_msg(sock, {"type": "act", "hidden": h1}, codec=codec)
+                        common.send_msg(sock, {"type": "act", "hidden": common._to_cpu(h1)},
+                                        codec=codec)
                         resp = common.recv_msg(sock)
                     else:
                         resp = _reroute(tokens_now, f"{last_err.__class__.__name__}: {last_err}")
@@ -277,8 +306,21 @@ class _Driver:
         try:
             # 3) autoregressive loop, emitting each new piece of decoded text
             produced, prev_text, completion, finish = [], "", 0, "length"
+            reported_reroutes = 0
             tok_id = step(input_ids, 0)
             while True:
+                # A reroute is invisible in the token stream by design -- recovery is
+                # token-identical (test_node_death.py) -- but it is NOT invisible in time: the
+                # stream stalls for a chain handout and a replay. Emitted so the UI can explain
+                # that pause rather than leave it looking like a hang. This is the "stall beats
+                # degrade" principle from RESILIENCE.md made visible: nothing about the answer
+                # changed, only how long it took.
+                while len(reroutes) > reported_reroutes:
+                    r = reroutes[reported_reroutes]
+                    reported_reroutes += 1
+                    yield {"type": "reroute", "at_token": r["at_token"],
+                           "replayed_tokens": r["replayed_tokens"],
+                           "nodes": len(r["node_ids"] or [])}
                 if tok_id == eos_id:
                     finish = "stop"
                     break

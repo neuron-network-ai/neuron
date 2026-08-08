@@ -59,7 +59,8 @@ def serve(conn, addr):
                 out = common.last_stage(state["model"], state["s2"], hidden, cache, past)
                 b_ms = (time.time() - tb) * 1000
             past += q
-            common.send_msg(conn, {"hidden": out, "b_compute_ms": b_ms}, codec=codec)
+            common.send_msg(conn, {"hidden": common._to_cpu(out), "b_compute_ms": b_ms},
+                            codec=codec)
 
         elif mtype == "bye":
             return

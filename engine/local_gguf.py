@@ -148,6 +148,86 @@ def ensure_weights(model_id):
         return None
 
 
+# VRAM to leave alone. This is somebody's own graphics card and they are looking at a desktop
+# drawn by it -- taking the last gigabyte to shave a few ms is how a volunteer's screen starts
+# stuttering and the agent gets uninstalled. Same reasoning as the spare CPU core below.
+GPU_HEADROOM_GB = 1.5
+
+
+def _supports_offload():
+    """Can this llama.cpp build put a layer on a GPU at all? True / False / None (unknown).
+
+    This is a question about the BINARY, not the machine. `n_gpu_layers` is accepted and
+    silently ignored by a build with no GPU backend compiled in, so without this check the
+    engine logs "offloading every layer" and runs entirely on the CPU -- which is what the
+    shipped build did. Verified 2026-08-08 against the installed package: this returns False,
+    and `llama_cpp/lib/` holds ggml-base, ggml-cpu, ggml, llama and mtmd with **no ggml-cuda**.
+
+    None means the symbol is missing (an older or unusual binding). Unknown is not the same as
+    no: the attempt is allowed and the reason says it is unverified, because the load path
+    already retries on the CPU if it fails.
+    """
+    try:
+        import llama_cpp
+        fn = getattr(llama_cpp, "llama_supports_gpu_offload", None)
+        return None if fn is None else bool(fn())
+    except Exception:                                               # noqa: BLE001
+        return None
+
+
+def _gpu_layers(path):
+    """(n_gpu_layers, reason) for llama.cpp. 0 means stay on the CPU.
+
+    Decode speed is memory-BANDWIDTH bound -- measured on this project's own hardware, three
+    models 47x apart in size all landed at ~30 GB/s, which is the DDR bus and nothing else. A
+    consumer GPU moves 360-1000 GB/s, so offloading is worth 12-33x when the weights fit in
+    VRAM. When they do not it is worth nothing, because the shortfall streams over PCIe.
+
+    So this is deliberately all-or-nothing. Partial offload is a real llama.cpp feature, but
+    guessing a layer count needs the layer count, which needs the model loaded -- and a wrong
+    guess is an out-of-memory on a machine whose owner is using the screen. Whole-model or
+    CPU, with NEURON_GPU_LAYERS to override for anyone who wants to tune it by hand.
+
+    The build check comes FIRST, ahead of the hardware probe and ahead of the override. A card
+    the binary cannot address is not a card, so asking about VRAM is asking the wrong question;
+    and an override that silently does nothing is the same bug with a manual trigger, which is
+    worse, because someone set it deliberately and would read the log as confirmation.
+    """
+    supported = _supports_offload()
+    if supported is False:
+        return 0, ("this llama.cpp build has no GPU backend compiled in "
+                   "(supports_gpu_offload=False) — no GPU can be used on this machine "
+                   "regardless of what hardware is present")
+    unverified = " [offload support unverified for this build]" if supported is None else ""
+    env = os.environ.get("NEURON_GPU_LAYERS")
+    if env is not None:
+        try:
+            return int(env), "NEURON_GPU_LAYERS=" + env + unverified
+        except ValueError:
+            log.warning("NEURON_GPU_LAYERS=%r is not an integer — ignoring it", env)
+    try:
+        from agent.gpu import detect_gpu
+        info = detect_gpu()
+    except Exception as e:                                          # noqa: BLE001
+        return 0, "GPU probe unavailable (%s)" % e.__class__.__name__
+    if not info.get("has_gpu"):
+        return 0, "no GPU detected"
+    vram = info.get("gpu_vram_gb")
+    if not vram:
+        return 0, "GPU found but VRAM unknown — not guessing"
+    try:
+        need_gb = os.path.getsize(path) / 1024 ** 3
+    except OSError:
+        return 0, "could not size the weights on disk"
+    usable = vram - GPU_HEADROOM_GB
+    if need_gb > usable:
+        return 0, ("%s has %.1f GB VRAM, model needs %.1f GB + %.1f GB headroom — "
+                   "staying on CPU" % (info.get("gpu_name") or "GPU", vram, need_gb,
+                                       GPU_HEADROOM_GB))
+    return -1, ("%s, %.1f GB VRAM, model %.1f GB — offloading every layer%s"
+                % (info.get("gpu_name") or "GPU", vram, need_gb, unverified))
+
+
 def _load(model_id, n_threads=None):
     global _llm, _llm_model_id
     if _llm is not None and _llm_model_id == model_id:
@@ -158,11 +238,30 @@ def _load(model_id, n_threads=None):
         return None
     # Leave a core free: this runs on somebody's personal machine while they use it.
     threads = n_threads or max(1, (os.cpu_count() or 4) - 1)
+    ngl, why = _gpu_layers(path)
+    log.info("local engine GPU decision: %s", why)
     t0 = time.perf_counter()
-    _llm = Llama(model_path=path, n_ctx=4096, n_threads=threads, verbose=False)
+    try:
+        _llm = Llama(model_path=path, n_ctx=4096, n_threads=threads,
+                     n_gpu_layers=ngl, verbose=False)
+    except Exception as e:                                          # noqa: BLE001
+        # A wheel built without CUDA, a driver mismatch, or VRAM taken by a game since the
+        # probe ran all land here. None of them are a reason for the node to have no engine
+        # at all, so retry on the CPU -- which is exactly what it did before this existed.
+        if ngl == 0:
+            log.warning("local engine failed to load: %s: %s", e.__class__.__name__, e)
+            return None
+        log.warning("GPU load failed (%s: %s) — retrying on CPU", e.__class__.__name__, e)
+        try:
+            _llm = Llama(model_path=path, n_ctx=4096, n_threads=threads,
+                         n_gpu_layers=0, verbose=False)
+        except Exception as e2:                                     # noqa: BLE001
+            log.warning("local engine failed to load: %s: %s", e2.__class__.__name__, e2)
+            return None
+        ngl = 0
     _llm_model_id = model_id
-    log.info("local engine ready (%s, %d threads) in %.1fs", model_id, threads,
-             time.perf_counter() - t0)
+    log.info("local engine ready (%s, %d threads, gpu_layers=%s) in %.1fs",
+             model_id, threads, ngl, time.perf_counter() - t0)
     return _llm
 
 

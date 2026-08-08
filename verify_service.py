@@ -40,6 +40,24 @@ DEFAULT_INTERVAL = 60
 # attested immediately; only condemnation waits for proof.
 FAIL_STRIKES = 3
 
+# Reading the roster is retried WITHIN a cycle. A home connection produces 502s and DNS
+# failures routinely — the last three lines this service ever logged were one 502 and two
+# "Failed to resolve neuronnet.duckdns.org" ([P24]) — and one bad read used to cost a whole
+# cycle's promotions.
+ROSTER_ATTEMPTS = 3
+ROSTER_BACKOFF_S = 2
+
+# After this many consecutive cycles unable to reach the coordinator, the log says ERROR
+# rather than WARNING: at that point the verifier is running but blind, and no node anywhere
+# can be promoted.
+UNREACHABLE_ESCALATE = 5
+
+# Sweeps between "still alive" lines. A healthy verifier used to log NOTHING at all — the
+# "nothing to verify" line is debug-level — so its log looked identical whether it was
+# running or had been dead for two days. That is exactly how [P24] went unnoticed. With a
+# heartbeat line, silence means dead.
+ALIVE_EVERY = 30
+
 log = logging.getLogger("neuron.verifier")
 
 
@@ -79,6 +97,8 @@ class Verifier:
         self.secret = secret
         self.interval = interval
         self.strikes = {}          # node_id -> consecutive wrong answers
+        self.unreachable = 0       # consecutive cycles that could not read the roster
+        self.last_roster = None    # (nodes, probationary) from the last successful sweep
         # Building a challenge means loading that layer range with torch, which costs seconds
         # and hundreds of MB. Without this cache a 60s loop would reload the same shard every
         # minute forever; nodes cluster on a handful of ranges, so the cache is tiny.
@@ -89,9 +109,23 @@ class Verifier:
         return {"X-Register-Secret": self.secret}
 
     def nodes(self):
-        r = requests.get(f"{self.base}/node/list", headers=self._headers(), timeout=15)
-        r.raise_for_status()
-        return r.json()["nodes"]
+        """The node roster, retried with backoff.
+
+        A transient 502 or DNS failure is the normal weather on a home connection, not a
+        reason to skip a cycle — every cycle skipped is a stranger sitting at zero NRN for
+        another minute. Raises the last error only after ROSTER_ATTEMPTS have failed.
+        """
+        last = None
+        for attempt in range(ROSTER_ATTEMPTS):
+            try:
+                r = requests.get(f"{self.base}/node/list", headers=self._headers(), timeout=15)
+                r.raise_for_status()
+                return r.json()["nodes"]
+            except (requests.RequestException, KeyError, ValueError) as e:
+                last = e
+                if attempt + 1 < ROSTER_ATTEMPTS:
+                    time.sleep(ROSTER_BACKOFF_S * 2 ** attempt)
+        raise last
 
     def total_layers(self):
         try:
@@ -132,9 +166,19 @@ class Verifier:
     def sweep(self):
         try:
             nodes = self.nodes()
-        except requests.RequestException as e:
-            log.warning("coordinator unreachable: %s", e)
+        except (requests.RequestException, KeyError, ValueError) as e:
+            self.unreachable += 1
+            # Escalates rather than repeating the same WARNING forever: one failed read is
+            # weather, five in a row is an outage during which nothing can be promoted, and
+            # the log should not make those look the same ([P24]).
+            say = log.error if self.unreachable >= UNREACHABLE_ESCALATE else log.warning
+            say("coordinator unreachable (%d cycle(s) in a row, %d attempts each): %s — "
+                "no node can be verified or promoted while this lasts",
+                self.unreachable, ROSTER_ATTEMPTS, e)
             return 0
+        if self.unreachable:
+            log.info("coordinator reachable again after %d failed cycle(s)", self.unreachable)
+            self.unreachable = 0
         if nodes and "tailscale_ip" not in nodes[0]:
             log.error("coordinator did not return node addresses — the register secret is "
                       "wrong, so nothing can be verified")
@@ -144,6 +188,7 @@ class Verifier:
         pending = [n for n in nodes
                    if n.get("standing") == "probationary" and not n.get("flagged")
                    and n.get("status") == "online"]
+        self.last_roster = (len(nodes), len(pending))
         if not pending:
             log.debug("nothing to verify")
             return 0
@@ -186,14 +231,29 @@ class Verifier:
                           "repeated failures exclude it from routing", nid, s, res["max_err"])
         return promoted
 
+    def _alive_line(self):
+        if self.unreachable:
+            return f"coordinator unreachable for {self.unreachable} cycle(s)"
+        if self.last_roster is None:
+            return "no roster read yet"
+        total, pending = self.last_roster
+        return f"{total} node(s), {pending} awaiting verification"
+
     def run(self):
-        log.info("verifier started | coordinator=%s | every %ds | log=%s",
-                 self.base, self.interval, LOG_PATH)
+        log.info("verifier started | coordinator=%s | every %ds | alive line every %d cycles "
+                 "| log=%s", self.base, self.interval, ALIVE_EVERY, LOG_PATH)
+        cycles = 0
         while True:
+            cycles += 1
             try:
                 self.sweep()
             except Exception as e:                     # never let one bad cycle kill the loop
                 log.exception("sweep failed: %s", e)
+            # The liveness heartbeat. Without it a dead verifier and an idle one write exactly
+            # the same thing — nothing — and [P24] is what that costs: the log's last line was
+            # two days old and there was no way to tell which of the two it meant.
+            if cycles % ALIVE_EVERY == 0:
+                log.info("alive | %d sweeps | %s", cycles, self._alive_line())
             time.sleep(self.interval)
 
 

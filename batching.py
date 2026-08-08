@@ -130,8 +130,12 @@ class BatchedCache:
                     # Left-pad with zeros. The values are irrelevant -- build_mask() puts
                     # -inf on these positions, so they contribute exactly nothing to the
                     # softmax rather than "almost nothing".
-                    zk = torch.zeros(k.shape[0], k.shape[1], pad, k.shape[3], dtype=k.dtype)
-                    zv = torch.zeros(v.shape[0], v.shape[1], pad, v.shape[3], dtype=v.dtype)
+                    # device follows the cache entry: torch.cat refuses to join a CPU pad to a
+                    # CUDA cache. A no-op on a CPU-only machine, where k.device is already cpu.
+                    zk = torch.zeros(k.shape[0], k.shape[1], pad, k.shape[3],
+                                     dtype=k.dtype, device=k.device)
+                    zv = torch.zeros(v.shape[0], v.shape[1], pad, v.shape[3],
+                                     dtype=v.dtype, device=v.device)
                     k = torch.cat([zk, k], dim=-2)
                     v = torch.cat([zv, v], dim=-2)
                 ks.append(k)
@@ -156,7 +160,7 @@ class BatchedCache:
         return outs
 
 
-def build_mask(lengths, padded_len, q, dtype):
+def build_mask(lengths, padded_len, q, dtype, device=None):
     """Additive attention mask `[B, 1, q, padded_len + q]`.
 
     Two jobs at once:
@@ -165,11 +169,16 @@ def build_mask(lengths, padded_len, q, dtype):
 
     Returns None only when there is nothing to hide, i.e. a single unpadded sequence doing
     one token -- in which case the plain unbatched path is already correct.
+
+    `device` defaults to CPU, which is where it has always been built and is correct on every
+    machine today; the caller passes `hidden.device` so the mask lands wherever the activations
+    are. Building it on CPU and handing it to a CUDA layer is a device-mismatch error, not a
+    slow path.
     """
     b = len(lengths)
     kv = padded_len + q
     neg = torch.finfo(dtype).min
-    mask = torch.zeros(b, 1, q, kv, dtype=dtype)
+    mask = torch.zeros(b, 1, q, kv, dtype=dtype, device=device)
     for i, ln in enumerate(lengths):
         pad = padded_len - ln
         if pad > 0:
@@ -188,18 +197,27 @@ def run_layers_batched(model, layers, hidden, cache, lengths):
     `hidden`  : [B, q, H]
     `lengths` : true (unpadded) history length per slot, before this call
     """
+    # The hidden state arrives from the wire on CPU; the weights live on DEVICE. This one move
+    # is what puts the whole batched layer stack on the GPU, and everything below follows
+    # hidden.device from there — the same shape as common._run_layers, which this is the
+    # batched twin of. A no-op on a CPU-only machine.
+    hidden = common._to_device(hidden)
     b, q, _ = hidden.shape
     assert b == len(lengths), f"hidden batch {b} != {len(lengths)} slot lengths"
     padded_len = cache.padded_len
 
     # Absolute positions, per slot. This is what makes left-padding invisible to RoPE: a
     # slot's token is at position `length`, whatever index it occupies in the padded tensor.
+    # Every auxiliary tensor below follows `hidden`, which is where the activations already
+    # are. On a CPU-only machine hidden.device is cpu and each of these is byte-identical to
+    # what it was before -- test_batching.py asserts that numerically.
+    dev = hidden.device
     position_ids = torch.stack([
-        torch.arange(ln, ln + q, dtype=torch.long) for ln in lengths
+        torch.arange(ln, ln + q, dtype=torch.long, device=dev) for ln in lengths
     ])
-    attn_mask = build_mask(lengths, padded_len, q, hidden.dtype)
+    attn_mask = build_mask(lengths, padded_len, q, hidden.dtype, device=dev)
     # cache_position indexes the padded tensor, which is shared across slots.
-    cache_position = torch.arange(padded_len, padded_len + q)
+    cache_position = torch.arange(padded_len, padded_len + q, device=dev)
 
     for layer in layers:
         hidden = layer(
@@ -216,8 +234,15 @@ def run_layers_batched(model, layers, hidden, cache, lengths):
 
 @torch.no_grad()
 def mid_stage_batched(model, lo, hi, hidden, cache, lengths):
-    """Batched equivalent of common.mid_stage (a middle node's own layers)."""
-    return run_layers_batched(model, list(model.model.layers)[lo:hi], hidden, cache, lengths)
+    """Batched equivalent of common.mid_stage (a middle node's own layers).
+
+    Returns a CPU tensor, like `common.mid_stage` does: the caller's next move is `send_msg`,
+    and the wire codec quantizes on CPU. The batched stages did NOT do this while their
+    unbatched twins did, and that divergence is the bug -- every node in a real chain serves
+    through the batcher, so the path that returns to CPU is the one nothing uses.
+    """
+    out = run_layers_batched(model, list(model.model.layers)[lo:hi], hidden, cache, lengths)
+    return common._to_cpu(out)
 
 
 @torch.no_grad()
@@ -227,8 +252,11 @@ def first_stage_batched(model, hi, token_ids, cache, lengths):
     Input is token IDs `[B, q]`, not hidden states -- this is the driver's own stage, which
     starts from tokens. Embedding is a gather, so it batches for free.
     """
-    hidden = model.model.embed_tokens(token_ids)
-    return run_layers_batched(model, list(model.model.layers)[0:hi], hidden, cache, lengths)
+    # Token ids arrive from the driver's tokenizer, i.e. on CPU; the embedding table lives
+    # wherever the shard does. `common._to_device` is the identity on a CPU-only machine.
+    hidden = model.model.embed_tokens(common._to_device(token_ids))
+    out = run_layers_batched(model, list(model.model.layers)[0:hi], hidden, cache, lengths)
+    return common._to_cpu(out)                  # mirrors common.first_stage
 
 
 @torch.no_grad()
@@ -241,14 +269,17 @@ def apply_lm_head_batched(model, hidden):
     of memory. Reading it once for eight requests instead of eight times is close to a pure
     8x on the most expensive single operation the driver performs.
     """
-    return model.lm_head(hidden)[:, -1, :]
+    # `hidden` arrives from the last stage over the wire (CPU) while lm_head lives on the
+    # device; logits go back to CPU because the caller's next step is argmax + detokenize.
+    # Exactly what common.apply_lm_head does — this is its batched twin, not a different rule.
+    return common._to_cpu(model.lm_head(common._to_device(hidden))[:, -1, :])
 
 
 @torch.no_grad()
 def last_stage_batched(model, lo, hidden, cache, lengths):
     """Batched equivalent of common.last_stage (final layers + norm)."""
     hidden = run_layers_batched(model, list(model.model.layers)[lo:], hidden, cache, lengths)
-    return model.model.norm(hidden)
+    return common._to_cpu(model.model.norm(hidden))     # mirrors common.last_stage
 
 
 # --------------------------------------------------------------------------- #
