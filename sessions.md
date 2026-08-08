@@ -4510,27 +4510,124 @@ and `/network/model` already reports the 7B as `feasible: false, placeable: fals
 `coordinator/test_weight_dtype_sizing.py` **28/28** (new). **Suite: 71 modules green**,
 `selftest_shard.py` ALL PASS.
 
+### Half six — it shipped
+
+Everything above was written while uncommitted. It is now released, so the "nothing committed,
+nothing deployed" that stood here is replaced by what actually happened.
+
+**Coordinator, deployed first and alone.** `./coordinator/deploy.sh` — DB backed up, gates
+verified (`/status` OK, faucet 401, admin 401, logins live), `GPU_EXECUTION = False` confirmed
+on the VM. **Every already-installed 0.18 agent stopped being over-assigned at that restart**,
+with no installer and no agent release. That separation was the entire point of Phase 1 and it
+held.
+
+**v0.19.0 built and published.** `NEURON-Setup-0.19.0.exe`, 207 MB, SHA-256 `80eb83a2…`. The
+hash was verified by **re-downloading GitHub's stored copy and hashing that**, not by trusting
+the local build: `updater.py` refuses a mismatch, so a wrong hash there means every node
+silently declines the update and the rollout does nothing. Six surfaces moved together —
+`updater.LOCAL_VERSION`, `neuron.iss` AppVersion, `config.AGENT_VERSION`, the VM's
+`NEURON_AGENT_VERSION` and `NEURON_AGENT_SHA256`, and `docs/index.html`. The landing page was
+updated **after** the release existed, so the only route a stranger has never pointed at a 404.
+
+**Seventeen commits pushed** — the repo had been unpushed since before Session 52, so GitHub was
+serving a tree older than the last three sessions' work.
+
+**The scrub that had to happen first.** `PROBLEMS.md` [P24] published the office and home IP
+addresses. Redacting the file was not enough: the addresses were inside commit `a0dda72`, and
+git history would have carried them permanently. Nothing was pushed yet, so the last two commits
+were rebuilt with the redaction folded in — `git log -S` now returns nothing for either address.
+Also confirmed before pushing: `research/` and the four `neuronscript*.c` files are ignored **and
+were never committed**, so `.gitignore` alone was not being relied on for something it cannot do
+retroactively.
+
+### Half seven — the tray was telling nobody anything
+
+Prompted by a screenshot: no version, no notifications, "Status: Active" and nothing else.
+
+**The agent already knew all of it.** `Agent.state` has carried a `detail` for every state since
+it was written — "earning", "awaiting verification — not yet earning", "coordinator unreachable:
+…", the guard's reason list — and the menu rendered one word and discarded the rest. That is most
+of why the app reads as basic: not missing information, unspoken information. The version went
+into the menu title and the hover tooltip, where "which build are you running?" stops requiring a
+log file.
+
+**Notifications, deliberately restrained.** Only states the owner cannot otherwise discover —
+promoted to verified, node no longer serving, token superseded — and only on the transition into
+them. An app that notifies every poll is muted within the hour, and then the one that mattered
+never arrives.
+
+**The heartbeat was defeating remote diagnosis, and this is the one worth remembering.** Every
+beat logged at INFO: **2,833 lines and 141 KB a day** of `heartbeat ok — active`, against
+`logtail.MAX_BYTES` of **64 KB**. So the tail `neuron_logs.py` collects held **under 11 hours**
+and, on an idle node, was ~100% heartbeat — a stranger's slice error or crash scrolled out within
+hours. That file exists precisely so diagnosing someone else's machine does not depend on their
+attention ([P24]); a window full of "ok" defeats exactly that. Now: transitions log immediately,
+unchanged states go to DEBUG, one alive line every 30 beats keeps **silence meaning dead**
+(`verify_service.py`'s rule). **A day drops from 2,833 INFO lines to 95**, and the test measures
+that against `MAX_BYTES` rather than checking the source changed.
+
+`agent/test_tray.py` 16 → 29, `agent/test_heartbeat_logging.py` 15/15 (new).
+
+### Half eight — two security answers, one of them wrong in our favour
+
+**[P12] described a system that no longer exists.** It still said the ledger mints per request
+and `/complete` has no auth. Re-verified against the running code: `ledger.py` settles by
+**transfer out of escrow**, `models.credit()` has no production caller left (test fixtures only),
+`test_escrow_conservation` is 40/40 including the supply invariant, `/infer` holds and `settle()`
+refunds the remainder, and `/complete` requires the issued `complete_token`, settles from the
+**coordinator-recorded plan** rather than caller-supplied `node_ids`, 409s a replay and clamps
+the token count. Rewritten to 🟢. **A stale security entry is its own hazard** — it either causes
+work already done, or gets ignored on the day it matters.
+
+Which answers the question a public repo invites: reading the source grants no ability to move
+NRN, because **there is no HTTP route to `models.transfer` at all**.
+
+**The real exposure was operational, and on this machine.** The SSH key to the coordinator VM —
+the only key authorised on it, and the VM holds the ledger, every wallet balance and the register
+secret — was **unencrypted on disk**. Worse, `chmod 0600` is what the code does and NTFS ignores
+POSIX mode bits, so the actual ACL granted Full Control to SYSTEM, Administrators and the user.
+Anything running as that user had root-equivalent access to the coordinator with no credential to
+steal beyond a file read. `payout_key.json` had the identical blind spot, and its own comment
+(`# 0600; no-op on some FSes`) had been quietly admitting it.
+
+Fixed: passphrase on the key, `icacls` ACL restricted to the owner on both files, a persistent
+ssh-agent at a fixed socket, `AddKeysToAgent` in `~/.ssh/config` so the passphrase is typed once
+per boot and never again, and `deploy.sh` preferring the agent while still falling back to
+prompting. Verified from a fresh login shell with `SSH_AUTH_SOCK` unset: reaches the VM with no
+`-i` and no prompt.
+
+**Also decided:** rent GPU time online rather than keep deferring the GPU path. Every remaining
+GPU item is blocked on the same thing — no machine here has an NVIDIA card, so not one line of
+the CUDA path can execute — and that is exactly how [P31] happened. The order that session must
+follow is in the decisions log, and it is not arbitrary: 4a verified on hardware before 4b,
+`selftest_shard` reconciled before `GPU_EXECUTION` goes back on, packaging last.
+
 ### State at end of session
 
-**Nothing committed, nothing deployed.** Phase 1 is coordinator-only and urgent: deploying it
-with `./coordinator/deploy.sh` stops every already-installed 0.18 agent from being over-assigned
-**with no installer and no agent release**. It must not be bundled with any agent change — the
-tree still carries the 44 uncommitted files from Session 54, so that commit needs its four paths
-staged specifically.
+**Shipped and live:** coordinator deployed; v0.19.0 published, verified and advertised; landing
+page updated; 21 commits pushed to both branches; tree clean. Network healthy through the
+restart — 2 nodes, 28/28 layers. The node started during the session went
+probationary → **verified**, so the verifier is working and [P24] is not recurring.
 
-Phases 2 and 3 are agent-side and ship in the next build, which must bump `updater.LOCAL_VERSION`,
-`neuron.iss` AppVersion and `AGENT_VERSION` **together** and set `NEURON_AGENT_VERSION` **and**
-`NEURON_AGENT_SHA256` on the VM in the same change — `is_newer` is a strict `>`.
+**Committed but NOT released:** the tray and heartbeat work. It reaches nobody until 0.20 is
+built and published — the same lesson the session opened with, since the running 0.18 served a
+bundled copy of the UI and no source edit could touch it.
 
-**Commit order** (the handoff plan's table, all seven now written): 1 Phase 1 · 2 Phase 2 code ·
-3 Phase 3 · 4 Phase 2 docs · 5 Phase 4a + `test_device_path.py` · 6 Phase 5a · 7 Phase 5b.
-**5a and 5b must stay separate** — one changes request admission, the other model lifetime.
+**Suite 72 modules green, `selftest_shard.py` ALL PASS** throughout.
 
-**Not attempted, deliberately:** Phase 4b (the loader move itself — it needs real GPU hardware,
-and the tripwire now guards it), CUDA packaging and everything gated behind it (Phase 6: the
-~2.5 GB installer, `updater.py` resume/rollback, the `/agent/version` schema, the NVIDIA
-redistributable licensing gap), the fp32 `gb_per_layer` residue, and `selftest_shard.py`'s
-exact-equality check — which makes build rule 6 unsatisfiable on a GPU box. All in [P31].
+**Open, in priority order:**
+1. **Rotate `NEURON_REGISTER_SECRET`** — it was echoed into a session transcript. It grants
+   trusted standing AND overrides the payout-rebind check, making it the only path to
+   redirecting another node's earnings.
+2. **`neuron fix`** when the office PCs wake — [P27], stale `0-13` ranges that outbid the driver.
+3. **The GPU session** — see the decisions log for the order it must follow.
+4. **0.20**: tray download progress and a chat reachable while downloading (the trust gap that
+   started half seven), engine-swap hysteresis (a 7B→1.5B reload churn seen live, trigger
+   unconfirmed), and [P28] — a slow node still reported to the user as a dead one.
+5. **The chat UI port.** 4,119 lines across 19 files, well structured. The hidden cost is that
+   **59 of `ui/test_chat_ui.py`'s 67 checks grep `chat.html`'s source text**, and a React build
+   compiles to bundled JS — so every one of them breaks. Those tests encode real incidents. Two
+   sessions, not a copy job.
 
 ---
 
