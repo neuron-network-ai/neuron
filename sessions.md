@@ -4602,32 +4602,101 @@ the CUDA path can execute — and that is exactly how [P31] happened. The order 
 follow is in the decisions log, and it is not arbitrary: 4a verified on hardware before 4b,
 `selftest_shard` reconciled before `GPU_EXECUTION` goes back on, packaging last.
 
+### Half nine — the chat UI, ported, and the two bugs running it exposed
+
+The founder's React chat app (`C:\Users\optin\Trust chat`, an AI-Studio build that talked to
+Gemini, Ollama, LM Studio and KoboldCPP) is now a NEURON client, living in `ui/web/` and served
+at **`/next`** — deliberately NOT at `/`.
+
+**Roughly a third of what was on screen was machinery for a product NEURON is not.** Deleted:
+`services/aiProviders.ts`, `SettingsModal` (provider + base-URL config, and the only `recharts`
+user), `ModelSelectorModal`, the probe that walked candidate localhost ports, and five sampling
+sliders — `/chat` takes `prompt`, `max_tokens`, `use_rag` and `conversation_id`, so temperature
+and top-p had nowhere to go, and **a control that moves a number nothing reads is worse than no
+control**. No vendor name survives anywhere. The model is displayed, never selected: the tier
+controller picks it from how many machines are online.
+
+Added: `services/neuron.ts` (the SSE transport, written against `ui/app.py`'s actual event
+shapes rather than a guess), `services/wallet.ts`, and a **wallet panel** where the engine list
+used to be — balance and earned are what a contributor wants to see. A failed wallet read shows
+`unavailable`, never `0.00`: "you earned nothing" and "we could not ask" are different facts,
+and a confident zero on a network that pays people reads as *this does not pay*.
+
+Palette and logo are NEURON's, lifted from `coordinator/theme.py` so the chat, the dashboard and
+the site are finally one product. `--accent` is `#15803d`, not the brighter `#16a34a` that
+`theme.py` records as 3.30:1 on white — under AA. Contrast computed rather than eyeballed:
+**5.02:1 light and 8.55:1 dark**, the same figures `ui/test_chat_ui.py` already asserts.
+
+**`src/services/neuron.test.ts` (15 tests) is the load-bearing part.** `ui/test_chat_ui.py` has
+67 assertions and **59 of them grep `chat.html`'s SOURCE TEXT**. A React build compiles to
+minified bundles, so all 59 break the day this replaces the old page, and the guarantees — each
+bought with a real incident — would vanish silently. They are asserted here instead, over plain
+functions: a reroute is not an error, a partial answer survives the error that ended it,
+`done.reroutes` is reported, a token is a fragment not the accumulation, a frame split across TCP
+chunks still parses, and `errorMessage` never blames a node going offline. **That is the answer
+to "the tests all break": not fewer tests, a better place to put them.**
+
+#### Two bugs that only appeared by actually running it
+
+**The cost line was pricing answers in dollars.** It multiplied tokens by *Gemini's* per-token
+rates and rendered `< $0.0001`. Wrong twice: arithmetic for a service NEURON does not use, and a
+currency symbol asserting a cash value NRN does not have — in the one place a user looks after
+every answer, contradicting the installer disclosure, the landing page and this app's own
+footer. It now reports the cost the coordinator actually settled.
+
+**`cannot route a 1-stage chain (this driver handles 2 or 3). chain=[[0, 27]]`** — the UI was
+right and the network was broken. Both online nodes held **0-27**, because placement had
+replicated the single stage earlier the same day (*"copying it removes the current bottleneck"*)
+rather than splitting it. Sensible for throughput, unroutable in practice: the replica logic does
+not know the driver requires 2 or 3 stages. `pin_layers.sh`'s own header describes this exact
+state. Re-split to `[[0,9],[10,27]]` and it routed immediately — **both nodes adopted their new
+ranges without a restart.**
+
+That also exposed `neuron.bat` hardcoding `DRIVER=agent-optinovate`, stale since this machine
+re-registered today as `agent-optinovate-6ff49d`. Fixed locally (the file is deliberately
+gitignored as a personal helper): `neuron fix` now passes nothing, so with one node online the
+script infers the driver and with more it **lists them**. Worth being accurate — `pin_layers.sh`
+already refused an offline driver and named the online ones, so the stale value produced a clear
+error, never a wrong split. What it cost was `neuron fix` failing on the day it is most needed:
+right after a machine joins or leaves.
+
+**Proven live, both paths:** locally (`this machine · free`, 4.0 tok/s) and across the real chain
+(`2 NODES`, 6.49s, 1.4 tok/s, settled against the wallet — balance 24.962 → 24.408 while earned
+rose 50.654 → 51.184, this machine both paying and earning as stage 1).
+
+**Left at `/next` on purpose.** The old page keeps working and its 67 tests stay meaningful until
+the new one has earned the swap, which is one line in `ui/app.py`.
+
 ### State at end of session
 
-**Shipped and live:** coordinator deployed; v0.19.0 published, verified and advertised; landing
-page updated; 21 commits pushed to both branches; tree clean. Network healthy through the
-restart — 2 nodes, 28/28 layers. The node started during the session went
-probationary → **verified**, so the verifier is working and [P24] is not recurring.
+**Shipped and live today:** coordinator sizing fixes deployed; **v0.19.0** published, SHA-verified
+against GitHub's stored bytes, and advertised by the coordinator; landing page updated; the repo
+pushed after being unpushed since before Session 52. SSH key passphrased with real NTFS ACLs on
+it and on `payout_key.json`. Network re-split and routing.
 
-**Committed but NOT released:** the tray and heartbeat work. It reaches nobody until 0.20 is
-built and published — the same lesson the session opened with, since the running 0.18 served a
-bundled copy of the UI and no source edit could touch it.
+**Committed, NOT released:** the tray work, the heartbeat fix, and the chat UI. None of it
+reaches a volunteer until 0.20 is built and published — the lesson this session opened with,
+when a source edit could not touch the running 0.18 because it served a bundled copy.
 
-**Suite 72 modules green, `selftest_shard.py` ALL PASS** throughout.
+**Suite: 71 Python modules green, `neuron.test.ts` 15/15, `selftest_shard.py` ALL PASS.**
 
 **Open, in priority order:**
 1. **Rotate `NEURON_REGISTER_SECRET`** — it was echoed into a session transcript. It grants
    trusted standing AND overrides the payout-rebind check, making it the only path to
    redirecting another node's earnings.
-2. **`neuron fix`** when the office PCs wake — [P27], stale `0-13` ranges that outbid the driver.
-3. **The GPU session** — see the decisions log for the order it must follow.
-4. **0.20**: tray download progress and a chat reachable while downloading (the trust gap that
-   started half seven), engine-swap hysteresis (a 7B→1.5B reload churn seen live, trigger
-   unconfirmed), and [P28] — a slow node still reported to the user as a dead one.
-5. **The chat UI port.** 4,119 lines across 19 files, well structured. The hidden cost is that
-   **59 of `ui/test_chat_ui.py`'s 67 checks grep `chat.html`'s source text**, and a React build
-   compiles to bundled JS — so every one of them breaks. Those tests encode real incidents. Two
-   sessions, not a copy job.
+2. **`neuron fix`** when the office PCs wake — [P27]. Run it with no argument first; it lists
+   who is online and you name the machine you chat from.
+3. **Swap `/next` → `/`** once satisfied, and port whatever of `test_chat_ui.py`'s 67 assertions
+   still apply. 59 of them read `chat.html`'s source and cannot survive the swap.
+4. **Cut 0.20** — tray, heartbeat and the chat UI, none of which anyone can see yet.
+5. **The GPU session** — rent time online; the order it must follow is in the decisions log and
+   is not arbitrary.
+6. Remaining 0.20 candidates: tray download progress, a chat reachable while downloading, engine
+   swap hysteresis (a 7B→1.5B reload churn seen live, trigger unconfirmed), and [P28].
+
+**Two identities on this machine.** It re-registered today as `agent-optinovate-6ff49d` while
+`%LOCALAPPDATA%\NEURON\config.json` still names `agent-optinovate`, which is offline and holds
+whatever it earned. Worth resolving deliberately rather than discovering later.
 
 ---
 
