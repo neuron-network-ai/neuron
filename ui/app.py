@@ -83,6 +83,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="NEURON Chat", version="0.2", lifespan=lifespan)
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+# The built app references its chunks as ./assets/... relative to /next, so they have to
+# be reachable at /assets/ as well. Mounted only when a build exists, so a source checkout
+# that has never run npm still starts.
+if (STATIC_DIR / "app" / "assets").is_dir():
+    app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "app" / "assets")),
+              name="app-assets")
 app.include_router(openai_router)          # Session 11: /v1/* on the same server
 app.include_router(oauth_module.router)    # Workstream B: /auth/login|callback|me|logout
 
@@ -104,6 +110,28 @@ def sse(event: str, data: dict) -> str:
 @app.get("/")
 def index():
     return FileResponse(str(STATIC_DIR / "chat.html"))
+
+
+# The React rewrite, served alongside the page it will eventually replace rather than instead
+# of it. `/` keeps working exactly as before, so the 67 assertions in ui/test_chat_ui.py -- 59
+# of which read chat.html's source text -- stay meaningful while this is built. Swapping the
+# routes is a one-line change on the day it earns it.
+#
+# Built assets only: `cd ui/web && npm install && npm run build` writes them here. Node is a
+# BUILD dependency; a volunteer never needs a JavaScript runtime, and the PyInstaller bundle
+# ships these files exactly as it ships chat.html.
+APP_DIR = STATIC_DIR / "app"
+
+
+@app.get("/next")
+def index_next():
+    built = APP_DIR / "index.html"
+    if not built.exists():
+        return HTMLResponse(
+            "<h1>Not built</h1><p>Run <code>npm install &amp;&amp; npm run build</code> in "
+            "<code>ui/web/</code>. The existing chat is unaffected at <a href='/'>/</a>.</p>",
+            status_code=503)
+    return FileResponse(str(built))
 
 
 @app.get("/api-docs", response_class=HTMLResponse)

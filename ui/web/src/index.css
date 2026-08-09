@@ -1,0 +1,203 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+/* The theme is driven by a class on <html>, not by prefers-color-scheme. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ---------------------------------------------------------------------------
+   Design tokens. Every component styles itself from these, so light and dark
+   are both deliberate and neither needs conditional class strings.
+   --------------------------------------------------------------------------- */
+:root {
+  /* NEURON's palette, lifted from coordinator/theme.py so the chat, the live dashboard and
+     the landing page are finally one product. theme.py's values are themselves a copy of
+     docs/index.html on purpose -- the coordinator VM does not serve the site and must not
+     fetch anything from it -- and this is the third surface joining that arrangement.
+
+     --accent is #15803d, NOT the brighter #16a34a: theme.py records that the bright green is
+     3.30:1 on white, under AA for text. The bright one is for large shapes and the logo only. */
+  --canvas: #f6fdf7;
+  --surface: #ffffff;
+  --surface-2: #f0fdf4;
+  --surface-3: #dcfce7;
+  --line: #d1fae5;
+  --line-strong: #bbf7d0;
+  --ink: #1a2e1c;
+  --ink-muted: #6b7280;
+  --ink-faint: #9ca3af;
+  --accent: #15803d;
+  --accent-hover: #166534;
+  --accent-soft: #f0fdf4;
+  --accent-line: #bbf7d0;
+  --accent-ink: #ffffff;
+  --danger: #b42318;
+  --danger-soft: #fef2f2;
+  --ok: #16a34a;
+  --warn: #b45309;
+  --shadow-sm: 0 1px 2px rgba(26, 46, 28, 0.06);
+  --shadow-lg: 0 1px 3px rgba(26, 46, 28, 0.08), 0 12px 32px -14px rgba(26, 46, 28, 0.35);
+}
+
+.dark {
+  /* Dark is green-tinted rather than neutral, so the brand survives the theme toggle. The
+     accent inverts to a bright green -- a dark green on a dark canvas would fail AA, which is
+     the same trap chat.html hit when its Send button was #fff on the brand colour (2.9:1). */
+  --canvas: #0a0f0b;
+  --surface: #101a12;
+  --surface-2: #16231a;
+  --surface-3: #1e3024;
+  --line: #1f3a28;
+  --line-strong: #2d5039;
+  --ink: #e6f4ea;
+  --ink-muted: #9bb3a3;
+  --ink-faint: #6b8577;
+  --accent: #4ade80;
+  --accent-hover: #86efac;
+  --accent-soft: #14261a;
+  --accent-line: #235c37;
+  --accent-ink: #052e16;
+  --danger: #f27c72;
+  --danger-soft: #2a1513;
+  --ok: #5bc97f;
+  --warn: #e0a233;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 1px 3px rgba(0, 0, 0, 0.5), 0 16px 40px -16px rgba(0, 0, 0, 0.8);
+}
+
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-faint: var(--ink-faint);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-line: var(--accent-line);
+  --color-accent-ink: var(--accent-ink);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+}
+
+@layer base {
+  html {
+    color-scheme: light;
+  }
+
+  html.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: var(--canvas);
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background: var(--accent);
+    color: var(--accent-ink);
+  }
+
+  /* Slim, theme-aware scrollbars. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-strong) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background-color: var(--line-strong);
+    border-radius: 999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: var(--ink-faint);
+    background-clip: content-box;
+  }
+
+  /* Range inputs, styled once instead of per-component. */
+  input[type='range'] {
+    appearance: none;
+    height: 3px;
+    border-radius: 999px;
+    background: var(--surface-3);
+    outline: none;
+  }
+
+  input[type='range']::-webkit-slider-thumb {
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 999px;
+    background: var(--accent);
+    cursor: pointer;
+    border: 2px solid var(--surface);
+    box-shadow: var(--shadow-sm);
+  }
+
+  input[type='range']::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 999px;
+    background: var(--accent);
+    cursor: pointer;
+    border: 2px solid var(--surface);
+  }
+}
+
+@layer base {
+  /* highlight.js themes ship their own padding and background; the CodeBlock
+     shell provides both, so strip them to keep line numbers aligned. */
+  .hljs {
+    background: transparent !important;
+    padding: 0 !important;
+    display: block;
+  }
+}
+
+@layer utilities {
+  /* Small-caps monospace label used for metadata throughout the app. */
+  .label-mono {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .rise-in {
+    animation: rise-in 0.22s ease-out both;
+  }
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}

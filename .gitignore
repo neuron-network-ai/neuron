@@ -137,3 +137,9 @@ coordinator/backups/
 
 # personal run helper — local paths and shell layout, not part of the product
 neuron.bat
+
+# The chat UI's build toolchain. `/node_modules/` above is root-anchored and does NOT cover a
+# nested one, so without this the 91 packages under ui/web would be committed. Node is a BUILD
+# dependency only; the BUILT assets under ui/static/app/ ARE committed, because the PyInstaller
+# bundle ships them and a volunteer must never need npm.
+ui/web/node_modules/
