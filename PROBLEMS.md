@@ -44,6 +44,27 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
      that download, including the ones with no GPU.** Fix the updater before shipping it.
   Rented time is cheap next to the lever: decode is bandwidth-bound at ~30 GB/s on DDR against
   360–1000 GB/s on a consumer card, and 200B needs ~30–80 CPU machines or ~10 GPU ones.
+- **2026-08-11 — An agent can be rolled BACKWARDS, and only when asked explicitly (0.20.1).**
+  The founder's condition for shipping: *"if it goes wrong we have to make setup to fix, we can
+  not leave users in loss."* There was no such setup. An agent could only ever move forward —
+  `is_newer` refuses anything not newer — so a bad release had no remote remedy at all:
+  `apply_update` ends in `os._exit(0)`, the machine is behind a NAT in somebody's house, and
+  publishing the previous installer did nothing because the agent correctly declined it. **The
+  safety property and the trap were the same line.**
+  So a downgrade is possible, but never inferred from the version alone: `NEURON_AGENT_ROLLBACK=1`
+  on the coordinator, surfaced as `rollback` in `/agent/version`, is a separate act by an operator
+  who knows what they are doing. A stale config, or anyone able to influence the version field,
+  must not be able to walk a fleet backwards silently. Every other guarantee is unchanged — the
+  SHA-256 must match, a source checkout is untouched, a serving node is never interrupted, and an
+  empty hash still means nobody installs anything.
+  **Shipped as 0.20.1 rather than added later, deliberately.** 0.20.0 was already published and
+  advertised when this gap was named, and a node that lands on 0.20.0 could not be rescued from a
+  future bad release. Nodes must arrive on a version that can be pulled back, so 0.20.0 was
+  superseded before any node had taken it. Agents older than 0.20.1 ignore the field entirely,
+  which is right for them: they stay where they are rather than acting on something they cannot
+  verify. Procedures in `RECOVERY.md`; 6 cases in `agent/test_updater.py`, including that the flag
+  never bypasses the hash check and that rolling back to the running version is a no-op rather
+  than a reinstall loop.
 - **2026-08-11 — A node's standing and proof-of-compute record leave the public dashboard.**
   The founder's objection: a row reading `flagged · 4%` beside a named node *"will make users
   worried and they may leave the network"*. Correct, and the deeper problem is that the number

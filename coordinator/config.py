@@ -121,7 +121,7 @@ REPLICA_SLOWDOWN_LIMIT = float(os.environ.get("NEURON_REPLICA_SLOWDOWN_LIMIT", "
 # is already treated.
 MS_PER_LAYER_TTL_S = float(os.environ.get("NEURON_MS_PER_LAYER_TTL_S", "21600"))
 
-AGENT_VERSION = os.environ.get("NEURON_AGENT_VERSION", "0.20.0")
+AGENT_VERSION = os.environ.get("NEURON_AGENT_VERSION", "0.20.1")
 # Where a node fetches that version, and the hash it must match before anything is run.
 # The download is NOT served from here: this VM has 1 GB of RAM and the installer is ~200 MB,
 # so the coordinator only advertises metadata and GitHub Releases does the bandwidth.
@@ -133,6 +133,13 @@ AGENT_DOWNLOAD_URL = os.environ.get(
 # means no node will install anything, which is the correct failure direction: an unverified
 # binary pushed to every volunteer's machine is the worst thing this project could ship.
 AGENT_SHA256 = os.environ.get("NEURON_AGENT_SHA256", "")
+# THE WAY BACK. An agent only ever moved forward, so a bad release could not be undone: the
+# install ends in os._exit(0), the machine is behind a NAT in somebody's house, and "reinstall
+# it" does not scale past the machines one person can name. Setting this to 1 -- together with
+# an OLDER AGENT_VERSION and its matching SHA -- tells every node to install that older build
+# deliberately. Off by default, and never inferred from the version alone: walking a fleet
+# backwards must take an explicit act by an operator who knows they are doing it.
+AGENT_ROLLBACK = os.environ.get("NEURON_AGENT_ROLLBACK", "").strip().lower() in ("1", "true", "yes")
 
 # --------------------------------------------------------------------------- #
 # Coordinator self-update (see coordinator/selfupdate.py)

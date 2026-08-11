@@ -225,6 +225,50 @@ def main():
     node_server._serving_exit()
     node_server._serving_conns = 0
 
+    # ---- rollback: the way back from a bad release -------------------------- #
+    # Until 0.20.1 an agent could only move FORWARD, so a bad build had no remote remedy:
+    # apply_update ends in os._exit(0), the machine is behind a NAT in somebody's house, and
+    # "please reinstall" does not scale past the machines one person can name. Publishing the
+    # previous installer did nothing, because is_newer correctly refused it — the safety
+    # property and the trap were the same line.
+    older = {"version": "0.19.0", "download_url": "http://c/f.exe", "sha256": "a" * 64}
+    try:
+        updater.is_frozen = lambda: True                 # pretend to be the shipped build
+
+        updater.requests.get = fake_get(payload=older)
+        check("without the flag an older version is still refused",
+              updater.check_once("http://c") == "current")
+
+        # It must get PAST the version gate. It then fails on the hash, which is the next guard
+        # and proves a download really was attempted for an OLDER build.
+        updater.requests.get = fake_get(payload={**older, "rollback": True})
+        v = updater.check_once("http://c")
+        check("with the flag an older version is acted on", v != "current", v)
+
+        updater.requests.get = fake_get(payload={**older, "rollback": True, "sha256": ""})
+        check("rollback still refuses an unverified binary",
+              updater.check_once("http://c") == "download-failed")
+
+        updater.requests.get = fake_get(payload={"version": updater.LOCAL_VERSION,
+                                                 "download_url": "http://c/f.exe",
+                                                 "sha256": "a" * 64, "rollback": True})
+        check("rollback to the version already running is a no-op, not a reinstall loop",
+              updater.check_once("http://c") == "current")
+
+        updater.is_frozen = lambda: False
+        updater.requests.get = fake_get(payload={**older, "rollback": True})
+        check("a source checkout is never rolled back either",
+              updater.check_once("http://c") == "source-manual")
+
+        # Absent on every coordinator older than this one, and absent must read as False: the
+        # dangerous direction is the one that needs something explicitly present.
+        updater.requests.get = fake_get(payload={"version": "9.9.9", "download_url": "u",
+                                                 "sha256": "b" * 64})
+        check("a coordinator that never heard of rollback yields rollback=False",
+              updater.remote_info("http://c")["rollback"] is False)
+    finally:
+        updater.requests.get, updater.is_frozen = real_get, real_frozen
+
     print(f"\n{ok} passed, {fail} failed")
     return fail == 0
 

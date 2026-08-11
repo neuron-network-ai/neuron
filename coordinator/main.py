@@ -1965,7 +1965,11 @@ def agent_version():
     sha256 empty means "do not install" — see config.AGENT_SHA256."""
     return {"version": config.AGENT_VERSION,
             "download_url": config.AGENT_DOWNLOAD_URL,
-            "sha256": config.AGENT_SHA256}
+            "sha256": config.AGENT_SHA256,
+            # `rollback` lets an operator move the fleet BACKWARDS onto an older build. Agents
+            # before 0.20.1 ignore the field entirely, which is the correct behaviour for them:
+            # they simply stay where they are rather than acting on something they cannot verify.
+            "rollback": config.AGENT_ROLLBACK}
 
 
 @app.get("/models")

@@ -40,7 +40,7 @@ import time
 
 import requests
 
-LOCAL_VERSION = "0.20.0"          # bump together with packaging/neuron.iss
+LOCAL_VERSION = "0.20.1"          # bump together with packaging/neuron.iss
 CHECK_SECONDS = 24 * 3600
 DOWNLOAD_TIMEOUT = 600
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -84,7 +84,10 @@ def remote_info(base, timeout=15):
         return None
     return {"version": str(data["version"]),
             "download_url": data.get("download_url") or "",
-            "sha256": (data.get("sha256") or "").strip().lower()}
+            "sha256": (data.get("sha256") or "").strip().lower(),
+            # Absent on every coordinator older than this, and absent means False -- so the
+            # dangerous direction is the one that needs something to be explicitly present.
+            "rollback": bool(data.get("rollback"))}
 
 
 def sha256_file(path, chunk=1 << 20):
@@ -183,10 +186,28 @@ def check_once(base, busy=None, dest_dir=None, exit_after=True):
     info = remote_info(base)
     if info is None:
         return "unreachable"
-    if not is_newer(info["version"], LOCAL_VERSION):
+
+    # ROLLBACK. Until now an agent could only ever move FORWARD, so a bad release had no remote
+    # way back: `apply_update` ends in os._exit(0), the volunteer's PC is behind a NAT 100 km
+    # away, and "please reinstall" is not an instruction this product can give at any scale.
+    # Publishing the previous installer did nothing, because `is_newer` correctly refused it --
+    # the safety property and the trap were the same line.
+    #
+    # So a DOWNGRADE is possible, but only when the coordinator asks for one explicitly. It is
+    # never inferred from the version alone: a coordinator that merely rolled back its own
+    # config, or an attacker who could set the version field, must not be able to walk a fleet
+    # backwards silently. `rollback` is a separate, deliberate operator switch, and every other
+    # guarantee still holds -- the SHA must match, a source checkout is untouched, and a serving
+    # node is never interrupted.
+    rollback = bool(info.get("rollback")) and str(info["version"]) != str(LOCAL_VERSION)
+    if not is_newer(info["version"], LOCAL_VERSION) and not rollback:
         return "current"
 
-    log.info("agent %s is available (running %s)", info["version"], LOCAL_VERSION)
+    if rollback and not is_newer(info["version"], LOCAL_VERSION):
+        log.warning("the coordinator has asked this node to ROLL BACK to %s (running %s) — "
+                    "installing an OLDER build deliberately", info["version"], LOCAL_VERSION)
+    else:
+        log.info("agent %s is available (running %s)", info["version"], LOCAL_VERSION)
     if not is_frozen():
         log.info("running from a source checkout — not touching it. Update with: git pull")
         return "source-manual"
