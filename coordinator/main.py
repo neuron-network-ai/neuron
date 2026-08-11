@@ -18,7 +18,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from coordinator import (auth, balancer, config, genesis, ledger, migration,
+from coordinator import (auth, balancer, config, emission, genesis, ledger, migration,
                          model_registry, model_tiers, models, nodelogs, payout, router,
                          theme)
 import relay_auth
@@ -60,6 +60,15 @@ class RegisterBody(BaseModel):
     gpu_name: str | None = None         # e.g. "NVIDIA GeForce RTX 4070". Operator-only in
                                         # /node/list — a card model is fingerprinting detail,
                                         # like `platform`.
+    model_id: str | None = None         # the model this node is ACTUALLY serving. Reported so
+                                        # a coordinator/node divergence is detectable at all --
+                                        # without it, both 28-layer tiers validate identically
+                                        # and a mismatch shows up only as a dropped socket.
+    declared_slots: str | None = None   # UTC hours this machine is usually available, e.g.
+                                        # "1,2,3,4,5". A DECLARATION, never a promise: nothing
+                                        # is penalised for missing one, because a phone's
+                                        # charger is not its owner's decision. It exists so the
+                                        # coordinator can see tomorrow's 3am hole today.
 
 
 class InferBody(BaseModel):
@@ -98,6 +107,10 @@ class PayoutBindBody(BaseModel):
     nonce: str                            # from GET /node/{id}/payout-challenge
     signature: str                        # binding_message signed by `address`
     old_signature: str | None = None      # required only when changing a bound address
+
+
+class SetModelBody(BaseModel):
+    model_id: str | None = None   # None clears the pin and restores capacity-driven tiering
 
 
 class ViolationBody(BaseModel):
@@ -150,8 +163,28 @@ _tier_lock = threading.Lock()
 # a chain for. DISTINCT from the TierController's target tier (what the network's capacity
 # QUALIFIES for): they converge when a migration moves nodes onto the target (Build 3). Defaults
 # to the configured floor so today's behaviour is unchanged; a migration will set it.
+#
+# PERSISTED, and that is not a detail. This used to live only here, initialised to the config
+# floor -- so any restart AFTER a tier migration silently reverted the coordinator's belief about
+# which model the network runs, while every node carried on serving the new one. Both Qwen2.5
+# tiers have 28 layers, so every range still validated and the chain still read as routable,
+# while nodes fed each other activations from different models. The driver saw
+# "socket closed mid-message" and users saw a RuntimeError. Live 2026-08-10, and invisible
+# because every health signal was green.
 _serving = {"model_id": config.MODEL_ID, "layers": config.TOTAL_LAYERS}
 _serving_lock = threading.Lock()
+
+
+def _load_serving():
+    """Restore the serving model from the DB at import. Falls back to the configured floor when
+    nothing was ever stored, which is the correct answer for a brand-new coordinator."""
+    mid = models.get_setting("serving_model_id")
+    layers = models.get_setting("serving_layers")
+    if mid and layers:
+        try:
+            _serving["model_id"], _serving["layers"] = mid, int(layers)
+        except (TypeError, ValueError):
+            pass
 
 
 def serving_model():
@@ -160,10 +193,13 @@ def serving_model():
 
 
 def set_serving_model(model_id, layers):
-    """Point the network at a different model (used by migration, Build 3)."""
+    """Point the network at a different model (used by migration, Build 3). Written through to
+    the DB so a restart cannot forget it."""
     with _serving_lock:
         _serving["model_id"] = model_id
         _serving["layers"] = int(layers)
+    models.set_setting("serving_model_id", model_id)
+    models.set_setting("serving_layers", int(layers))
 
 
 # Rolling model migration (Build 3): moves the network from the serving model to the target
@@ -190,7 +226,15 @@ def apply_gap_heal(assignments):
         models.update_layers(a["node_id"], a["layer_start"], a["layer_end"])
 
 
+# Last routability verdict, so the sweep logs the TRANSITION rather than the state. An
+# unroutable network is not self-correcting -- it would print every 60s forever, and a line that
+# appears 1,440 times a day is one nobody reads (the heartbeat lesson, Session 55 half seven).
+# None means "not yet evaluated", which is deliberately distinct from False.
+_last_routable = None
+
+
 async def health_loop():
+    global _last_routable
     prune_due_at = 0.0
     while True:
         await asyncio.sleep(config.HEALTH_CHECK_INTERVAL_S)
@@ -198,6 +242,71 @@ async def health_loop():
             for node_id in models.sweep():
                 print(f"[health] node '{node_id}' went OFFLINE "
                       f"(no ping in {config.HEARTBEAT_TIMEOUT_S}s)")
+            # Is the roster still ROUTABLE? Nothing asked this before: self_heal returns early
+            # unless a layer is uncovered (`if not missing: return`), so a fully-covered but
+            # unroutable roster was invisible to the one thing that repairs placement, exactly
+            # as it was invisible to /status. PROBLEMS.md [P32]. This does not MOVE anything --
+            # repairing it means rewriting ranges the nodes themselves re-assert, which is the
+            # open question in that entry. It makes a silent failure loud, which is the part
+            # that has to exist either way.
+            # Availability emission (TOKENOMICS.md §11.4). Piggybacks this sweep rather than
+            # running its own timer -- it settles CLOSED slots only, so it needs to run
+            # regularly, not punctually, and a second scheduler is a second thing that can
+            # silently stop. Never raises into the sweep: an accounting failure must not stop
+            # the health check that keeps the network routable.
+            try:
+                emission.close_slots(serving_model()["layers"])
+            except Exception as e:
+                print(f"[emission] sweep failed (nodes unaffected, slots stay unsettled "
+                      f"and will retry): {type(e).__name__}: {e}")
+            roster = models.list_nodes()
+            sm_layers = serving_model()["layers"]
+            shape = router.chain_shape(roster, sm_layers)
+            # AUTO-REPAIR. Detection alone meant a human had to notice and run `neuron fix`
+            # after every join or leave -- which on 2026-08-10 meant the chain sat unroutable
+            # overnight while nobody was awake. The coordinator knows the one routable shape for
+            # its roster; there is no reason for a person to type it in.
+            #
+            # Only safe because placement ownership shipped first ([P32]): before that a node
+            # re-registering would overwrite this, and the sweep would have fought the roster
+            # every 60s. Never touches a chain that already routes, so a healthy network is
+            # never disturbed.
+            # ...but NOT while a tier migration is in flight. A migration owns placement during
+            # its own transition (migration.self_heal makes the same exception), and a repair
+            # that rewrote ranges mid-cutover would fight it -- half the network on one model's
+            # partition and half on the other's, which is unrecoverable rather than merely
+            # unroutable.
+            with _migration_lock:
+                migrating = _migration.phase != "steady"
+            if not shape["routable"] and migrating:
+                print(f"[repair] chain is unroutable but a migration is {_migration.phase} — "
+                      f"leaving placement to it")
+            elif not shape["routable"]:
+                plan = router.canonical_assignment(
+                    roster, sm_layers, serving_model_id=serving_model()["model_id"])
+                if plan:
+                    for a in plan:
+                        models.update_layers(a["node_id"], a["layer_start"], a["layer_end"])
+                    shape = router.chain_shape(models.list_nodes(), sm_layers)
+                    print(f"[repair] chain was unroutable — reassigned {len(plan)} node(s) to "
+                          f"{shape['ranges']} ({shape['stages']} stage(s), "
+                          f"routable={shape['routable']})")
+                else:
+                    print(f"[repair] chain is unroutable and cannot be fixed from this roster: "
+                          f"{len(roster)} node(s) known, need at least "
+                          f"{config.MIN_PIPELINE_STAGES} online and eligible")
+            if shape["routable"] != _last_routable:
+                if shape["routable"]:
+                    print(f"[health] chain is routable again: {shape['stages']} stage(s) "
+                          f"{shape['ranges']}")
+                else:
+                    print(f"[health] NETWORK NOT ROUTABLE: the chain walks to "
+                          f"{shape['stages']} stage(s) {shape['ranges']}, and a driver accepts "
+                          f"{config.MIN_PIPELINE_STAGES}-{config.PIPELINE_STAGES}. Every layer "
+                          f"may still be covered -- coverage is not routability. Chats will "
+                          f"fail AFTER a wallet hold is taken. Fix: "
+                          f"./coordinator/pin_layers.sh --driver <the machine you chat from>")
+                _last_routable = shape["routable"]
             # Retention: `requests` is the only table that grows with TRAFFIC rather than with
             # users, so it's the one that would actually kill a single-file SQLite DB (~1.25
             # GB/day at 1M users x 5 requests). Identities, ledger rows and moderation_events
@@ -223,6 +332,18 @@ async def health_loop():
             # gate qualifies on AGGREGATE RAM, which is not the same question.
             target = {"model_id": tier["model_id"], "layers": tier["layers"],
                       "gb_per_layer": tier.get("gb_per_layer")}
+            # An operator PIN overrides the capacity ladder entirely. Which model the network
+            # serves is a decision, not a consequence of how many machines happen to be awake --
+            # and this is also the only way to move nodes onto a model REMOTELY. A volunteer's
+            # PC is never reachable; "restart the agent" is not an instruction this product can
+            # give. The migration handshake (prepare -> ready -> cutover) is the remote reload,
+            # and until now nothing could aim it deliberately.
+            pinned = models.get_setting("pinned_model_id")
+            if pinned:
+                pin = model_tiers.tier_for(pinned)
+                if pin:
+                    target = {"model_id": pin["model_id"], "layers": pin["layers"],
+                              "gb_per_layer": pin.get("gb_per_layer")}
             serving = serving_model()
             serving["gb_per_layer"] = model_tiers.gb_per_layer_for(serving["model_id"])
             with _migration_lock:
@@ -271,8 +392,13 @@ async def lifespan(app: FastAPI):
     if genesis.seed_genesis():
         print("[coordinator] genesis buckets seeded (fixed-supply ledger, Phase 0)")
     genesis.verify_invariant()   # fail startup loudly rather than serve on a broken supply
-    print(f"[coordinator] up | db={config.DB_PATH} | layers={config.TOTAL_LAYERS} | "
-          f"timeout={config.HEARTBEAT_TIMEOUT_S}s")
+    # BEFORE the health loop starts: the sweep assigns layer ranges against the serving model,
+    # so a coordinator that has not yet remembered which model it serves would hand out ranges
+    # for the wrong one. This is the line whose absence caused 2026-08-10.
+    _load_serving()
+    sm = serving_model()
+    print(f"[coordinator] up | db={config.DB_PATH} | serving={sm['model_id']} "
+          f"({sm['layers']} layers) | timeout={config.HEARTBEAT_TIMEOUT_S}s")
     task = asyncio.create_task(health_loop())
     try:
         yield
@@ -398,6 +524,10 @@ def register(body: RegisterBody, x_register_secret: str = Header(default=None),
         ms_per_layer=body.ms_per_layer, head_ms=body.head_ms, trusted=trusted,
         platform=body.platform, has_gpu=body.has_gpu, gpu_vram_gb=vram,
         gpu_name=body.gpu_name)
+    if body.declared_slots is not None:
+        models.set_declared_slots(body.node_id, body.declared_slots)
+    if body.model_id:
+        models.set_reported_model(body.node_id, body.model_id)
     # Sybil SIGNAL, never a block. One machine registering several node_ids in a day is what a
     # sybil looks like -- and also what a legitimate operator running two nodes on a spare PC
     # looks like, and what two identical laptops look like, since the fingerprint is only
@@ -422,10 +552,26 @@ def register(body: RegisterBody, x_register_secret: str = Header(default=None),
     # uninstalled.
     fresh = models.get_node(body.node_id) or {}
     standing = fresh.get("standing") or ("trusted" if trusted else "probationary")
+    # A node re-asserting a stale config no longer overwrites its placement ([P32]) -- so say so,
+    # here, at the one moment we know it happened. Not an error: the node is not misbehaving, it
+    # is running an agent that has not been told what it is assigned. It will serve the right
+    # range anyway (slice-info returns the assigned one), and this is what tells an operator the
+    # config on that machine is stale before the next `neuron fix` gets quietly undone.
+    if fresh.get("placement_drift"):
+        print(f"[placement] node '{body.node_id}' registered claiming layers "
+              f"{fresh['reported_layer_start']}-{fresh['reported_layer_end']}, but is assigned "
+              f"{fresh['layer_start']}-{fresh['layer_end']} — keeping the assignment. Its local "
+              f"config is stale; the node will serve the assigned range. PROBLEMS.md [P32]")
     resp = {
         "status": "registered",
         "standing": standing,
-        "assigned_layers": [body.layer_start, body.layer_end],
+        # Read back from the DB, for exactly the reason `standing` above is: this used to echo
+        # what the caller sent, which is now a DIFFERENT fact from what the node is assigned.
+        # The agent logs this line on every start ("registered as X, assigned layers [a, b]"),
+        # so echoing the request would have it confidently print the stale range it just failed
+        # to impose.
+        "assigned_layers": [fresh.get("layer_start", body.layer_start),
+                            fresh.get("layer_end", body.layer_end)],
         "node_token": token,
         # Also here, not just on the heartbeat: a node that re-registers (relay ticket refresh,
         # restart, recovery) learns the current address immediately rather than waiting.
@@ -633,10 +779,56 @@ def attest(node_id: str, body: AttestBody, _=Depends(require_register_secret)):
     if models.get_node(node_id) is None:
         raise HTTPException(status_code=404, detail=f"unknown node '{node_id}'")
     models.record_attestation(node_id, body.passed)
+    # A passing challenge also unlocks THIS slot's availability emission. Uptime alone must
+    # never pay: a script that heartbeats and computes nothing would otherwise be the most
+    # profitable node on the network. Recorded here because this is the only place the
+    # coordinator learns that a node did real work at a known instant.
+    if body.passed:
+        models.mark_slot_poc(node_id)
     n = models.get_node(node_id)
+    # `standing` was the one field missing, and the verifier's success line already read it with
+    # a "verified" fallback -- so a node whose standing had NOT changed still logged as though
+    # it had. It matters more now that a flagged node can be re-challenged: the caller needs to
+    # know whether that pass actually lifted the flag.
     return {"node_id": node_id, "passed": body.passed, "reputation": n["reputation"],
-            "flagged": n["flagged"], "challenges_passed": n["challenges_passed"],
+            "flagged": n["flagged"], "standing": n["standing"], "eligible": n["eligible"],
+            "challenges_passed": n["challenges_passed"],
             "challenges_failed": n["challenges_failed"]}
+
+
+@app.post("/node/{node_id}/reputation-reset")
+def reputation_reset(node_id: str, _=Depends(require_register_secret)):
+    """Retire a node's challenge history (operator only).
+
+    Exists because `flagged` had NO exit. It is derived from cumulative counters that only ever
+    grow, the verifier skipped flagged nodes so they could never be re-challenged, and no
+    endpoint cleared them — so the only way back was `DELETE /node/{id}`, which destroys the
+    node's identity and token and makes a volunteer reinstall to escape a verdict.
+
+    Re-challenging flagged nodes (verify_service) is the mechanism that makes this rare: a node
+    that is actually fine now earns its own way back and needs no operator at all. This is for
+    the case that mechanism cannot fix — evidence the network MANUFACTURED. On 2026-08-10 three
+    honest nodes were failed for being challenged on layers they did not hold; their counters
+    are a record of a coordinator bug, and no number of future passes makes those entries true.
+    Deleting bad data is not the same as forgiving a bad node.
+
+    Deliberately NOT self-serve: a node cannot clear its own reputation (that would make
+    proof-of-compute advisory), and it does not touch peer attestations, which are other
+    machines' testimony rather than ours to erase."""
+    n = models.get_node(node_id)
+    if n is None:
+        raise HTTPException(status_code=404, detail=f"unknown node '{node_id}'")
+    before = {"reputation": n["reputation"], "standing": n["standing"],
+              "challenges_passed": n["challenges_passed"],
+              "challenges_failed": n["challenges_failed"]}
+    models.reset_attestations(node_id)
+    after = models.get_node(node_id)
+    print(f"[attest] reputation reset for {node_id}: {before['challenges_passed']}/"
+          f"{before['challenges_passed'] + before['challenges_failed']} cleared, "
+          f"standing {before['standing']} -> {after['standing']}")
+    return {"node_id": node_id, "before": before,
+            "after": {"reputation": after["reputation"], "standing": after["standing"],
+                      "eligible": after["eligible"]}}
 
 
 # --- Session 8: tell a node exactly what to download before it downloads ----- #
@@ -1105,11 +1297,15 @@ def _network_summary():
     # flagged = failed PoC (S16); probationary = open-join, not yet verified (S12)
     flagged = [n for n in online if n.get("flagged")]
     probationary = [n for n in online if n.get("standing") == "probationary"]
-    sm_layers = serving_model()["layers"]
+    sm = serving_model()
+    sm_layers = sm["layers"]
     covered = set()
     for n in usable:
         covered.update(range(n["layer_start"], n["layer_end"] + 1))
     total_covered = len(covered & set(range(sm_layers)))
+    # Reuses the roster already fetched above rather than calling build_chain(), which would hit
+    # the DB a second time inside a function the dashboard calls on every page load.
+    shape = router.chain_shape(nodes, sm_layers)
     return {
         "total_nodes": len(nodes),
         "online_nodes": len(online),
@@ -1122,7 +1318,29 @@ def _network_summary():
         # the chain is broken; this tells them where to put a node to fix it, and it is the
         # same fact the dashboard's coverage strip and the doctor's failure message use.
         "uncovered_layers": _ranges(sorted(set(range(sm_layers)) - covered)),
-        "network_healthy": total_covered == sm_layers,
+        # ROUTABILITY, which is not the same fact as coverage and was never reported.
+        # `total_layers_covered == total_layers` asks "is every layer served somewhere"; a
+        # driver asks "does this walk to 2 or 3 stages", and a roster can pass the first while
+        # failing the second -- one node holding the whole model wins the chain walk from cursor
+        # 0 and swallows the stages below it. Live for hours on 2026-08-09 with everything below
+        # reading green. PROBLEMS.md [P32].
+        "stages": shape["stages"],
+        "chain_ranges": shape["ranges"],
+        "routable": shape["routable"],
+        # Reported separately because it is a DIFFERENT failure from a bad stage count, and the
+        # remedy differs: this one means stage 1 is the wrong width for the driver's fixed shard.
+        "stage1_ok": shape["stage1_ok"],
+        "expected_stage1": shape["expected_stage1"],
+        # Nodes serving a DIFFERENT model from the network. Never benign: such a node cannot
+        # produce correct activations for the chain it sits in, and the user sees a dropped
+        # socket rather than a wrong answer. [P33].
+        "model_mismatch": [n["node_id"] for n in models.model_mismatches(sm["model_id"])],
+        # network_healthy now means "a request can actually complete", which is what every
+        # consumer already believed it meant: the dashboard dot, neuron_doctor's verdict, the
+        # landing page and ui/app.py all treat it as "is the network working". Coverage alone
+        # answered a narrower question while presenting as that one.
+        "network_healthy": (total_covered == sm_layers and shape["routable"]
+                            and not models.model_mismatches(sm["model_id"])),
     }, nodes
 
 
@@ -1160,6 +1378,54 @@ def status():
     network, _ = _network_summary()
     return {"coordinator_version": config.COORDINATOR_VERSION,
             "network": network, "stats": models.network_stats()}
+
+
+@app.post("/network/model")
+def network_set_model(body: SetModelBody, _=Depends(require_register_secret)):
+    """Pin the model the network serves — and REMOTELY move every node onto it.
+
+    Two things at once, and both matter:
+
+    1. Which model the network runs stops being a function of how many machines are awake. Four
+       PCs coming online should not silently retier the product (2026-08-10, when exactly that
+       started a 7B migration nobody asked for).
+    2. It is the only way to move nodes onto a model **without touching them**. A volunteer's PC
+       is 100 km away and behind a NAT; "restart the agent" is not an instruction this product
+       can give. The migration handshake — prepare, download, report ready, cut over together —
+       already does remote reloads (it is how the network moved to 7B this morning). Nothing
+       could aim it deliberately until now.
+
+    `model_id: null` clears the pin and hands the decision back to the capacity ladder.
+    """
+    if body.model_id is None:
+        models.set_setting("pinned_model_id", "")
+        return {"status": "cleared", "serving": serving_model()}
+    tier = model_tiers.tier_for(body.model_id)
+    if tier is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown model '{body.model_id}'. Known: "
+                   f"{[t['model_id'] for t in model_tiers.TIERS]}")
+    models.set_setting("pinned_model_id", tier["model_id"])
+    return {"status": "pinned", "model_id": tier["model_id"], "layers": tier["layers"],
+            "serving_now": serving_model(),
+            "note": "nodes migrate on the next health sweep: they download the slice, report "
+                    "ready, and cut over together. No node needs to be touched."}
+
+
+@app.get("/network/slots")
+def network_slots():
+    """Where the network needs cover, and what that hour currently pays.
+
+    Public on purpose. This is a recruiting signal, not operator detail: a volunteer deciding
+    whether to leave a machine on overnight should be able to see that 03:00 UTC pays the cap
+    because nobody is holding layers 10-18 then. It publishes replica DEPTH and multipliers,
+    never node ids or addresses -- the same privacy line /node/list already draws.
+
+    New capability rather than a restatement of /status: /status says whether the chain works
+    NOW, this says where it is about to stop working."""
+    sm = serving_model()
+    return emission.coverage_report(models.list_nodes(), sm["layers"])
 
 
 @app.get("/network/model")
@@ -1382,8 +1648,17 @@ def dashboard():
     # health only; each node sees its own earnings at /node/{id}/dashboard (token-gated).
 
     healthy = network["network_healthy"]
-    banner_text = "HEALTHY — every layer has a node" if healthy else \
-        "DEGRADED — chain incomplete, no request can complete"
+    # Two different failures, and saying "incomplete" for both sent an operator looking for a
+    # missing node when every layer was present. The unroutable case is the one that reads as
+    # fine everywhere else, so it is the one that has to name itself. PROBLEMS.md [P32].
+    if healthy:
+        banner_text = "HEALTHY — every layer has a node, and the chain routes"
+    elif network["uncovered_layers"]:
+        banner_text = "DEGRADED — chain incomplete, no request can complete"
+    else:
+        banner_text = (f"DEGRADED — every layer is covered but the chain walks to "
+                       f"{network['stages']} stage(s); a driver needs "
+                       f"{config.MIN_PIPELINE_STAGES}-{config.PIPELINE_STAGES}")
 
     rows = ""
     for n in nodes:
@@ -1391,23 +1666,40 @@ def dashboard():
         gpu = "<span class='tick'>✓</span>" if n.get("has_gpu") else "<span class='dash'>—</span>"
         # Ms/layer is what the balancer solves the split from ([P7]); showing it makes an
         # unbalanced network legible instead of something only /network/plan knows about.
-        ms = n.get("ms_per_layer")
-        speed = f"{ms:.1f}" if isinstance(ms, (int, float)) else "<span class='dash'>—</span>"
-        rep = n.get("reputation")
-        rep_txt = (f"{rep:.0%} <span style='color:#6b7280'>"
-                   f"({n.get('challenges_passed', 0)}/{n.get('challenges_passed', 0) + n.get('challenges_failed', 0)})</span>"
-                   if rep is not None else "<span class='dash'>no challenges yet</span>")
+        # An EXPIRED figure is not a current one. Printing the raw column here is how 4146.6
+        # was read as live evidence about a node routing had already stopped believing
+        # ([P34]) -- the freshness rule lives in `router`, so this cannot drift from it again.
+        # An expired figure reads as UNKNOWN here, not as itself-with-a-caveat. Routing already
+        # scores this node at the default prior, so "—" is the more accurate public answer -- and
+        # a stale `4146.6` printed beside peers at 8-20 still says "that volunteer's machine is
+        # terrible" however it is labelled, which is the same public verdict the standing column
+        # was removed for. The raw figure is kept for the operator's own page, where it is
+        # evidence about a measurement rather than a judgement shown to everyone else.
+        ms = router.ms_per_layer_fresh(n)
+        speed = (f"{ms:.1f}" if ms is not None else
+                 "<span class='dash' title='no current measurement — the node re-measures "
+                 "hourly; until then it is scored at the default prior'>—</span>")
+        # STANDING AND REPUTATION ARE NOT PUBLISHED PER NODE. They are the same class of fact as
+        # the balances above -- personal to one operator -- and a harsher one: `flagged · 4%` is a
+        # public verdict on an identifiable volunteer's machine, readable by everyone else on the
+        # network. It is also the fact most likely to be WRONG, because a flag can be produced by
+        # the coordinator's own bookkeeping rather than by the node ([P37]: three honest machines,
+        # and 2026-08-11's `1/23` earned entirely on a range this coordinator had moved).
+        #
+        # Nothing is hidden that a visitor needs: the capacity line above already reads "across N
+        # eligible node(s)", the coverage strip shows whether any layer is unbacked, and the
+        # excluded count is stated in aggregate below. What goes is the pillory -- one named node
+        # carrying a number the network cannot yet justify. The operator sees the full detail,
+        # with the reason and the remedy, on their own token-gated page.
         rows += (
             f"<tr>"
             f"<td class='id'>{n['node_id']}</td>"
             f"<td class='nw'>{n['layer_start']}–{n['layer_end']}</td>"
             f"<td>{theme.pill(n['status'])}</td>"
-            f"<td>{theme.pill(st)}</td>"
             f"<td>{n.get('cores', '-')}</td>"
             f"<td>{n.get('ram_gb', '-')}</td>"
             f"<td>{gpu}</td>"
             f"<td>{speed}</td>"
-            f"<td>{rep_txt}</td>"
             f"<td style='color:#6b7280'>{_ago(n.get('last_seen'))}</td>"
             f"</tr>"
         )
@@ -1446,6 +1738,21 @@ def dashboard():
             f"online but serve no requests and earn no NRN until proof-of-compute confirms "
             f"them. Verification is automatic; a node stuck here for hours means the "
             f"network's verifiers are not running.</p>")
+
+    # The excluded count, in AGGREGATE and without naming anyone. A visitor's real question is
+    # "does this network work", and the honest answer is that it routes around a node that is not
+    # serving -- which is the design doing its job, not a warning. Naming the machine answers a
+    # question nobody asked and reads as an accusation against a volunteer who, on the evidence
+    # of [P37], may well be innocent.
+    excluded = network["flagged_nodes"]
+    excluded_line = ""
+    if excluded:
+        excluded_line = (
+            f"<p class='callout'><b>{excluded} node(s) excluded from routing</b> — the network "
+            f"is serving around them and no request is sent their way. A node lands here after "
+            f"repeated failed checks, which is usually a half-downloaded slice or a placement "
+            f"the coordinator and the node disagree about. The operator sees the reason and the "
+            f"fix on their own dashboard.</p>")
 
     # Model tier (auto-model-tiering): the biggest model this network can back, plus the
     # ladder and the "grow to unlock the next model" prompt. Read-only here (now=None) —
@@ -1531,14 +1838,17 @@ def dashboard():
 
 <h2>Nodes — {cap}</h2>
 <div class="panel"><div class="table-wrap"><table>
-  <tr><th>node</th><th>layers</th><th>status</th><th>standing</th><th>cores</th>
-      <th>RAM GB</th><th>GPU</th><th>ms/layer</th><th>proof-of-compute</th><th>last seen</th></tr>
+  <tr><th>node</th><th>layers</th><th>status</th><th>cores</th>
+      <th>RAM GB</th><th>GPU</th><th>ms/layer</th><th>last seen</th></tr>
   {rows}
 </table></div></div>
 {waiting_line}
+{excluded_line}
 
 <div class="note">
-  <strong>What is not on this page.</strong> Earnings and node addresses are private — each
+  <strong>What is not on this page.</strong> Earnings, node addresses, and each node's standing
+  and proof-of-compute record are private — a machine's verification history is a judgement about
+  one volunteer's computer, and it belongs to them, not to everyone else on the network. Each
   operator sees their own numbers in the NEURON app (tray &rarr; My Dashboard), authenticated
   with that node's own token. {stats['total_tokens_generated']:,} tokens have been generated
   across {stats['total_requests_served']} request(s). NRN has no cash value.
@@ -1575,7 +1885,10 @@ def node_dashboard(node_id: str, token: str = None,
                    f"{f' · {vram} GB VRAM' if vram else ''} "
                    f"<span style='color:#6b7280'>(reported as capacity; visible only to "
                    f"you)</span></td></tr>")
-    ms = node.get("ms_per_layer")
+    # Deliberately blank rather than stale on the operator's OWN page: a figure taken while the
+    # machine thrashed, kept past its TTL, tells an honest volunteer their PC is 500x slower
+    # than its peers -- an accusation the coordinator itself has already stopped believing.
+    ms = router.ms_per_layer_fresh(node)
     # What this node's standing actually MEANS for it, rather than a bare word. A probationary
     # operator's real question is "why is my balance not moving?" ([P24]).
     if st == "probationary":
@@ -1626,7 +1939,9 @@ def node_dashboard(node_id: str, token: str = None,
   <tr><td class="key">nodes</td><td>{network['eligible_nodes']} serving ·
       {network['online_nodes']} online · {network['total_nodes']} registered</td></tr>
   <tr><td class="key">coverage</td><td>{network['total_layers_covered']}/{network['total_layers']}
-      layers{'' if network['network_healthy'] else ' — the chain is incomplete, so no request can complete right now'}</td></tr>
+      layers{'' if network['network_healthy'] else (' — the chain is incomplete, so no request can complete right now' if network['uncovered_layers'] else f" — every layer is covered, but the chain walks to {network['stages']} stage(s) and a driver needs {config.MIN_PIPELINE_STAGES}-{config.PIPELINE_STAGES}, so no request can complete right now")}</td></tr>
+  <tr><td class="key">chain</td><td>{network['stages']} stage(s) {network['chain_ranges']} ·
+      {'routable' if network['routable'] else 'NOT routable'}</td></tr>
   <tr><td class="key">full picture</td><td><a href="/dashboard">the live network dashboard</a>
       (no earnings, no addresses)</td></tr>
 </table></div></div>

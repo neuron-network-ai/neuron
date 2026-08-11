@@ -194,6 +194,26 @@ def _download_whole(model_id, filename, target_dir, revision="main"):
     return 0   # 404 etc. (e.g. a tokenizer file this model doesn't ship) -> skip
 
 
+SLICE_MARKER = "neuron_slice.json"
+
+
+def slice_provenance(target_dir):
+    """Which MODEL the slice in this directory was downloaded for, or None if unrecorded.
+
+    Layer numbers do not identify a model. Two tiers with the same layer count produce slices
+    that are indistinguishable by range -- and `agent.ensure_slice` compared only ranges, so a
+    node whose new assignment happened to match its old one kept the OLD MODEL'S WEIGHTS and
+    served them as the new model. Live 2026-08-10: three of four nodes came out of a 7B -> 1.5B
+    migration holding 7B weights, produced token soup, and were billed for it. Nothing
+    downstream could tell, because every check was about layer numbers.
+    """
+    try:
+        with open(os.path.join(target_dir, SLICE_MARKER)) as f:
+            return json.load(f).get("model_id")
+    except (OSError, ValueError):
+        return None
+
+
 def download_slice(model_id, layer_start, layer_end, target_dir, is_first_node, is_last_node,
                    revision="main"):
     os.makedirs(target_dir, exist_ok=True)
@@ -242,7 +262,14 @@ def download_slice(model_id, layer_start, layer_end, target_dir, is_first_node, 
     small = list(CONFIG_FILES) + (TOKENIZER_FILES if is_first_node else [])
     for fn in small:
         _download_whole(model_id, fn, target_dir, revision)
-    print(f"Wrote slice -> {out_path}  (+ {', '.join(small)})")
+    # Provenance, written LAST and only on success -- an interrupted download must not leave a
+    # marker claiming weights that are not there. This is what lets a reader tell a 1.5B slice
+    # from a 7B one: layer numbers cannot, and comparing only layer numbers is what let three
+    # nodes serve the wrong model's weights after a migration ([P36]).
+    with open(os.path.join(target_dir, SLICE_MARKER), "w") as f:
+        json.dump({"model_id": model_id, "layer_start": layer_start,
+                   "layer_end": layer_end, "revision": revision}, f)
+    print(f"Wrote slice -> {out_path}  (+ {', '.join(small)}, {SLICE_MARKER})")
     return {"path": out_path, "slice_bytes": sel_bytes, "full_bytes": full_bytes,
             "tensors": list(keep.keys()), "keep": keep}
 

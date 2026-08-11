@@ -40,6 +40,14 @@ DEFAULT_INTERVAL = 60
 # attested immediately; only condemnation waits for proof.
 FAIL_STRIKES = 3
 
+# Consecutive cycles a node may fail to COMPLETE a challenge before that counts as a failure.
+# Deliberately higher than FAIL_STRIKES: a wrong answer is unambiguous, whereas an unfinished
+# one is usually a restart, a cold shard or a relay hiccup, and none of those deserve a mark.
+# But "inconclusive" cannot mean "forgiven forever" -- a node running the wrong weights fails
+# by closing the socket, not by answering wrong, so it accumulated nothing and kept its perfect
+# reputation while breaking every request it touched (live 2026-08-10, [P33]).
+UNREACHABLE_STRIKES = 5
+
 # Reading the roster is retried WITHIN a cycle. A home connection produces 502s and DNS
 # failures routinely — the last three lines this service ever logged were one 502 and two
 # "Failed to resolve neuronnet.duckdns.org" ([P24]) — and one bad read used to cost a whole
@@ -86,7 +94,18 @@ def load_secret():
 def _setup_logging(level="INFO"):
     log.setLevel(getattr(logging, level, logging.INFO))
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%Y-%m-%d %H:%M:%S")
-    for h in (logging.FileHandler(LOG_PATH, encoding="utf-8"), logging.StreamHandler()):
+    # The console handler must never be able to kill this service. Windows gives it cp1252, and
+    # a single non-ASCII character in a message -- the "→" in the VERIFIED line -- raised
+    # UnicodeEncodeError from inside logging and took the verifier down (observed 2026-08-10,
+    # it restarted at 08:50 with a traceback in its own log). A monitor that dies on the shape
+    # of its own success message is worse than no monitor. The FILE handler is already utf-8;
+    # this makes the stream one degrade to "?" instead of raising.
+    stream = logging.StreamHandler()
+    try:
+        stream.stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    for h in (logging.FileHandler(LOG_PATH, encoding="utf-8"), stream):
         h.setFormatter(fmt)
         log.addHandler(h)
 
@@ -99,6 +118,16 @@ class Verifier:
         self.strikes = {}          # node_id -> consecutive wrong answers
         self.unreachable = 0       # consecutive cycles that could not read the roster
         self.last_roster = None    # (nodes, probationary) from the last successful sweep
+        # node_id -> when it was last challenged, so re-verification rotates oldest-first
+        # instead of hammering whichever node happens to sort first.
+        self.last_checked = {}
+        # node_id -> consecutive cycles where the challenge could not even be COMPLETED.
+        # Distinct from `strikes` (wrong answers) on purpose: one failed connection is a hiccup,
+        # a hundred is a broken node.
+        self.unreachable_strikes = {}
+        # node_id -> already warned that we cannot challenge it. The warning is worth exactly one
+        # line per node per process: an unverifiable node is a standing condition, not an event.
+        self.unchallengeable = set()
         # Building a challenge means loading that layer range with torch, which costs seconds
         # and hundreds of MB. Without this cache a 60s loop would reload the same shard every
         # minute forever; nodes cluster on a handful of ranges, so the cache is tiny.
@@ -188,28 +217,206 @@ class Verifier:
         pending = [n for n in nodes
                    if n.get("standing") == "probationary" and not n.get("flagged")
                    and n.get("status") == "online"]
+
+        # RE-verification. Proof-of-compute was a one-time GATE: pass once and never be asked
+        # again. So a node that later goes WRONG -- reloaded onto a different model, a corrupted
+        # slice, failing memory -- kept serving bad activations indefinitely, and the only
+        # symptom the network showed was a dropped socket the driver blamed on a node "dying".
+        # Live 2026-08-10: a node left on 7B weights inside a 1.5B chain failed every request it
+        # touched for hours while this verifier logged "0 awaiting verification" on every sweep.
+        #
+        # A node is only as trustworthy as its last check. Re-check the already-verified on a
+        # slow rotation: one per cycle, oldest-checked first, so the cost is one challenge per
+        # minute across the whole network no matter how large it grows. A wrong answer takes the
+        # normal FAIL_STRIKES path -- the reputation machinery already excludes a flagged node
+        # from routing, so this needs no new enforcement, only the evidence it was never given.
+        #
+        # FLAGGED NODES ARE ON THIS ROTATION TOO, and that is the whole difference between a
+        # reputation and a death sentence. `flagged` is DERIVED, every sweep, from cumulative
+        # counters (models.py: total >= REPUTATION_MIN_SAMPLES and passed/total < THRESHOLD) --
+        # so it is arithmetically clearable. It was never clearable in practice, because this
+        # filter excluded flagged nodes from BOTH lists: a flagged node was never challenged
+        # again, so its counters could never move, so the flag could never lift. No endpoint
+        # reset it either. The only exit was DELETE /node/{id}, which destroys the node's
+        # identity and token and makes a volunteer reinstall.
+        #
+        # Live 2026-08-10, and it cost the whole network: three nodes were flagged for a
+        # PLACEMENT bug (challenged on layers they did not hold), the verifier then had nothing
+        # left it was allowed to check, logged "5 node(s), 0 awaiting verification" for hours,
+        # and the chain collapsed to one eligible machine holding all 28 layers -- covered, and
+        # unroutable. A permanent terminal state reached by accident is [P24]'s failure class:
+        # the mechanism was working perfectly and had been given nothing to work on.
+        due = [n for n in nodes
+               if n.get("status") == "online"
+               and n.get("standing") in ("verified", "trusted", "flagged")]
+        due.sort(key=lambda n: self.last_checked.get(n["node_id"], 0.0))
+        recheck = due[:1] if due else []
+
         self.last_roster = (len(nodes), len(pending))
-        if not pending:
+        if not pending and not recheck:
             log.debug("nothing to verify")
             return 0
+        pending = pending + recheck
 
         promoted = 0
         for n in pending:
             nid = n["node_id"]
+            # THE COORDINATOR'S OWN BOOKKEEPING IS NOT EVIDENCE ABOUT THE NODE.
+            #
+            # `RangeMismatch` below already refuses to punish a node that TELLS us it holds
+            # something else. But [P37]'s three machines mostly did not get to say so: asked for
+            # layers they never downloaded, the forward pass raised on uninitialized meta tensors,
+            # `_handle` caught only (ConnectionError, TimeoutError, EOFError), the thread died and
+            # `finally: conn.close()` slammed the socket. So drift arrives here as `socket closed
+            # mid-message` -- the generic branch -- and after UNREACHABLE_STRIKES cycles it is
+            # attested as a real failure. Live 2026-08-11: `agent-bhpc012101-18f1da` went 1/18 to
+            # 1/22 in twenty minutes, on a range the coordinator had moved under it.
+            #
+            # `placement_drift` predicted all three on 2026-08-10 and was read by nothing ([P37]).
+            # It is read here now: while it is set, a FAILURE says our range and this node's slice
+            # disagree, which is a fact about the coordinator, not about the volunteer's PC.
+            #
+            # Deliberately ASYMMETRIC -- drift suppresses failures, never passes. A pass under
+            # drift is real evidence (it proves the node does hold the range we assigned, so the
+            # `reported_*` field is the stale one) and recording it is what lets a wrongly flagged
+            # node climb back. The cost is that a node could dodge strikes by registering a range
+            # it was not given; that is visible as `placement_drift` on the dashboard, and it is
+            # the right side to err on when the alternative already cost three honest machines
+            # their standing and the network its routability.
+            drifted = bool(n.get("placement_drift"))
+
+            # THE MIDDLE PROBE IS NOT A VALID CHALLENGE FOR STAGE 1, AND SILENCE ABOUT THAT IS
+            # WORSE THAN THE GAP. `make_middle_challenge` computes layers[s1:s2] on a raw hidden
+            # state -- no embedding. A first-stage node normally embeds token ids first, so the
+            # two are not computing the same function and the node answers "wrong" every time.
+            #
+            # This path had NEVER EXECUTED against a stage-1 node: a whole-tuple ack comparison
+            # raised PLACEMENT MISMATCH first, every sweep, and hid it. Fixing that comparison on
+            # 2026-08-11 pointed a never-run check at `agent-optinovate-6ff49d` -- the driver --
+            # which came back `max_err 28.6, strike 1 of 3`. Three of those would have attested a
+            # failure against the one machine that holds stage 1, and a flagged driver is not a
+            # degraded network, it is no network at all.
+            #
+            # 28.6 has [P37]'s signature (deterministic, and the right answer to a different
+            # question) but that is a HYPOTHESIS, and a guess is not grounds for scoring somebody
+            # else's machine. Until a stage-1 challenge is built and proven, this node is not
+            # challenged and is SAID to be unchallenged -- the opposite of [P31], where an
+            # unexecuted capability was documented as working.
+            if int(n["layer_start"]) == 0 and int(n["layer_end"]) != total - 1:
+                self.last_checked[nid] = time.time()
+                if nid not in self.unchallengeable:
+                    self.unchallengeable.add(nid)
+                    log.warning("%s (stage 1, layers %d-%d) is NOT BEING VERIFIED: the middle "
+                                "probe computes layers without the embedding a first-stage node "
+                                "applies, so it cannot pass. Nothing is recorded either way. "
+                                "Proof-of-compute does not currently cover the driver.",
+                                nid, int(n["layer_start"]), int(n["layer_end"]))
+                continue
+
             try:
                 res = self.challenge(n, total)
+            except proof_of_compute.RangeMismatch as e:
+                # THE NODE IS FINE; THE PLACEMENT IS STALE. It answered, it told the truth about
+                # what it holds, and it holds something other than what the coordinator says.
+                # Recording that against its reputation is recording our own bookkeeping error
+                # in its file -- which is precisely what flagged three honest machines on
+                # 2026-08-10 ([P32] drift: assigned 10-27 / holds 14-27, assigned 19-27 / holds
+                # 10-13, assigned 10-27 / holds 0-27). So: no attestation, in either direction,
+                # and no strike. `last_checked` IS stamped, or the rotation would return to this
+                # same node every cycle and never reach the others.
+                self.last_checked[nid] = time.time()
+                self.unreachable_strikes.pop(nid, None)
+                log.error("%s: PLACEMENT MISMATCH, not a bad node — %s. Nothing recorded "
+                          "against it. The coordinator's range and this node's slice disagree; "
+                          "fix placement (./coordinator/pin_layers.sh --driver) rather than the "
+                          "node.", nid, e)
+                continue
+            except proof_of_compute.ChallengeRefused as e:
+                # A named "no" — paused by its owner, or mid-reload. Both are a node behaving
+                # correctly, and neither is evidence of anything. Not a strike: the typed
+                # refusal exists exactly so this stops looking like a machine that died.
+                self.last_checked[nid] = time.time()
+                self.unreachable_strikes.pop(nid, None)
+                log.info("%s: declined the challenge (%s) — healthy, nothing recorded", nid, e)
+                continue
             except Exception as e:
                 # Could not even get an answer (offline mid-sweep, relay hiccup, cold shard).
                 # That is not evidence of cheating, so it must NOT be attested as a failure.
-                log.warning("%s: could not challenge (%s: %s) — will retry next cycle",
-                            nid, e.__class__.__name__, e)
+                # A single failure is not evidence of cheating and must not be attested as one.
+                # But treating it as inconclusive FOREVER means a node that fails by hanging up
+                # is never penalised at all -- and "socket closed mid-message" is exactly how a
+                # node running the wrong weights fails. Live 2026-08-10: one node failed every
+                # challenge this way for hours while its reputation stayed perfect and routing
+                # kept sending it real traffic. Persistent inability to answer IS a fact about
+                # the node, so after enough consecutive cycles it counts.
+                # STAMP IT EVEN THOUGH IT FAILED. The re-check rotation is `due` sorted by
+                # `last_checked` with a default of 0.0, one node per cycle -- so a node that is
+                # never stamped stays permanently at the front and every other node is starved
+                # off the rotation. Live 2026-08-11: `18f1da` was challenged four times in twenty
+                # minutes (1/18 → 1/22) while `82cbee` sat at 2/4, never re-checked, one pass away
+                # from clearing its flag. [P35]'s whole point was putting flagged nodes back on
+                # this rotation so they could recover; an unstamped failure quietly monopolised it
+                # and denied exactly that. The attempt is what the rotation measures, not the
+                # outcome -- `unreachable_strikes` already counts the consecutive failures.
+                self.last_checked[nid] = time.time()
+                u = self.unreachable_strikes.get(nid, 0) + 1
+                self.unreachable_strikes[nid] = u
+                if u < UNREACHABLE_STRIKES:
+                    log.warning("%s: could not challenge (%s: %s) — will retry next cycle "
+                                "(%d of %d)", nid, e.__class__.__name__, e, u,
+                                UNREACHABLE_STRIKES)
+                    continue
+                self.unreachable_strikes[nid] = 0
+                if drifted:
+                    # The hang-up IS the drift, arriving as an exception instead of a typed
+                    # RangeMismatch. Recording it would put our stale range in the node's file.
+                    self.last_checked[nid] = time.time()
+                    log.error("%s: could not answer in %d consecutive cycles (%s) — NOTHING "
+                              "RECORDED: placement_drift is set, so this is the coordinator's "
+                              "range disagreeing with the node's slice, not a bad machine. Fix "
+                              "placement (./coordinator/pin_layers.sh --driver) — until then no "
+                              "challenge against this node can mean anything.",
+                              nid, u, e.__class__.__name__)
+                    continue
+                log.error("%s: could not complete a challenge in %d consecutive cycles (%s) — "
+                          "recording a failure. A node that cannot answer cannot serve.",
+                          nid, u, e.__class__.__name__)
+                try:
+                    self.attest(nid, False, None)
+                except requests.RequestException as ae:
+                    log.warning("%s: could not record the failure: %s", nid, ae)
                 continue
+            self.last_checked[nid] = time.time()
+            self.unreachable_strikes.pop(nid, None)   # it answered; the streak is broken
             if res["passed"]:
                 self.strikes.pop(nid, None)
+                was = n.get("standing")
+                # EVERY pass is recorded now, including a re-check's. It used to `continue`
+                # before attesting, so re-verification could only ever move a node's ratio
+                # DOWN: a failure was written to challenges_failed, a pass was written nowhere.
+                # A machine that has one bad afternoon in a year of good ones therefore drifts
+                # towards the flag and can never earn its way back. The reason passes were
+                # skipped was log noise, which is a logging problem -- so the LINE stays at
+                # DEBUG and the COUNTER is written.
                 try:
                     out = self.attest(nid, True, res["max_err"])
                 except requests.RequestException as e:
                     log.warning("%s: passed but could not record attestation: %s", nid, e)
+                    continue
+                if was in ("verified", "trusted"):
+                    # a re-check, not a promotion. DEBUG so a healthy network stays quiet -- an
+                    # INFO line per minute per node is the heartbeat mistake again (Session 55
+                    # half seven).
+                    log.debug("%s re-verified — max_err %.2e, %dms", nid, res["max_err"],
+                              res["ms"])
+                    continue
+                if was == "flagged":
+                    # Worth a line at INFO, unlike the others: a flag lifting is the network
+                    # recovering a node it had written off, and until this release it could not
+                    # happen at all.
+                    log.info("%s passed while FLAGGED — reputation now %s, standing '%s' "
+                             "(max_err %.2e, %dms)", nid, out.get("reputation"),
+                             out.get("standing", "?"), res["max_err"], res["ms"])
                     continue
                 promoted += 1
                 log.info("%s VERIFIED — layers %d-%d, max_err %.2e, %dms → standing now '%s'",
@@ -221,6 +428,18 @@ class Verifier:
                 if s < FAIL_STRIKES:
                     log.warning("%s: wrong answer (max_err %.4g), strike %d of %d — not "
                                 "recorded yet", nid, res["max_err"], s, FAIL_STRIKES)
+                    continue
+                if drifted:
+                    # Pavilion's `max_err 33.79` was deterministic across attempts and across
+                    # verifier restarts, because it was the right answer to a different question:
+                    # it computed 10-18 with no final norm while the verifier compared against
+                    # 10-27 + norm ([P37]). A wrong answer under drift is the expected result of
+                    # asking the wrong question, so it is not evidence either.
+                    self.strikes[nid] = 0
+                    log.error("%s: wrong answer (max_err %.4g) — NOTHING RECORDED: "
+                              "placement_drift is set, so the node is being asked about layers "
+                              "the coordinator only believes it holds. Fix placement first.",
+                              nid, res["max_err"])
                     continue
                 try:
                     self.attest(nid, False, res["max_err"])

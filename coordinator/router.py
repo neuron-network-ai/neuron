@@ -12,8 +12,9 @@ unchanged; only which node fills a slot varies per request.
 """
 import collections
 import random
+import time
 
-from coordinator import config, models
+from coordinator import balancer, config, model_tiers, models
 
 # What we assume about a node that has never self-measured (`ms_per_layer` is NULL until the
 # node runs benchmark.py). Deliberately pessimistic-but-not-crippling: an unmeasured node
@@ -31,12 +32,66 @@ def stage_ms(n):
     strictly better than the uniform assumption it replaces.
     """
     layers = max(int(n["layer_end"]) - int(n["layer_start"]) + 1, 1)
+    # ROUTING USES THE MEASUREMENT WHATEVER ITS AGE. An old number measured on the machine beats
+    # a fresh guess about it: `DEFAULT_MS_PER_LAYER` is 40.0, so ageing a figure out REPLACES
+    # evidence with a pessimistic assumption.
+    #
+    # Live 2026-08-11, and it was a self-inflicted product regression. Expiry reached the live
+    # coordinator for the first time and scored `node-c-pavilion` -- 4 cores, 99% reliable,
+    # measured at 11.0 -- at 40.0 because its reading was 12.9 h old, while `82cbee` kept its
+    # fresher 20.4. That INVERTS the preference between them, and chat fell to 0.05 tok/s.
+    #
+    # The TTL exists for [P34]'s outlier trap: a figure taken while a machine thrashed excludes
+    # it via REPLICA_SLOWDOWN_LIMIT, so it never serves, so nothing revises it. That reasoning
+    # assumed the hourly re-measurement in `agent.remeasure_loop` -- which is a **0.20** feature.
+    # On a 0.19 fleet nothing re-measures on a timer, so expiry has no second measurement to fall
+    # back to and is pure loss. The outlier case is still covered: REPLICA_SLOWDOWN_LIMIT drops
+    # an 8x replica before weighting, and an agent re-measures on restart.
+    #
+    # REVISIT WHEN 0.20 IS ON EVERY NODE: with hourly re-measurement the TTL becomes correct
+    # again, and this should go back to `ms_per_layer_fresh`.
     ms = n.get("ms_per_layer")
     try:
-        ms = float(ms) if ms else DEFAULT_MS_PER_LAYER
+        ms = float(ms) if ms else None
     except (TypeError, ValueError):
-        ms = DEFAULT_MS_PER_LAYER
-    return layers * max(ms, 1e-6)
+        ms = None
+    return layers * max(DEFAULT_MS_PER_LAYER if ms is None else ms, 1e-6)
+
+
+def ms_per_layer_fresh(n):
+    """This node's measured ms/layer if it is still believed, else None.
+
+    A measurement EXPIRES. It is taken once at agent startup, and one taken while the machine
+    happened to be thrashing was believed forever -- 4150 ms/layer against 8-22 for its peers,
+    live 2026-08-10 ([P34]). Worse together with REPLICA_SLOWDOWN_LIMIT: an outlier is excluded
+    from routing, so it never serves, so nothing ever revises it. Ageing back to the default
+    prior is the way back in, and it is the same treatment a never-measured node already gets.
+
+    ONE definition of "believed", because two of them drifted. Routing expired the figure here
+    while BOTH dashboards went on printing the raw column as current -- so on 2026-08-11 an
+    operator read `4146.6` off the node table as live evidence about a node the router had
+    already stopped scoring on it, and that node's own dashboard told its volunteer the same
+    thing about their hardware. That is [P37]'s lesson -- a stale diagnostic field read as a
+    live one -- reappearing in the surface a person actually looks at.
+
+    A NULL `ms_per_layer_at` is NOT stale: it is a row written before the column existed
+    (models.py:225 backfills it, but a legacy or hand-inserted row can still carry NULL).
+    Reading it as expired would silently reset every such node to the default prior.
+    """
+    ms = n.get("ms_per_layer")
+    if not ms:
+        return None
+    at = n.get("ms_per_layer_at")
+    if at is not None:
+        try:
+            if (time.time() - float(at)) > config.MS_PER_LAYER_TTL_S:
+                return None
+        except (TypeError, ValueError):
+            pass
+    try:
+        return float(ms)
+    except (TypeError, ValueError):
+        return None
 
 
 def throughput(n):
@@ -66,11 +121,26 @@ def fastest_pick(rng=random):
     def pick(replicas):
         if len(replicas) == 1:
             return replicas[0]
-        weights = [throughput(n) for n in replicas]
+        # Drop catastrophic outliers BEFORE weighting. Weighted-random keeps a slow node
+        # contributing, which is right for "somewhat slower" -- but it also means a node orders
+        # of magnitude slower still wins occasionally, and when it does the whole request crawls
+        # because a chain is only as fast as its slowest stage. Live 2026-08-10:
+        # `agent-bhpc012101` reported 4150 ms/layer against 8-22 ms for its peers (a stale
+        # measurement taken while it was thrashing under a migration), and answers came back at
+        # 0.24 tok/s. A node that far out is not "slow", it is broken or lying, and its share of
+        # traffic should be zero rather than small.
+        best = max(throughput(n) for n in replicas)
+        usable = [n for n in replicas
+                  if best <= 0 or throughput(n) * config.REPLICA_SLOWDOWN_LIMIT >= best]
+        if not usable:                       # every replica is an outlier of the best; keep all
+            usable = replicas                # rather than emptying a segment of the chain
+        if len(usable) == 1:
+            return usable[0]
+        weights = [throughput(n) for n in usable]
         total = sum(weights)
         if total <= 0:
-            return rng.choice(replicas)
-        return rng.choices(replicas, weights=weights, k=1)[0]
+            return rng.choice(usable)
+        return rng.choices(usable, weights=weights, k=1)[0]
     return pick
 
 
@@ -144,6 +214,134 @@ def covering_and_missing(nodes, total, pick=None):
     elig = [n for n in nodes if n.get("status") == "online" and n.get("eligible")]
     _chain, missing, covering_ids = _walk(elig, total, pick)
     return missing, covering_ids
+
+
+def chain_shape(nodes, total, pick=None):
+    """The SHAPE of the chain a driver would be handed: how many stages, and whether that count
+    is one any driver can actually route.
+
+    Deliberately a DIFFERENT question from coverage, because conflating the two is a live bug.
+    `covering_and_missing` answers "is every layer served somewhere" -- what /status, the
+    dashboard and `self_heal` have always asked -- and a roster can answer that perfectly while
+    being unroutable. Two eligible nodes on 0-27 and 0-9 cover all 28 layers, but `_walk` takes
+    `max(layer_end)` from cursor 0, so the chain is ONE stage and `node_a.coord_get_chain`
+    refuses it. That exact state was live on 2026-08-09 for hours, reporting
+    `total_layers_covered: 28/28`, `uncovered_layers: []` and `network_healthy: true` the whole
+    time, while every chat died and each attempt still took a wallet hold. PROBLEMS.md [P32].
+
+    `nodes` is the FULL roster, filtered internally -- same convention as
+    `covering_and_missing`, so callers that already hold the roster need no extra DB read.
+
+    The chooser is deterministic (`_first_replica`) for the same reason placement's is: this
+    DESCRIBES a roster rather than routing a request, and a description that varies between two
+    calls a second apart is not a description. Replica choice cannot change the answer anyway --
+    every replica tied at a cursor shares its `layer_end`, so the walk advances identically.
+    """
+    pick = pick or _first_replica
+    elig = [n for n in nodes if n.get("status") == "online" and n.get("eligible")]
+    chain, missing, _covering = _walk(elig, total, pick)
+    stages = len(chain)
+    ranges = [[n["layer_start"], n["layer_end"]] for n in chain]
+    # Stage 1 must be EXACTLY the driver's shard. node_a.coord_get_chain refuses anything else,
+    # so a chain that is the right length over full coverage is still dead if stage 1 is the
+    # wrong width. Live on 2026-08-10: a halted migration left [[0,16],[17,23],[24,27]] — three
+    # stages, 28/28 covered, and this function called it routable while every chat would have
+    # been refused. Counting stages answered two thirds of the question.
+    want_stage1 = [0, config.DRIVER_STAGE1_LAYERS - 1]
+    stage1_ok = bool(ranges) and ranges[0] == want_stage1
+    return {
+        "stages": stages,
+        "ranges": ranges,
+        "stage1_ok": stage1_ok,
+        "expected_stage1": want_stage1,
+        # `missing` is checked as well as the stage count, not instead of it: a chain that stops
+        # at a gap still has a plausible-looking number of stages, and reporting that as routable
+        # would be the same class of half-answer this function exists to end.
+        "routable": (not missing and stage1_ok
+                     and config.MIN_PIPELINE_STAGES <= stages <= config.PIPELINE_STAGES),
+    }
+
+
+def canonical_assignment(nodes, total, s1=None, max_stages=None, serving_model_id=None):
+    """The ONE routable shape for this roster: stage 1 is exactly the driver's shard, the rest
+    of the model is split across at most `max_stages - 1` more nodes, and every remaining
+    machine REPLICATES a stage instead of becoming another one.
+
+    This is `pin_layers.sh` expressed server-side, and it exists because that script being a
+    manual step is the actual bug. Every join and every leave could push the chain into a shape
+    no driver accepts -- four stages, or a stage 1 of the wrong width -- and the only repair was
+    a human noticing and running a command. On 2026-08-10 that happened repeatedly overnight
+    while nobody was awake.
+
+    Safe to apply automatically only because placement ownership landed first (PROBLEMS.md
+    [P32]): before that, a node re-registering would overwrite whatever this decided, and an
+    auto-repair would have fought the roster every 60 seconds instead of fixing it.
+
+    Stability is deliberate, not incidental:
+      * whoever already holds stage 1 KEEPS it -- that node is the driver, and moving the driver
+        is what breaks chat even when the chain looks legal;
+      * everyone else is ordered by their current layer_start, so a node stays near the range it
+        already has on disk and re-splits move as few slices as possible.
+
+    Returns [] when the roster genuinely cannot form a chain (fewer than MIN_PIPELINE_STAGES
+    eligible nodes) -- there is no shape to apply, and saying so is better than inventing one.
+    """
+    s1 = config.DRIVER_STAGE1_LAYERS if s1 is None else s1
+    max_stages = config.PIPELINE_STAGES if max_stages is None else max_stages
+    elig = [n for n in nodes if n.get("status") == "online" and n.get("eligible")]
+    if len(elig) < config.MIN_PIPELINE_STAGES or total <= s1:
+        return []
+
+    want1 = (0, s1 - 1)
+    holding = [n for n in elig if (n["layer_start"], n["layer_end"]) == want1]
+    if holding:
+        driver = sorted(holding, key=lambda n: n["node_id"])[0]
+    else:
+        # No incumbent. Prefer the machine most able to carry the head, deterministically --
+        # stage 1 also runs the embedding and the lm_head, so it is the worst place for the
+        # weakest node. Deterministic ties keep two sweeps a second apart from disagreeing.
+        driver = sorted(elig, key=lambda n: (-(n.get("ram_gb") or 0.0), n["node_id"]))[0]
+
+    rest = sorted([n for n in elig if n["node_id"] != driver["node_id"]],
+                  key=lambda n: (n["layer_start"], n["node_id"]))
+    n_stages = min(max_stages - 1, len(rest))
+    remaining = total - s1
+    base, extra = divmod(remaining, n_stages)
+
+    # MEMORY. An even split is a fine default and a bad promise -- the same lesson [P26] cost a
+    # live outage for, and this function reproduced it: on the 1.5B floor an even split is
+    # harmless, but on the 7B tier it would hand an 8 GB office PC 9 layers (~8.4 GB at fp32).
+    # Each stage is capped at what its node can actually hold, and whatever that cap sheds
+    # spills onto the next stage. gb_per_layer of None (an unknown model) means no constraint,
+    # which is exactly the behaviour from before tiers carried the figure.
+    gpl = model_tiers.gb_per_layer_for(serving_model_id) if serving_model_id else None
+    caps = [balancer.max_layers_for(rest[i], gpl) if gpl else None for i in range(n_stages)]
+
+    out = [{"node_id": driver["node_id"], "layer_start": 0, "layer_end": s1 - 1}]
+    segments, cur = [], s1
+    for i in range(n_stages):
+        cnt = base + (1 if i < extra else 0)
+        left = total - cur                       # never leave the tail uncovered
+        if caps[i] is not None and i < n_stages - 1:
+            cnt = max(1, min(cnt, int(caps[i])))
+        cnt = min(cnt, left) if i < n_stages - 1 else left
+        seg = (cur, cur + cnt - 1)
+        segments.append(seg)
+        out.append({"node_id": rest[i]["node_id"], "layer_start": seg[0], "layer_end": seg[1]})
+        cur += cnt
+        if cur >= total:
+            n_stages = i + 1                     # the model ran out before the stages did
+            break
+
+    # Everyone left over replicates the least-replicated segment. Added machines become
+    # throughput rather than a deeper pipeline ([P16]) -- and a fourth STAGE is precisely the
+    # unroutable state this function exists to prevent.
+    depth = {seg: 1 for seg in segments}
+    for n in rest[n_stages:]:
+        seg = min(segments, key=lambda s: (depth[s], s[0]))
+        depth[seg] += 1
+        out.append({"node_id": n["node_id"], "layer_start": seg[0], "layer_end": seg[1]})
+    return out
 
 
 def _first_replica(replicas):

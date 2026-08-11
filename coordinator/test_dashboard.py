@@ -137,6 +137,37 @@ def main_():
         refused = getattr(e, "status_code", None) in (401, 403)
     check("a wrong token is rejected", refused)
 
+    print("\n-- a node's standing and proof-of-compute record are not published per node")
+    # A flag is the fact most likely to be WRONG about a volunteer's machine: [P37] flagged three
+    # honest nodes for the coordinator's own bookkeeping, and on 2026-08-11 `18f1da` reached 1/23
+    # entirely on a range the coordinator had moved under it. Publishing `flagged · 4%` beside a
+    # named node is a public verdict the network cannot always justify -- and the operator whose
+    # machine it is reads it on the same page as everyone else.
+    seed(cover_everything=True)
+    with models._db() as c:
+        c.execute("UPDATE nodes SET challenges_passed=1, challenges_failed=22 "
+                  "WHERE node_id='agent-beta'")
+    html = main.dashboard()
+    beta = models.get_node("agent-beta")
+    check("the roster still knows it is flagged", bool(beta.get("flagged")), beta.get("standing"))
+    check("the node is still listed", "agent-beta" in html)
+    check("but its reputation percentage is not on the public page", "4%" not in html)
+    check("nor the raw challenge tally", "(1/23)" not in html and "1/23" not in html)
+    check("nor a per-node 'flagged' verdict", ">flagged<" not in html)
+    check("the table no longer offers the columns at all",
+          "<th>standing</th>" not in html and "<th>proof-of-compute</th>" not in html)
+    check("the exclusion is still stated, in aggregate", "excluded from routing" in html)
+    check("and the privacy note says why it is missing",
+          "standing" in html and "belongs to them" in html)
+    # The operator's OWN page must keep every one of those facts -- the point is where they are
+    # visible, not whether they exist. A "fix" that also blinded the operator would be worse than
+    # the problem: they are the only person who can repair the machine.
+    own = main.node_dashboard("agent-beta", token="tok-b")
+    own_html = own.body.decode() if hasattr(own, "body") else str(own)
+    check("the operator still sees their own standing", "flagged" in own_html)
+    check("the operator still sees their own tally",
+          "1" in own_html and "22" in own_html)
+
     print(f"\n{ok} passed, {fail} failed")
     return fail == 0
 

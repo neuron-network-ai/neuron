@@ -125,6 +125,39 @@ CREATE TABLE IF NOT EXISTS peer_attestations (
     created_at  REAL NOT NULL,
     PRIMARY KEY (verifier_id, target_id)
 );
+
+-- Small operator/runtime key-value store. Exists for exactly one reason so far, and it is a
+-- serious one: the SERVING MODEL used to live only in a module-level dict, initialised to the
+-- config floor. So any coordinator restart after a tier migration silently reverted the
+-- coordinator's BELIEF about which model the network runs, while every node carried on serving
+-- the new one. Both Qwen2.5 tiers have 28 layers, so every range still validated and the chain
+-- still read as routable -- while nodes fed each other activations from different models and
+-- the driver saw "socket closed mid-message". Live 2026-08-10.
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+-- Availability emission (TOKENOMICS.md §11.4). One row per node per slot: how long it was
+-- actually present, which block it held, whether a proof-of-compute challenge landed inside
+-- the slot, and what it was eventually paid.
+--
+-- The PRIMARY KEY is the whole anti-double-pay mechanism: `paid_at` is written exactly once per
+-- (node, slot), so a sweep that runs twice over the same closed slot -- a restart, a retry, two
+-- workers -- cannot pay for it again. Nothing here is derived from a running total that could
+-- drift; each slot is settled from its own row.
+CREATE TABLE IF NOT EXISTS attendance (
+    node_id        TEXT NOT NULL,
+    slot_start     REAL NOT NULL,
+    seconds_online REAL NOT NULL DEFAULT 0,
+    block_start    INTEGER,
+    block_end      INTEGER,
+    poc_ok         INTEGER NOT NULL DEFAULT 0,
+    reward         REAL,
+    paid_at        REAL,
+    PRIMARY KEY (node_id, slot_start)
+);
 """
 
 
@@ -164,6 +197,35 @@ def init_db():
             c.execute("ALTER TABLE nodes ADD COLUMN gpu_vram_gb REAL")
         if "gpu_name" not in cols:
             c.execute("ALTER TABLE nodes ADD COLUMN gpu_name TEXT")
+        # What the node CLAIMED at its last registration, kept separate from the range it is
+        # ASSIGNED. They diverge exactly when a node is re-asserting a stale config after the
+        # operator (or a migration) moved it -- the mechanism behind [P32]. NULL on rows that
+        # have not re-registered since this shipped, which is why every reader treats NULL as
+        # "no claim seen yet" rather than as a mismatch.
+        for col in ("reported_layer_start", "reported_layer_end"):
+            if col not in cols:
+                c.execute(f"ALTER TABLE nodes ADD COLUMN {col} INTEGER")
+        # The hours this node says it is usually available (comma-separated slot indices, UTC).
+        # A DECLARATION, never a promise -- a phone's charger is not its owner's decision, so
+        # nothing is penalised for missing a declared hour. It exists so the coordinator can see
+        # tomorrow's 3am hole today instead of discovering it when the chain breaks.
+        if "declared_slots" not in cols:
+            c.execute("ALTER TABLE nodes ADD COLUMN declared_slots TEXT")
+        # Which model this node says it is actually serving. Its absence is what made a
+        # coordinator/node model mismatch undetectable and unrepairable on 2026-08-10 ([P33]):
+        # both tiers have 28 layers, so every range validated and the chain read as routable
+        # while nodes fed each other activations from different models. NULL = an agent too old
+        # to report it, which must not read as a mismatch.
+        if "reported_model_id" not in cols:
+            c.execute("ALTER TABLE nodes ADD COLUMN reported_model_id TEXT")
+        # When ms_per_layer was last set. Without it the figure has no age, so a bad reading
+        # cannot be distinguished from a good one and is believed forever ([P34]). Existing rows
+        # are backfilled to "now": their figures are the best evidence available, and treating
+        # every live node as unmeasured on deploy would throw away good data to fix one bad row.
+        if "ms_per_layer_at" not in cols:
+            c.execute("ALTER TABLE nodes ADD COLUMN ms_per_layer_at REAL")
+            c.execute("UPDATE nodes SET ms_per_layer_at=? WHERE ms_per_layer IS NOT NULL",
+                      (time.time(),))
         if "trusted" not in cols:                                # S12 (open join)
             c.execute("ALTER TABLE nodes ADD COLUMN trusted INTEGER NOT NULL DEFAULT 0")
             # every pre-open-join node registered under the shared secret -> grandfather
@@ -234,6 +296,20 @@ def _node_dict(row, now=None):
     d = dict(row)
     d["status"] = _status(d["last_seen"], now)
     d["assigned_layers"] = [d["layer_start"], d["layer_end"]]
+    # True when the node's last registration claimed a DIFFERENT range from the one it is
+    # assigned -- i.e. it is running on a stale config and would have overwritten placement
+    # before [P32] was fixed. It no longer can, so this is a diagnostic rather than a fault:
+    # the node serves the assigned range (slice-info returns it), and this says its local
+    # config disagrees and will keep disagreeing until the agent persists what it is told.
+    # NULL reported_* means the node has not re-registered since this shipped -- not a mismatch.
+    # Serving a DIFFERENT model from the one the network is on. Unlike placement_drift this is
+    # never benign: the node cannot produce correct activations for the chain it is in, and the
+    # symptom a user sees is a dropped socket, not a wrong answer. Compared by the caller, which
+    # knows the serving model; stored here so it can be surfaced.
+    d["reported_model_id"] = d.get("reported_model_id")
+    d["placement_drift"] = (d.get("reported_layer_start") is not None
+                            and (d["reported_layer_start"], d["reported_layer_end"])
+                            != (d["layer_start"], d["layer_end"]))
     d["has_gpu"] = bool(d.get("has_gpu"))
     # proof-of-compute reputation (Session 16)
     p, f = d.get("challenges_passed") or 0, d.get("challenges_failed") or 0
@@ -323,6 +399,20 @@ def record_attestation(node_id, passed):
         return cur.rowcount > 0
 
 
+def reset_attestations(node_id):
+    """Clear a node's proof-of-compute counters, returning it to 'never challenged'.
+
+    These counters are monotonic and `flagged` is derived from their ratio, so without this
+    there is no way to retire a verdict the network produced in error -- and a flagged node
+    could not be re-challenged either, making the state permanent. Operator-only, and
+    deliberately narrow: peer_attestations are untouched, because those are other nodes'
+    testimony rather than the operator's to erase. See main.reputation_reset."""
+    with _db() as c:
+        cur = c.execute("UPDATE nodes SET challenges_passed=0, challenges_failed=0 "
+                        "WHERE node_id=?", (node_id,))
+        return cur.rowcount > 0
+
+
 # --------------------------------------------------------------------------- #
 # Nodes
 # --------------------------------------------------------------------------- #
@@ -354,13 +444,43 @@ def register_node(node_id, tailscale_ip, port, layer_start, layer_end, cores,
             """INSERT INTO nodes (node_id, tailscale_ip, port, layer_start, layer_end,
                                   cores, ram_gb, ms_per_layer, head_ms, trusted, node_token,
                                   platform, hw_fingerprint, has_gpu, gpu_vram_gb, gpu_name,
+                                  reported_layer_start, reported_layer_end, ms_per_layer_at,
                                   status, last_seen, registered_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'online', ?, ?)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'online', ?, ?)
                ON CONFLICT(node_id) DO UPDATE SET
                    tailscale_ip=excluded.tailscale_ip, port=excluded.port,
-                   layer_start=excluded.layer_start, layer_end=excluded.layer_end,
+                   -- layer_start/layer_end are DELIBERATELY NOT UPDATED HERE. The coordinator
+                   -- owns placement; a re-registration REPORTS what the node believes it holds,
+                   -- it does not decide. Before this, the node's config.json won: `neuron fix`
+                   -- wrote a split to the coordinator, and the next restart, reconnect or
+                   -- relay-ticket refresh silently overwrote it with the node's stale opinion,
+                   -- collapsing the chain to one stage while every layer stayed covered
+                   -- (PROBLEMS.md [P32], live 2026-08-09).
+                   --
+                   -- Safe because the node ALREADY follows us: /node/{id}/slice-info returns
+                   -- THIS row's range (main.py:679), and agent.setup() serves whatever that
+                   -- returns. So ignoring the echo does not desynchronise anything -- it ends
+                   -- the one path by which node and coordinator could disagree. The authoritative
+                   -- ways to move a node are unchanged and all go through update_layers():
+                   -- /network/layers, migration cutover and self-heal.
+                   reported_layer_start=excluded.layer_start,
+                   reported_layer_end=excluded.layer_end,
                    cores=excluded.cores, ram_gb=excluded.ram_gb,
                    ms_per_layer=COALESCE(excluded.ms_per_layer, nodes.ms_per_layer),
+                   -- Stamped only when the figure actually CHANGED. The original guard tested
+                   -- "did a figure arrive", which protects against a case that never happens:
+                   -- the agent caches its measurement and re-sends the SAME number on every
+                   -- registration (agent.py, `body["ms_per_layer"]`). So every heartbeat restamped
+                   -- a months-old reading as current and MS_PER_LAYER_TTL_S could never expire for
+                   -- a node that stays online -- which is why `4146.6` was still being served as a
+                   -- live figure on 2026-08-11, hours after [P34] supposedly gave it an age.
+                   -- A re-assertion is not a measurement. Same shape as [P32]: the node re-states
+                   -- something stale and the coordinator records it as new.
+                   ms_per_layer_at=CASE
+                       WHEN excluded.ms_per_layer IS NOT NULL
+                        AND (nodes.ms_per_layer IS NULL
+                             OR nodes.ms_per_layer != excluded.ms_per_layer)
+                       THEN excluded.ms_per_layer_at ELSE nodes.ms_per_layer_at END,
                    head_ms=COALESCE(excluded.head_ms, nodes.head_ms),
                    platform=COALESCE(excluded.platform, nodes.platform),
                    hw_fingerprint=COALESCE(excluded.hw_fingerprint, nodes.hw_fingerprint),
@@ -381,6 +501,8 @@ def register_node(node_id, tailscale_ip, port, layer_start, layer_end, cores,
             (node_id, tailscale_ip, port, layer_start, layer_end, cores, ram_gb,
              ms_per_layer, head_ms, 1 if trusted else 0, token, platform, fingerprint,
              1 if has_gpu else 0, gpu_vram_gb, gpu_name,
+             layer_start, layer_end,      # reported_* -- what the node CLAIMS it holds
+             (now if ms_per_layer is not None else None),
              now, now),
         )
         c.execute("INSERT OR IGNORE INTO ledger (node_id) VALUES (?)", (node_id,))
@@ -449,15 +571,127 @@ def delete_node(node_id):
         return cur.rowcount > 0
 
 
+def slot_start_for(ts, slot_seconds=None):
+    """The start of the slot containing `ts`. Pure, and the single definition of a slot
+    boundary -- accounting, payout and the coverage report must agree to the second or a node
+    can be credited in one slot and billed against another."""
+    n = slot_seconds or config.SLOT_SECONDS
+    return float(int(ts // n) * n)
+
+
 def touch_node(node_id):
-    """Heartbeat: refresh last_seen and mark online. Returns True if node exists."""
+    """Heartbeat: refresh last_seen, mark online, and bank the time since the last beat as
+    ATTENDANCE for the slot it falls in. Returns True if node exists.
+
+    Attendance is accrued from the heartbeat rather than sampled by a timer because the
+    heartbeat is the only thing that already proves the node was reachable at a known instant.
+    The credited delta is CAPPED at two ping intervals: without that, a node that vanished for
+    six hours and came back would bank the whole gap as presence on its first beat -- paying it
+    precisely for being absent. The cap means an unreachable stretch simply earns nothing.
+    """
     now = time.time()
     with _db() as c:
-        cur = c.execute(
-            "UPDATE nodes SET last_seen=?, status='online' WHERE node_id=?",
-            (now, node_id),
-        )
+        row = c.execute("SELECT last_seen, layer_start, layer_end FROM nodes WHERE node_id=?",
+                        (node_id,)).fetchone()
+        if row is None:
+            return False
+        c.execute("UPDATE nodes SET last_seen=?, status='online' WHERE node_id=?",
+                  (now, node_id))
+        # `is None`, not `or` -- last_seen of 0.0 is falsy, so `x or now` would silently treat a
+        # zero timestamp as "just beat" and accrue nothing at all.
+        prev = row["last_seen"]
+        prev = now if prev is None else prev
+        delta = min(now - prev, config.PING_INTERVAL_S * 2)
+        if delta > 0:
+            slot = slot_start_for(now)
+            c.execute("INSERT OR IGNORE INTO attendance "
+                      "(node_id, slot_start, seconds_online, block_start, block_end) "
+                      "VALUES (?,?,0,?,?)",
+                      (node_id, slot, row["layer_start"], row["layer_end"]))
+            # block_* is refreshed on every beat, not only on insert: a node re-assigned
+            # mid-slot must be paid against what it is actually holding now.
+            c.execute("UPDATE attendance SET seconds_online=seconds_online+?, "
+                      "block_start=?, block_end=? "
+                      "WHERE node_id=? AND slot_start=? AND paid_at IS NULL",
+                      (delta, row["layer_start"], row["layer_end"], node_id, slot))
+        return True
+
+
+def mark_slot_poc(node_id, ts=None):
+    """Record that this node passed a proof-of-compute challenge inside the slot containing
+    `ts`. Called from the attest path -- emission requires it, so a node that only heartbeats
+    earns nothing however long it stays up."""
+    ts = time.time() if ts is None else ts
+    slot = slot_start_for(ts)
+    with _db() as c:
+        c.execute("INSERT OR IGNORE INTO attendance (node_id, slot_start) VALUES (?,?)",
+                  (node_id, slot))
+        c.execute("UPDATE attendance SET poc_ok=1 "
+                  "WHERE node_id=? AND slot_start=? AND paid_at IS NULL", (node_id, slot))
+
+
+def unpaid_attendance(before_slot):
+    """Every unsettled attendance row for slots that have already CLOSED. Slots are paid only
+    once they are over -- paying a slot still accruing would settle a partial hour and then have
+    nowhere to put the rest, since paid_at is what makes the row final."""
+    with _db() as c:
+        rows = c.execute("SELECT * FROM attendance WHERE paid_at IS NULL AND slot_start < ? "
+                         "ORDER BY slot_start", (before_slot,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def settle_attendance(node_id, slot_start, reward, now=None):
+    """Stamp a slot as paid. Returns False if it was already settled, so a replayed sweep is a
+    no-op rather than a second payment -- the guard is the WHERE clause, not a prior read."""
+    now = time.time() if now is None else now
+    with _db() as c:
+        cur = c.execute("UPDATE attendance SET reward=?, paid_at=? "
+                        "WHERE node_id=? AND slot_start=? AND paid_at IS NULL",
+                        (reward, now, node_id, slot_start))
         return cur.rowcount > 0
+
+
+def emitted_since(ts):
+    """Total NRN paid out as availability emission since `ts` -- what the daily cap is read
+    against. Summed from the settled rows themselves rather than a counter, so it stays true
+    across restarts and cannot drift from what was actually transferred."""
+    with _db() as c:
+        row = c.execute("SELECT COALESCE(SUM(reward), 0) AS s FROM attendance "
+                        "WHERE paid_at IS NOT NULL AND paid_at >= ?", (ts,)).fetchone()
+    return float(row["s"] or 0.0)
+
+
+def get_setting(key, default=None):
+    with _db() as c:
+        row = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(key, value):
+    with _db() as c:
+        c.execute("INSERT INTO settings (key, value, updated_at) VALUES (?,?,?) "
+                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+                  "updated_at=excluded.updated_at", (key, str(value), time.time()))
+
+
+def set_reported_model(node_id, model_id):
+    """What this node says it is actually serving. Never used to place or route — only to
+    DETECT that the coordinator's belief and the node's reality have diverged ([P33])."""
+    with _db() as c:
+        c.execute("UPDATE nodes SET reported_model_id=? WHERE node_id=?", (model_id, node_id))
+
+
+def model_mismatches(serving_model_id):
+    """Online nodes serving a different model from the network. NULL is never a mismatch --
+    that is an agent too old to report, not a node on the wrong weights."""
+    return [n for n in list_nodes()
+            if n["status"] == "online" and n.get("reported_model_id")
+            and n["reported_model_id"] != serving_model_id]
+
+
+def set_declared_slots(node_id, declared):
+    with _db() as c:
+        c.execute("UPDATE nodes SET declared_slots=? WHERE node_id=?", (declared, node_id))
 
 
 def set_stored_status(node_id, status):

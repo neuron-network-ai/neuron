@@ -23,6 +23,7 @@ import socket
 import sys
 import threading
 import time
+import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root
 import batching                                  # noqa: E402
@@ -323,8 +324,37 @@ class NodeServer:
                         common.send_msg(conn, {"ok": True, "layers": self.n, "s1": s1, "s2": s2,
                                                **ack_wire})
                     elif is_true_last:                        # LAST stage role (real pipeline traffic)
-                        role, s2 = "last", msg["s2"]
-                        common.send_msg(conn, {"ok": True, "layers": msg.get("n", self.n), "s2": s2,
+                        # `s2` arrives from the CALLER and decides which layers actually run --
+                        # `last_stage(model, s2)` is `layers[s2:]`. It used to be taken on trust.
+                        # A caller working from a stale placement then asks for a range this
+                        # slice does not hold; those layers are uninitialized meta tensors, the
+                        # forward pass raises something that is NOT a ConnectionError, the
+                        # connection thread dies, and `finally: conn.close()` slams the socket.
+                        # What the far end sees is a bare "socket closed mid-message" -- so a
+                        # node that was asked for layers it never downloaded is indistinguishable
+                        # from one that hung up, and proof-of-compute records it as a failure.
+                        # Live 2026-08-10: agent-bhpc012104 held 14-27 while the coordinator had
+                        # it on 10-27, and it failed every challenge this way until it was
+                        # flagged. Same rule as reload()'s _layers_in_slice guard, one level up:
+                        # refuse a range rather than run garbage for it.
+                        s2 = msg["s2"]
+                        if s2 < self.lo:
+                            common.send_msg(conn, {
+                                "ok": False, "error": "range_mismatch",
+                                "detail": f"asked to serve layers {s2}-{self.n - 1}, but this "
+                                          f"node holds {self.lo}-{self.hi}: layers "
+                                          f"{s2}-{self.lo - 1} were never downloaded here",
+                                "holds": [self.lo, self.hi]})
+                            return
+                        role = "last"
+                        # `holds` is what this node ACTUALLY has, so a caller can tell a
+                        # placement disagreement from a wrong answer. The last-stage ack used to
+                        # echo the caller's own s2 back at it, which can never disagree and so
+                        # could never reveal anything; the PROBE branch below has always reported
+                        # its real range, which is why only middle-node challenges could ever
+                        # say what went wrong.
+                        common.send_msg(conn, {"ok": True, "layers": msg.get("n", self.n),
+                                               "s2": s2, "holds": [self.lo, self.hi],
                                                **ack_wire})
                     else:
                         # PROBE role (security/proof_of_compute.py): a config with no host_b,
@@ -343,7 +373,7 @@ class NodeServer:
                         # and auto-placement puts a joining stranger wherever the GAP is.
                         role, s1, s2 = "probe", self.lo, self.hi + 1
                         common.send_msg(conn, {"ok": True, "layers": self.n, "s1": s1, "s2": s2,
-                                               **ack_wire})
+                                               "holds": [self.lo, self.hi], **ack_wire})
 
                 elif mtype == "act":
                     # An in-flight request whose node started reloading underneath it. Before
@@ -442,6 +472,16 @@ class NodeServer:
         # shut, surfacing upstream as an unexplained "socket closed mid-message").
         except (ConnectionError, TimeoutError, EOFError) as e:
             print(f"[node] conn {addr} ended: {e}")
+        # EVERYTHING else, for the same reason one line up. The three above are the EXPECTED
+        # ways a connection ends; anything else -- a meta tensor in a forward pass, an OOM, a
+        # KeyError on a malformed message -- used to escape this handler entirely, kill the
+        # thread, and reach `finally: conn.close()` anyway. The peer's diagnosis was then the
+        # closed socket and nothing else, which reads as "that machine died" no matter what
+        # really happened ([P28]) and, to the verifier, as a failed proof-of-compute. Caught and
+        # named here so the traceback lands in THIS node's log, where the fault actually is.
+        except Exception as e:                                          # noqa: BLE001
+            print(f"[node] conn {addr} FAILED: {e.__class__.__name__}: {e}")
+            traceback.print_exc()
         finally:
             _serving_exit()
             conn.close()

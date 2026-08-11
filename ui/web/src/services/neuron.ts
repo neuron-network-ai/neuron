@@ -100,13 +100,26 @@ export function parseFrame(frame: string): [string, unknown] | null {
  * other end-of-stream, and keeps whatever text already arrived. It rejects only when the
  * request could not be made at all.
  */
+/**
+ * Reply length used when the caller does not specify one.
+ *
+ * This used to be 128 here while the UI's own default was 8192 — two numbers for one setting,
+ * and the small one won for any thread whose `maxTokens` was undefined (a conversation restored
+ * from localStorage that predates the field). The user saw "8192" in the composer and got answers
+ * cut off at 128 tokens with "stopped at the limit, not because the answer was finished".
+ *
+ * A transport must not quietly substitute a different value from the one the product promises.
+ * Kept here, exported, so there is one source of truth rather than a literal in each caller.
+ */
+export const DEFAULT_MAX_TOKENS = 8192;
+
 export async function streamChat(req: StreamRequest, handlers: StreamHandlers): Promise<void> {
   const resp = await fetch('/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       prompt: req.prompt,
-      max_tokens: req.maxTokens ?? 128,
+      max_tokens: req.maxTokens ?? DEFAULT_MAX_TOKENS,
       use_rag: req.useRag ?? false,
       conversation_id: req.conversationId ?? null,
     }),

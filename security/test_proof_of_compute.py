@@ -122,6 +122,53 @@ def main():
         poc.requests.get = real_get2
         poc.time.sleep = real_sleep
 
+    # ---- challenge_middle_node: an absent field is SILENCE, not disagreement ---- #
+    # Live 2026-08-11: the driver acks `s2` and omits `s1`, so a whole-tuple compare read
+    # `(None, 10) != (0, 10)` and raised PLACEMENT MISMATCH every sweep. It lands in the
+    # verifier's "nothing recorded" branch, so the log looked benign while proof-of-compute
+    # quietly stopped checking the most important node in the chain. No socket needed: the
+    # comparison is pure logic, which is why it is worth pinning even though the wire protocol
+    # itself still needs real weights.
+    real_conn, real_send, real_recv = (poc.socket.create_connection,
+                                       poc.common.send_msg, poc.common.recv_msg)
+
+    class _Sock:
+        def close(self):
+            pass
+
+    def _probe(ack, s1=0, s2=10):
+        """Run the probe against a scripted ack. Returns the hidden state, or the exception."""
+        seq = [ack, {"hidden": "H"}]
+        poc.socket.create_connection = lambda *a, **k: _Sock()
+        poc.common.send_msg = lambda *a, **k: None
+        poc.common.recv_msg = lambda *a, **k: seq.pop(0)
+        try:
+            return poc.challenge_middle_node("h", 1, s1, s2, "X")
+        except Exception as e:                       # returned, not raised, so check() can read it
+            return e
+
+    try:
+        check("the live driver case: s1 omitted, s2 agrees — verified, not a mismatch",
+              _probe({"ok": True, "s1": None, "s2": 10}) == "H")
+        check("a pre-0.20 agent claiming nothing at all is challenged, not refused",
+              _probe({"ok": True}) == "H")
+        check("an exact match still passes",
+              _probe({"ok": True, "s1": 0, "s2": 10}) == "H")
+        check("a node claiming a DIFFERENT start is still a mismatch",
+              isinstance(_probe({"ok": True, "s1": 5, "s2": 10}), poc.RangeMismatch))
+        check("a node claiming a DIFFERENT end is still a mismatch",
+              isinstance(_probe({"ok": True, "s1": 0, "s2": 14}), poc.RangeMismatch))
+        check("the live 18f1da shape (assigned 19-27, holds 10-13) is a mismatch",
+              isinstance(_probe({"ok": True, "s1": 10, "s2": 14}, s1=19, s2=28),
+                         poc.RangeMismatch))
+        check("a typed range_mismatch refusal is still surfaced as RangeMismatch",
+              isinstance(_probe({"ok": False, "error": "range_mismatch", "detail": "x"}),
+                         poc.RangeMismatch))
+    finally:
+        poc.socket.create_connection = real_conn
+        poc.common.send_msg = real_send
+        poc.common.recv_msg = real_recv
+
     print(f"\n{ok} passed, {fail} failed")
     return fail == 0
 

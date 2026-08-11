@@ -123,6 +123,19 @@ def _meets(cap, tier, margin=0.0):
             and cap["total_ram_gb"] >= tier["min_ram_gb"] * factor)
 
 
+def tier_for(model_id):
+    """The tier entry for a model id, or None if it is not one we know how to serve.
+
+    None is the load-bearing answer: an operator pin naming a model that is not in the table
+    must be IGNORED rather than acted on, because the coordinator would otherwise migrate the
+    whole network toward a model it has no layer count or footprint for.
+    """
+    for t in TIERS:
+        if t.get("model_id") == model_id:
+            return dict(t)
+    return None
+
+
 def gb_per_layer_for(model_id):
     """One layer's weights for a model in the tier table, or None if it isn't one.
 

@@ -82,8 +82,46 @@ PUBLIC_URL = os.environ.get("NEURON_PUBLIC_URL", "https://neuronnet.duckdns.org"
 #
 # Raising this requires generalising the driver first, not just this number.
 PIPELINE_STAGES = int(os.environ.get("NEURON_PIPELINE_STAGES", "3"))
+# The floor of that same shape, and the half nothing was checking. `node_a.coord_get_chain`
+# accepts a chain of TWO or THREE stages -- two is not degraded, it is the ordinary shape of a
+# three-machine network with one machine away. ONE is refused outright, and a roster can walk to
+# one stage while every layer is covered: a node holding the whole model wins the chain walk
+# from cursor 0 and swallows the stages below it. That was live on 2026-08-09 with
+# `network_healthy: true` reported throughout -- see PROBLEMS.md [P32]. Named here, next to the
+# ceiling, because the two are one rule and splitting them is what let half of it go unenforced.
+MIN_PIPELINE_STAGES = int(os.environ.get("NEURON_MIN_PIPELINE_STAGES", "2"))
+# Layers the DRIVER holds: stage 1 is always exactly 0..DRIVER_STAGE1_LAYERS-1.
+#
+# Not a preference — `node_a.coord_get_chain` refuses any chain whose first stage is not its own
+# shard, and that shard is fixed at `neuron_driver.S1`. A chain can have a legal stage count,
+# cover every layer, and still be unroutable because stage 1 is the wrong width. Observed
+# 2026-08-10: a migration left the chain at [[0,16],[17,23],[24,27]] — three stages, 28/28
+# covered, reported routable, and every chat would still have been refused by the driver.
+# Must match `neuron_driver.S1` and `pin_layers.sh`'s NEURON_S1.
+DRIVER_STAGE1_LAYERS = int(os.environ.get("NEURON_S1", "10"))
+# How many times slower than the FASTEST replica of the same segment a node may be and still be
+# routed to. Beyond it, its share of traffic is zero rather than small.
+#
+# Weighted-random replica choice is right for "somewhat slower" -- a node at half the speed
+# should still carry half the traffic. It is wrong for orders of magnitude: a chain runs at the
+# speed of its slowest stage, so a node 188x slower than its peers turns the occasional request
+# it wins into a visibly broken one. Live 2026-08-10: one node reported 4150 ms/layer against
+# 8-22 ms for the rest (a measurement taken while it thrashed during a migration) and answers
+# came back at 0.24 tok/s. That node is not slow, it is broken or its figure is stale.
+REPLICA_SLOWDOWN_LIMIT = float(os.environ.get("NEURON_REPLICA_SLOWDOWN_LIMIT", "8.0"))
+# How long a self-measured ms_per_layer is believed. After this it is treated as UNKNOWN and the
+# node is scored at DEFAULT_MS_PER_LAYER again.
+#
+# It was measured once at agent startup and believed forever. So a reading taken while a machine
+# thrashed under a migration -- 4150 ms/layer against 8-22 for its peers, live 2026-08-10 -- was
+# permanent. Worse in combination with REPLICA_SLOWDOWN_LIMIT: an outlier is excluded from
+# routing, therefore never serves, therefore is never re-measured. A stale bad number became a
+# life sentence, and the guard I added is what made it one. Ageing the figure out is the way back
+# in: an unknown node is scored at the default prior, which is exactly how a never-measured node
+# is already treated.
+MS_PER_LAYER_TTL_S = float(os.environ.get("NEURON_MS_PER_LAYER_TTL_S", "21600"))
 
-AGENT_VERSION = os.environ.get("NEURON_AGENT_VERSION", "0.19.0")
+AGENT_VERSION = os.environ.get("NEURON_AGENT_VERSION", "0.20.0")
 # Where a node fetches that version, and the hash it must match before anything is run.
 # The download is NOT served from here: this VM has 1 GB of RAM and the installer is ~200 MB,
 # so the coordinator only advertises metadata and GitHub Releases does the bandwidth.
@@ -173,6 +211,35 @@ HOLD_TTL_S = int(os.environ.get("NEURON_HOLD_TTL_S", "600"))
 # One-time grant per new wallet, from __ecosystem__ — MUST ship in the same release as the
 # debit, or a new user can never spend anything (TOKENOMICS.md §11.6: "or the demo dies").
 FAUCET_AMOUNT_NRN = float(os.environ.get("NEURON_FAUCET_AMOUNT", "25.0"))
+
+# --- availability emission (TOKENOMICS.md §11.4) ----------------------------- #
+# Nodes have only ever earned by SERVING. Nothing paid a machine to be there, so coverage was
+# whatever happened to be awake -- and the coordinator reacted by re-splitting layers, which
+# costs every affected node a delete and a re-download. §11.4 already called for the fix and it
+# was never built: emission paid PER DEVICE-HOUR, deliberately decoupled from traffic, because
+# anything paying more than the spend for metered work can be farmed by generating your own
+# traffic. This is that, plus the part §11.4 lacks -- paying for hours WHERE AND WHEN coverage
+# is short, so availability is rostered rather than accidental.
+#
+# Paid by TRANSFER out of __emission_pool__, never minted: the fixed 1,000,000,000 supply
+# invariant is not negotiable (see test_escrow_conservation).
+SLOT_SECONDS = int(os.environ.get("NEURON_SLOT_SECONDS", "3600"))
+# §11.4's figure: ~1 NRN per device-hour in era 0, halving per §4 as a RATE POLICY.
+EMISSION_BASE_NRN_PER_HOUR = float(os.environ.get("NEURON_EMISSION_BASE", "1.0"))
+# How much a thin slot may out-pay a well-covered one. Capped because the multiplier is a
+# recruiting signal, not an auction: uncapped, a single slot with one eligible node would price
+# itself arbitrarily high and drain the pool that has to last for years.
+EMISSION_SCARCITY_MAX = float(os.environ.get("NEURON_EMISSION_SCARCITY_MAX", "3.0"))
+# Replicas per block at which a slot is considered fully covered -- the point where the
+# multiplier reaches 1.0. Below it the premium rises toward EMISSION_SCARCITY_MAX.
+EMISSION_TARGET_REPLICAS = int(os.environ.get("NEURON_EMISSION_TARGET_REPLICAS", "3"))
+# A second bound, on the whole network per day rather than per node. The multiplier reacts to
+# scarcity, and scarcity is exactly what a mass outage looks like -- so the moment the pool is
+# most at risk of being drained fast is the moment rates are highest. This is the backstop.
+EMISSION_DAILY_CAP_NRN = float(os.environ.get("NEURON_EMISSION_DAILY_CAP", "5000.0"))
+# Fraction of a slot a node must actually be present for before it earns anything for it.
+# Prevents a node that appears for one heartbeat from being paid as though it held the hour.
+SLOT_MIN_ATTENDANCE_FRAC = float(os.environ.get("NEURON_SLOT_MIN_ATTENDANCE", "0.5"))
 
 # Genesis buckets — ledger rows, NOT config values that can silently drift the supply.
 # sum() of the 4 allocation buckets is exactly 1,000,000,000; __escrow__ is bookkeeping-only

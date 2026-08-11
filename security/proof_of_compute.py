@@ -62,14 +62,78 @@ def verify(output, expected, atol=0.05):
     return err <= atol, err
 
 
-def challenge_node(host, port, s2, n, inp, timeout=30):
+class ChallengeRefused(RuntimeError):
+    """The node declined the challenge and said why (paused, reloading, range_mismatch).
+
+    Distinct from an exception raised while computing: a node that answers "no, and here is
+    the reason" has told the truth about itself, which is the opposite of a proof-of-compute
+    failure. The caller decides what each reason is worth."""
+
+
+class RangeMismatch(ChallengeRefused):
+    """The node does not hold the layers it was challenged on.
+
+    This is a fact about PLACEMENT, not about the node, and conflating the two is what
+    flagged three honest machines on 2026-08-10. A node challenged for layers it never
+    downloaded either answers for a different range (a wrong-looking answer) or dies running
+    uninitialized weights (a closed socket) -- and both were recorded against its reputation.
+    Raised as its own type so the verifier can refuse to attest it either way."""
+
+
+# A challenge blocks behind the peer's one-time model-shard load, which is legitimately slow:
+# `common.COLD_CONNECT_TIMEOUT_S` is 120 for exactly this reason, while this path used a flat
+# 30 -- less than the ~35s cold load common.py documents. A real PASS was measured at 14,725 ms
+# on an office PC (verify_service.log, 2026-08-07), so the old budget had barely 2x of headroom
+# over a node that was working correctly. Being slow is not being wrong ([P28]).
+CHALLENGE_TIMEOUT_S = common.COLD_CONNECT_TIMEOUT_S
+
+
+def _check_range(ack, lo, hi, requested):
+    """Raise if the node cannot actually serve the range we challenged it on.
+
+    COVERAGE, not equality. A node holding MORE than it was asked for answers correctly:
+    `last_stage(model, lo)` is `layers[lo:]` on a full skeleton, so the extra layers cost
+    resident RAM and change no arithmetic -- and `ensure_slice` deliberately reuses a superset
+    rather than re-downloading it ([P36]). Demanding equality here would refuse to verify every
+    such node, which is a promotion that never happens: the harm this function exists to
+    prevent, reintroduced by the function preventing it.
+
+    `holds` is authoritative and reports the node's real [lo, hi]. Agents too old to send it
+    still betray a disagreement on the probe path, where `s1`/`s2` have always been the node's
+    own range -- and an agent that answers a LAST-stage config from the probe branch is itself
+    the symptom, because it means its range does not reach the model's final layer."""
+    held = ack.get("holds")
+    if held is None and ack.get("s1") is not None:
+        held = [ack["s1"], ack["s2"] - 1]
+    if held is None:
+        return                                   # pre-0.20 agent on the last-stage path
+    held_lo, held_hi = int(held[0]), int(held[1])
+    if held_lo > lo or held_hi < hi:
+        raise RangeMismatch(
+            f"challenged on layers {lo}-{hi} ({requested}) but the node holds "
+            f"{held_lo}-{held_hi} -- placement disagreement, not a bad answer")
+
+
+def challenge_node(host, port, s2, n, inp, timeout=CHALLENGE_TIMEOUT_S):
     """Speak the last-stage wire protocol: config -> act(challenge) -> read output."""
     s = socket.create_connection((host, port), timeout=timeout)
     try:
         common.send_msg(s, {"type": "config", "s2": s2, "n": n})
         ack = common.recv_msg(s)
         if not ack.get("ok"):
-            raise RuntimeError(f"node refused config: {ack}")
+            # A NAMED refusal, surfaced as such. `range_mismatch` in particular must never be
+            # scored as a failed challenge: the node is telling us the coordinator's placement
+            # is stale, which is a fault in the network's bookkeeping, not in the machine.
+            err = ack.get("error")
+            detail = ack.get("detail") or ack
+            if err == "range_mismatch":
+                raise RangeMismatch(f"node refused config: {detail}")
+            raise ChallengeRefused(f"node refused config ({err}): {detail}")
+        # The middle-node challenge has always verified this and the last-stage one never did,
+        # so a node answering for the WRONG RANGE passed silently into `verify()` and came back
+        # as a plain wrong answer -- max_err in the tens, deterministic, and indistinguishable
+        # from a node running corrupted weights. Checked here so the two stop looking alike.
+        _check_range(ack, s2, n - 1, f"s2={s2}, n={n}")
         common.send_msg(s, {"type": "act", "hidden": inp})
         resp = common.recv_msg(s)
         common.send_msg(s, {"type": "bye"})
@@ -78,7 +142,7 @@ def challenge_node(host, port, s2, n, inp, timeout=30):
         s.close()
 
 
-def challenge_middle_node(host, port, s1, s2, inp, timeout=30):
+def challenge_middle_node(host, port, s1, s2, inp, timeout=CHALLENGE_TIMEOUT_S):
     """Speak the PROBE wire protocol: a config with NO host_b tells a middle-shard node
     (node_c.py / agent/node_server.py) to run its own layers in isolation and return the raw
     result, instead of relaying to a next hop. The node answers with ITS OWN actual s1/s2
@@ -89,10 +153,31 @@ def challenge_middle_node(host, port, s1, s2, inp, timeout=30):
         common.send_msg(s, {"type": "config", "s1": s1, "s2": s2})
         ack = common.recv_msg(s)
         if not ack.get("ok"):
-            raise RuntimeError(f"node refused config: {ack}")
-        if (ack.get("s1"), ack.get("s2")) != (s1, s2):
-            raise RuntimeError(f"node's actual range {ack.get('s1'), ack.get('s2')} does not "
-                               f"match the expected {s1, s2} -- registration/slice mismatch")
+            err = ack.get("error")
+            detail = ack.get("detail") or ack
+            if err == "range_mismatch":
+                raise RangeMismatch(f"node refused config: {detail}")
+            raise ChallengeRefused(f"node refused config ({err}): {detail}")
+        # COMPARE ONLY WHAT THE NODE ACTUALLY CLAIMS. Equality (not coverage) is right here --
+        # the probe makes the node run ITS OWN lo/hi in isolation, so a node holding more would
+        # compute more layers and the arithmetic genuinely would not match. But a field the node
+        # never sent is not a disagreement, it is silence, and `_check_range` already says so for
+        # the other path ("agents too old to send it").
+        #
+        # Live 2026-08-11: the DRIVER (`agent-optinovate-6ff49d`, 26/26, the healthiest node on
+        # the network) acks `s2` correctly and omits `s1`, so the whole-tuple compare read
+        # `(None, 10) != (0, 10)` and raised PLACEMENT MISMATCH on every single sweep. It failed
+        # into the safe "nothing recorded" branch, so nothing looked wrong -- and proof-of-compute
+        # silently stopped checking the most important machine in the chain until 0.20 ships.
+        # That is exactly [P35]'s disease returning through its own cure: running perfectly,
+        # checking nothing. A check that CANNOT pass is not a strict check, it is a dead one.
+        a1, a2 = ack.get("s1"), ack.get("s2")
+        if (a1 is not None and a1 != s1) or (a2 is not None and a2 != s2):
+            # Was a bare RuntimeError, so the verifier's blanket `except Exception` counted it
+            # towards UNREACHABLE_STRIKES and eventually attested a failure -- for a node that
+            # answered correctly and honestly about a range the coordinator had moved.
+            raise RangeMismatch(f"node's actual range {a1, a2} does not "
+                                f"match the expected {s1, s2} -- registration/slice mismatch")
         common.send_msg(s, {"type": "act", "hidden": inp})
         resp = common.recv_msg(s)
         common.send_msg(s, {"type": "bye"})

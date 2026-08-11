@@ -4700,6 +4700,603 @@ whatever it earned. Worth resolving deliberately rather than discovering later.
 
 ---
 
+## Session 56 (2026-08-09) — the register secret rotated, and the three places it was still sitting
+
+Session 55's open item 1. `NEURON_REGISTER_SECRET` had been echoed into a session transcript,
+and it is not a cosmetic credential: it grants **trusted standing** on registration, unlocks
+every `/admin/*` route, reveals node addresses on `/node/list`, and **overrides the
+payout-rebind check** (`main.py:1077`) — which makes it the only path in the system to
+redirecting another node's earnings.
+
+**Mapped before touching anything, and the map is why this was safe to do live.** Five holders:
+the VM's systemd unit, `.env.coordinator`, and `agent/config.node-{a,b,c}-local.json`. All five
+carried the same value (compared by SHA-256 prefix, never by printing it). The installed agent
+configs — `agent/config.driver.json` and `%LOCALAPPDATA%\NEURON\config.json` — **do not hold it
+at all**, because nodes authenticate with `node_token`. So no volunteer, and no live node, could
+be disconnected by this. The coordinator restart was the only exposure, and `deploy.sh` does
+that routinely.
+
+**The value never entered a transcript, an argv, or a shell history.** Generated locally into a
+scratchpad file, piped to the VM on **ssh stdin**, and verified from the VM against
+**127.0.0.1** — so the new secret was never sent across the network to test it. The old one was
+read by the remote script out of the unit file it had just backed up, so proving it now fails
+needed no transport either.
+
+**The first attempt rolled itself back, and the reason is worth keeping.** `systemctl restart`
+returns when the process is **spawned**, not when uvicorn has **bound the port** — so
+`is-active` said `active` while every check returned `URLError`, and a fixed 6-second sleep
+reported a healthy rotation as a failure. Replaced with a poll on `/status`; the successful run
+reported **ready in 4.1 s**. The part that mattered is that the rollback fired: unit restored,
+service restarted, network verified healthy (28/28, 2 online) before anything else was tried.
+A rotation script whose failure path is untested is a way to lose a coordinator.
+
+**Verified, not assumed:** new secret → 200, **retired secret → 401**, no secret → 401, on
+`/admin/logs`. Then the same three from this machine through `.env.coordinator`, loaded exactly
+the way `pin_layers.sh` loads it, plus `/node/list` returning addresses (an operator-only field).
+
+**The verifier had to be restarted, and exposed two things.** `verify_service.py` reads the
+secret **once at startup**, so it kept 401ing after the rotation — with precisely the right
+message (*"the register secret is wrong, so nothing can be verified"*), first line at 14:49:39,
+the second the rotation landed. There were also **two logical verifiers** running, one predating
+the rotation; deduplicated to one, after which the ERROR line stops. What looked like two
+verifier processes and four UI processes is the **venv redirector** — `.venv\Scripts\pythonw.exe`
+spawns the base interpreter as a child — not a self-relaunch, and not four servers.
+
+**Retired-secret residue, cleaned.** Three unit backups on the VM still held the old value.
+A `cp` from one of those would have reinstated a **compromised** credential *and* 401'd every
+client updated today. That one line is now redacted in each; `NEURON_RELAY_SECRET` and
+`NEURON_WALLET_LINK_SECRET` in the same files are **still live**, so blanking the files wholesale
+would have destroyed a genuine backup.
+
+**Still holding the retired value, deliberately untouched:**
+`C:\Users\optin\neuron-stranger\.env.coordinator`. Inert — the value no longer authenticates —
+but it is a second checkout whose operator tooling now silently 401s. Left as the founder's
+call: if that tree is a *stranger* simulation it should never have carried the operator secret,
+and if it is a second operator checkout it wants the live one.
+
+**A claim of mine that was wrong, and is corrected rather than left standing.** The `http://IP:8001`
+in `.env.coordinator` looked like it was downgrading every operator call to cleartext. It was
+not: **nothing sources that file** — each tool greps it for the one secret key — and
+`pin_layers.sh`, `rebalance.sh`, `verify_service.py` and `neuron_logs.py` all default to
+`https://neuronnet.duckdns.org` on their own, with `$NEURON_COORDINATOR` unset. The line was
+stale documentation from before `setup_https.sh`, not an active hazard. It is corrected to the
+https name, and the file now says which line is actually read — a URL a human copies a `curl`
+off is worth keeping honest, which is the real (smaller) reason to fix it.
+
+**Suite: 71 Python modules green, 0 failures; `ui/web` vitest 15/15; `selftest_shard.py` ALL
+PASS.** Network healthy throughout and after: 28/28 covered, 2 online, 0 flagged.
+
+**Nothing committed** — as instructed. Changes sit in `.env.coordinator` and the three
+`agent/config.node-*-local.json` files, all of which are gitignored, plus this entry.
+
+### Item 2 arrived early, and not via the office PCs — [P32]
+
+Checking the roster during the rotation showed **`node-c-pavilion` back on 0-27**, the whole
+model, alongside the driver on 0-9. Both start at layer 0, so `router._walk` (`router.py:104`)
+takes `max(layer_end)` = 27 from cursor 0, jumps to 28, and produces a **1-stage chain** —
+which `node_a.coord_get_chain` refuses. Distributed chat was dead, and had been since some point
+after Session 55 half nine.
+
+**`/status` said `network_healthy: true` the entire time**, because 28/28 layers genuinely were
+covered. **Coverage is not routability**, and the health check only answers the first question.
+Worth stating plainly because it is why this can sit broken without anyone being told:
+`pin_layers.sh:11` records the real cost — each request *"dies client-side after the coordinator
+has already taken a wallet hold"*, so failed attempts lock escrow for `HOLD_TTL_S` (600 s), and
+since nothing completes, **neither machine earns**.
+
+Re-pinned to `[[0,9],[10,27]]`; the walk now yields 2 stages. **But this is a mitigation, not a
+fix, and it will revert.** The same command was run and verified ~4 hours earlier in Session 55
+half nine — *"both nodes adopted their new ranges without a restart"* — and pavilion had drifted
+back by this session.
+
+**The mechanism, recorded as [P32]:** `neuron fix` writes to the **coordinator**, while the
+node's own `config.json` is what it re-asserts. `agent.py:413` returns early when config already
+holds a range (so the node never re-asks), `agent.py:569` puts that range in the registration
+body, and `models.py:361` applies it with **no COALESCE** — while `ms_per_layer`, `head_ms`,
+`platform` and `hw_fingerprint` on the four lines below it *are* COALESCEd. The protective
+pattern was applied all around that line and not to it. Any restart, reconnect or relay-ticket
+refresh closes the loop, silently.
+
+**`layers_pinned` does not prevent it** — it guards `reconsider_placement`, which `agent.py:435`
+says is *"Only ever called while PROBATIONARY"*, and pavilion is trusted. What keeps the driver
+correct is simply that `agent/config.driver.json` holds the *right* range (0-9), so its
+re-assertion is harmless. That asymmetry is the whole difference between the two machines.
+
+[P27] and [P32] are the offline and online halves of one question: the operator tooling treats
+the coordinator as authoritative for placement, and the agent treats it as advisory.
+
+**The automatic repair shares the blind spot — which is why nothing caught this.** The
+coordinator is not passive here: a node joining with no range gets `suggest_placement`, which IS
+stage-aware (`main.py:898`), and a node leaving that opens a hole is handled by `self_heal` every
+sweep. But `self_heal` (`migration.py:297`) opens with `if not missing: return` — it keys
+entirely on **uncovered layers**. Pavilion on 0-27 plus the driver on 0-9 leaves nothing
+uncovered, so self-heal inspected the network, found it healthy, and did nothing.
+`PIPELINE_STAGES` is enforced when handing out a NEW placement and never re-checked against the
+roster afterwards. The coverage/routability confusion is not only in `/status`; it is in the
+repair path too.
+
+### Option C, built: the network now says when it cannot route
+
+Three options were on the table — **A** correct pavilion's local config (contained, needs access
+to that machine, fixes this instance); **B** COALESCE the range on re-registration (fixes the
+class, ships by restart alone, but inverts placement ownership for every node); **C** check stage
+count, not just coverage. **C was chosen and built**, because it is the one that would have
+caught this automatically and it is correct whichever of A or B follows.
+
+**Detection only — it moves nothing, and that restraint is the design.** Repairing means
+rewriting ranges the nodes themselves re-assert, so until ownership is settled a repairing sweep
+and a re-registering node would overwrite each other every 60 seconds. Making a silent failure
+loud is the half that holds under either outcome.
+
+- **`router.chain_shape(nodes, total)`** — pure description of a roster: `stages`, `ranges`,
+  `routable`, deterministic chooser. It checks `missing` **as well as** the stage count, because
+  a chain that stops at a gap still has a plausible-looking stage count and calling that routable
+  would repeat the exact half-answer being fixed.
+- **`/status` gains `stages`, `chain_ranges`, `routable`**, and **`network_healthy` now means "a
+  request can complete"** — what the dashboard dot, `neuron_doctor`, the landing page and
+  `ui/app.py` all already treated it as meaning.
+- **The sweep logs the TRANSITION**, not the state: an unroutable network never self-corrects, so
+  a per-sweep line would be 1,440/day and read as wallpaper (the heartbeat lesson from half
+  seven). It names the cost and the remedy.
+- **The dashboard and doctor now distinguish the two failures.** "Chain incomplete" for both sent
+  an operator hunting a missing node while every layer was present.
+- **`config.MIN_PIPELINE_STAGES = 2`** sits next to `PIPELINE_STAGES`. The ceiling was enforced
+  when handing out a placement; the floor was enforced nowhere. One rule, and splitting it is why
+  half went unchecked.
+
+`coordinator/test_routability.py` **14/14** (new) pins the DISTINCTION, not the incident. **The
+tripwire was verified to fire** — reverting `network_healthy` to coverage-only fails
+`test_summary_is_not_healthy_when_covered_but_unroutable`, then restored. One test bug of my own,
+the same shape as always: `_offline()` wrote the `status` column, which `_node_dict` **derives**
+from `last_seen` — so it asserted nothing until it backdated the heartbeat instead.
+
+Both dashboard branches were rendered against a real unroutable roster rather than trusted to the
+suite: banner red with the accurate reason at 1 stage, green at 2.
+
+**Suite: 72 Python modules green (71 + the new one), 0 failures; vitest 15/15; `selftest_shard.py`
+ALL PASS.** C was then **deployed** — `deploy.sh`, gates verified — and the coordinator logged its
+own first transition at 16:44: `[health] chain is routable again: 2 stage(s) [[0, 9], [10, 27]]`.
+
+### The question that changed the answer
+
+Asked whether this was work for a thousand-machine network or for one PC. It was the right
+question, and it inverted the recommendation.
+
+**A was rejected.** Editing pavilion's `config.json` only works because pavilion is in this
+house. At a thousand nodes there is no access to a volunteer's config — so A is not narrow, it is
+*structurally unavailable* the moment the network is real. Any fix requiring a specific machine
+to be reachable has a ceiling of "what one person can babysit". It was very nearly done, because
+it is cheap and it works tonight, which is exactly what makes it the wrong habit.
+
+The same lens condemns `neuron fix` itself: a manual step, run by an awake operator holding a
+secret who knows which machine they chat from, **once per join or leave** — when churn is the
+steady state of a real network, not an event.
+
+### B, built: the coordinator owns placement
+
+A node **proposes**; the coordinator **disposes**. The naive `COALESCE` is unsafe —
+`reconsider_placement` moves a probationary node by rewriting config and re-registering, so
+ignoring the claim would leave node and coordinator disagreeing about what is being served: a
+correctness hazard (wrong activations → failed proof-of-compute → flagged, with no clue why),
+worse than the bug being fixed.
+
+What made the safe version small is a fact already in the code: **the node already follows the
+coordinator.** `slice-info` returns the coordinator's range and `setup()` serves it. The
+registration echo was never how a node *learned* its range — only how a *stale* one got written
+back. Removing it closes the one path by which the two could diverge; it does not open one.
+
+- `register_node` no longer updates the range on conflict; INSERT still establishes it, so new
+  nodes and wiped-and-rejoined machines are unaffected. `update_layers()` — `/network/layers`,
+  migration cutover, self-heal — is untouched.
+- The claim is **recorded**, not discarded (`reported_layer_*`, `placement_drift`). Ignoring the
+  node silently would trade one invisible fact for another. NULL means "no claim seen yet", so
+  live nodes do not all light up on the first deploy.
+- The registration reply reads `assigned_layers` **back from the DB**, exactly as `standing`
+  above it already did — it used to echo the caller, so the agent's startup line would have
+  printed the stale range it had just failed to impose.
+- Agent half (needs 0.20): `setup()` persists the served range, making config a cache of the
+  coordinator's answer rather than a rival opinion; and a `--layers` that contradicts the
+  assignment now **says so**, because an override that silently does nothing is [P31] with a
+  manual trigger.
+
+**It ships by coordinator restart alone** and fixes every installed 0.18/0.19 agent — it stops
+*listening* to the stale claim rather than requiring agents to stop making it. Same lever as
+`GPU_EXECUTION` in Session 55.
+
+`coordinator/test_placement_ownership.py` **9/9** (new), including the live sequence end to end.
+**Tripwire verified:** restoring the overwrite fails with "the pin must survive" and "the pin
+reverted — [P32] is back", then restored.
+
+### Deployed — and it caught a recurrence on the way in
+
+B went out the same evening. Schema migration verified against the live DB: both columns added,
+5 node rows and 39 ledger rows intact, **supply still exactly 1,000,000,000**.
+
+Between the afternoon pin and that deploy the split had **already been lost again** — this time
+`agent-optinovate-6ff49d`, the driver itself, sitting on **0-27**. One stage. Chat dead. The
+coordinator said so without being asked:
+
+```
+19:47:29 [health] NETWORK NOT ROUTABLE: the chain walks to 1 stage(s) [[0, 27]], and a driver
+         accepts 2-3. ... Chats will fail AFTER a wallet hold is taken. Fix: pin_layers.sh ...
+19:48:32 [health] chain is routable again: 2 stage(s) [[0, 9], [10, 27]]
+```
+
+Twice in one day the pin was lost in silence; the third time the network reported it itself, in
+one line, with the remedy. That is C justified on evidence rather than argument — and B means
+this is the first pin that will actually hold.
+
+*One check of mine was wrong and worth keeping:* verifying the deployed code, `grep -c
+"layer_start=excluded.layer_start"` returned 1 and I read it as a failure — but
+`reported_layer_start=excluded.layer_start` **contains** that string. Anchored properly, the bare
+assignment count is 0. A grep whose pattern is a substring of the thing it is meant to exclude
+will confirm whatever you already believe.
+
+**Open:** cut 0.20 (tray, heartbeat, chat UI, agent placement-cache); `/next` → `/`;
+the GPU session. [P27] still live for the two office PCs (offline, stale 0-13). Longer-horizon,
+and now named: generalise the driver past 2–3 stages and the hardcoded `S1=10` (`config.py:83`
+already says raising `PIPELINE_STAGES` needs it), and a user who is not also a node — today the
+machine you chat from must hold layers 0–9.
+
+**Re-verified after the doc changes:** 71 Python modules green, vitest 15/15, `selftest_shard.py`
+ALL PASS. No source file was modified in this half — only `PROBLEMS.md` and this log.
+
+### Half eleven — the founder's answer: pay for availability, not just for work
+
+The layer/download thread was being chased from the wrong end. The founder reframed it: NEURON is
+a passenger train. People board and leave; the train does not stop, and the fare does not rise
+because the carriage is half empty. **Then: assign nodes time slots, and reward them for staying
+awake in one.**
+
+That is the piece the whole architecture was missing, and it is not new — it is
+`TOKENOMICS.md` §11.4, written and never built. §11.4 already says emission **must** be decoupled
+from traffic and paid **per device-hour** (~1 NRN/hour from the 600M `__emission_pool__`),
+decoupled precisely because anything paying above the spend for metered work can be farmed by
+generating your own traffic. It even names a planned `coordinator/emission.py` on the health
+sweep. Only `last_seen` existed.
+
+What the slot idea adds over §11.4 is **direction**: hours are paid for *where and when coverage
+is short*, so availability is rostered instead of accidental. Phones are the reason it matters —
+`SAFETY_LIMITS.md` has them contribute only at battery ≥80% and plugged in, so they arrive and
+leave in correlated nightly waves, which is exactly when coverage is thinnest. The cheapest
+supply on the network is available precisely at the hours nobody covers.
+
+**Built (`coordinator/emission.py`, new).** A slot-hour pays only if **all three** hold: the node
+was present for at least `SLOT_MIN_ATTENDANCE_FRAC` of the hour, it held a block of the serving
+model, and **a proof-of-compute challenge landed inside that slot**. The third is the load-bearing
+one: paying for presence invents a reason to fake presence, and a script that heartbeats while
+computing nothing would otherwise be the most profitable node on the network. Nothing about
+per-request earning had that hole, because serving is self-verifying.
+
+- **Rate = base × scarcity multiplier**, bounded and monotonic in replica depth — a recruiting
+  signal, not an auction. Uncapped, a slot with one eligible node prices itself arbitrarily high
+  at the moment the network can least afford it.
+- **Unverified nodes do not count toward replica depth.** If they did, a block held only by
+  machines that cannot prove they compute would price itself as healthy and never attract a real
+  one.
+- **Nothing is minted** — payment is `models.transfer` out of `__emission_pool__`, so the fixed
+  1,000,000,000 supply is untouched. A test asserts the supply is identical before and after, and
+  that the pool fell by exactly what was paid.
+- **At most once per slot.** `attendance` is keyed `(node_id, slot_start)` and settlement claims
+  the row *before* money moves. Claim-then-pay can at worst pay nothing for a claimed slot, which
+  is visible; pay-then-claim can pay twice, which is not.
+- **Open slots are never settled**, a **daily cap** bounds a scarcity spike, and pool exhaustion
+  is logged as the tokenomics event it is rather than retried forever.
+- **`GET /network/slots`** publishes where cover is needed and what that hour pays — deliberately
+  public, because it is a recruiting signal, and it says where the chain is *about to* stop
+  working rather than whether it works now.
+- Attendance accrues from the **existing heartbeat**, with the credited delta capped at two ping
+  intervals: without that, a node absent for six hours banks the whole gap as presence on its
+  first beat — paid precisely for being away.
+
+*One bug of my own, caught by its own test:* the accrual read `row["last_seen"] or now`, and
+`0.0` is falsy — a zero timestamp silently became "just beat" and accrued nothing. `is None`, not
+truthiness.
+
+`coordinator/test_emission_slots.py` **15/15** (new).
+
+**The fare does not move.** Users still pay per token out of escrow; emission is a separate stream
+from a separate bucket. Scarcity shows up as a night-shift premium paid by the railway, never as
+a ticket price — which is the half of the train analogy I missed the first time.
+
+**This makes [P29] blocking, and that is recorded.** Emission credits the **node's** ledger row,
+and `nodes` has no owner column at all — so the network is now actively accruing balances no
+human can spend. Paying volunteers in something they cannot reach is worse than not paying them.
+The node→wallet binding can mirror `/node/{id}/payout-address` exactly.
+
+**Not done:** deploying it, and deriving a phone's declared window from observed charge history
+(the plumbing is in; Android reads it from nothing yet).
+
+### Half twelve — the chain repairs itself, because a manual step was the actual bug
+
+All four PCs came online overnight and the network was found broken:
+`[[0,9],[10,13],[14,20],[21,27]]` — **four stages**, with the driver stranded in the middle on
+14-20 while an 8 GB office PC held stage 1. Chat dead twice over.
+
+The journal shows what happened, and two of the day's fixes working while it did. Machines
+flapped from 04:56 onward; `[gap-heal]` re-split on each flap, accreting segments; the routability
+watch called every bad state with its remedy; and `[placement] ... keeping the assignment` fired
+twice against nodes re-asserting stale ranges. Then at 06:26 `[migration] steady -> preparing` —
+four nodes satisfied the 7B tier's `min_nodes: 3`, so the network started **moving itself onto
+Qwen2.5-7B**, stuck at 1-of-3 ready while the machines it needed kept dropping.
+
+**Auto-promotion is now off** (`NEURON_TIER_PROMOTE_MARGIN=100`, a drop-in on the VM). The
+migration state is in-memory, so the restart cleared the in-flight move. `PROMOTE_MARGIN` is the
+right lever because `_meets` scales by `(1 + margin)` for promotion only — demotion re-checks at
+margin 0.0, so the floor still works and a genuinely shrunken network can still fall back. Which
+model the network serves is now a decision, not a function of who is awake.
+
+**The founder's objection was the correct one:** *"every time a new PC is added we have to fix
+this again — that's terrible."* Right. `pin_layers.sh` being a MANUAL step was the defect, not
+the shapes it fixed.
+
+`router.canonical_assignment` is that script expressed server-side, applied from the health sweep
+whenever the chain is unroutable: stage 1 pinned to the driver's shard, at most
+`PIPELINE_STAGES` stages, every remaining machine replicating rather than deepening the pipeline.
+Stability is deliberate — whoever already holds stage 1 keeps it (moving the driver breaks chat
+even when the chain looks legal), and everyone else is ordered by current `layer_start` so as few
+slices move as possible. A routable chain is never touched, and a second pass is a no-op.
+
+**It is only safe because placement ownership shipped first.** Before [P32], a re-registering node
+would overwrite whatever the repair decided, and the sweep would have fought the roster every 60
+seconds instead of fixing it. That is why the watch shipped as detection-only in the morning and
+can repair by evening.
+
+**A blind spot in my own check, found in production.** `chain_shape` counted stages and coverage
+but never verified stage 1's WIDTH — so it reported `routable: true` for
+`[[0,16],[17,23],[24,27]]`: three stages, 28/28 covered, and refused by every driver.
+`DRIVER_STAGE1_LAYERS` now makes that explicit and `stage1_ok` is reported separately, because it
+is a different failure with a different remedy.
+
+**Proven live rather than asserted:** the chain was deliberately pushed back into
+`[[0,16],[17,23],[24,27]]` and left alone. `[repair] chain was unroutable — reassigned 4 node(s)
+to [[0, 9], [10, 18], [19, 27]] (3 stage(s), routable=True)` — **under 15 seconds, no human.**
+
+`coordinator/test_auto_repair.py` **9/9** (new), `test_routability.py` 14 → 16.
+**Suite: 75 modules green, 0 failures.**
+
+### Half thirteen — the coordinator forgot which model it served, and "go restart it" is not a fix
+
+Chat failed with `socket closed mid-message`, four retries, `RuntimeError`. The node log gave it
+away: `agent-bhpc012104` was serving **Qwen2.5-7B layers 24-27** while the coordinator believed
+the network ran 1.5B.
+
+**Cause, and it was mine to trigger.** The 7B migration cut over at 07:06 UTC. I restarted the
+coordinator minutes later to disable auto-promotion — and `_serving` lived **only** in a
+module-level dict initialised to the config floor. It came back believing 1.5B. Both Qwen2.5
+tiers have 28 layers, so every range validated, coverage read 28/28, and the routability check
+said healthy, while nodes fed each other activations from different models. **Every signal green,
+product broken** — the same shape as the morning's failure, one level deeper. Recorded as [P33].
+
+Fixed: a `settings` table, `set_serving_model` writes through, `_load_serving()` runs at startup
+**before** the health loop (the sweep assigns ranges against the serving model, so a coordinator
+that has not yet remembered which model it serves hands out ranges for the wrong one), and
+startup now logs what it restored. Auto-repair is gated on `migration.phase == "steady"` so it
+cannot rewrite ranges mid-cutover and strand half the network on each partition.
+
+**Then the founder asked the question that mattered: "the machine is 100 km away — do I have to
+go there?"** No, and telling him to restart four agents was a bad answer. A volunteer's PC is
+never reachable; "restart the agent" is not an instruction this product can give at any scale.
+
+The remote-reload machinery already existed and was proven — the migration handshake is how the
+network reached 7B that morning without anyone touching a machine. What was missing was any way
+to **aim** it. `POST /network/model` (operator) now pins the model and moves every node onto it:
+prepare, download, report ready, cut over together. `model_id: null` restores capacity-driven
+tiering.
+
+Ordering matters and is worth remembering: the coordinator must first be told the **truth** about
+what it serves. Pinning 1.5B while it wrongly believed it already served 1.5B was a no-op —
+`update()` only plans when target != serving. Setting serving to 7B (reality), then pinning 1.5B,
+produced a real migration.
+
+Used live to walk the network back from 7B to 1.5B **with no physical access to any machine**.
+
+**Also flagged in [P33]:** `canonical_assignment` splits evenly and never consults
+`balancer.max_layers_for`. Harmless on the 1.5B floor; on 7B it would have handed an 8 GB office
+PC ~8.4 GB of weights — the [P26] hazard, in code I wrote today. Must be memory-aware before any
+tier above the floor is served again.
+
+**The gap that made this unfixable remotely, still open:** a node never reports which model it is
+serving. Registration carries the layer range but no `model_id`, so the coordinator cannot
+detect the mismatch, repair it, or display it. Same class as [P32]'s placement drift, same remedy.
+
+**Suite: 75 modules green, 0 failures.**
+
+### Half fourteen — 0.25 tok/s, and the check that was running but checking nothing
+
+Chat came back at **0.25 tok/s**. The first diagnosis was a replica reporting 4150 ms/layer
+against 8-22 for its peers; `REPLICA_SLOWDOWN_LIMIT` now drops outliers before weighting, and
+`ms_per_layer` gained a TTL plus hourly re-measurement, because a figure taken once at startup
+while a machine thrashed was believed forever — and worse, a node excluded by the new guard
+never serves, so nothing could ever revise it. The guard would have made the stale reading a
+life sentence.
+
+**That was not the cause.** Real request records: 10 tokens in 15.7s, then 35.0s, then 37.0s —
+wild variance for identical work, plus requests completing with **zero tokens**. Not slowness;
+failure-and-retry, each retry re-prefilling the whole chain. Relay RTT measured 16 ms, so the
+Amsterdam hop was never the problem either.
+
+**The real finding: proof-of-compute was a one-time gate.** The verifier logged
+`5 node(s), 0 awaiting verification` on every sweep for hours — running perfectly, checking
+nothing, because every node had already passed once. Verification proved each node honest on the
+day it joined and never again.
+
+Turning on re-verification (one already-verified node per cycle, oldest first, passes at DEBUG)
+found two bad nodes within minutes:
+
+- **`node-c-pavilion`** — deterministic wrong answers, `max_err 33.79`, identical across
+  attempts. Wrong weights for its assigned range.
+- **`agent-bhpc012101`** — `socket closed mid-message` on every challenge: the exact error the
+  driver reports when a chat dies.
+
+The second exposed a further hole: "could not challenge" was inconclusive **forever**. Right for
+one hiccup, wrong as a permanent amnesty — a node on the wrong weights fails by *hanging up*, not
+by answering wrong, so it accumulated nothing and kept a perfect reputation while breaking every
+request it touched. `UNREACHABLE_STRIKES = 5` closes it, and fired live at 13:02.
+
+Also: the verifier could be **killed by its own success message** — `UnicodeEncodeError` on the
+`→` in the VERIFIED line via Windows cp1252. It had already died once. A monitor that dies on the
+shape of its own output is worse than no monitor.
+
+Recorded as [P35]. The point worth keeping: the network already had the mechanism to exclude a
+bad node automatically. It was never asked to run, so the only remedy left was deleting nodes by
+hand — which does not scale past machines you can name.
+
+**On speed, honestly.** 0.25 was contaminated by these two nodes. The clean figure while they
+were excluded was 0.64 tok/s, and even that is not the product's speed: `ui/app.py` routes any
+capable machine to its own CPU, measured this morning at **6.69 tok/s local**. Splitting a 1.5B
+model across three PCs buys a network hop and a bottleneck stage, which the code's own comment
+says outright. The pipeline exists for models a single machine cannot hold, and the lever there
+is **quantization** (fp32 → Q4 is ~3.5x less compute and ~4x less wire), which `SCALING.md:186`
+already sketches. Everything else is worth percent.
+
+**Suite: 75 modules green, 0 failures.**
+
+**Open:** run the pipeline quantized (the only multiple-sized speed win); node reports its
+`model_id` reaching agents (needs 0.20); deploy emission (built, tested, undeployed); close
+[P29]'s ownership gap; `/next` → `/`; cut 0.20; the GPU session.
+
+---
+
+## Session 57 (2026-08-11) — the flags were ours, and the check that could not pass
+
+Opened on a dashboard the founder pasted as the state of the network, and the objection that
+came with it: *these flagged PCs are your work, in the name of a fix.* That was correct, and
+three separate defects sat behind it.
+
+**First, a number nobody should have believed.** `agent-bhpc012101-18f1da` showed `ms/layer
+4146.6` beside peers at 8–20, and it was read as current evidence. `router.stage_ms` had aged
+that figure out hours earlier ([P34]) and was scoring the node at the default prior — but the
+node table and the node's own dashboard read the raw column with no age check. The operator page
+was the worse half: it told that volunteer *"4146.6 ms/layer measured"*, accusing their PC of
+being 500× slower than its peers with a number the coordinator itself had discarded. Freshness
+now has ONE definition, `router.ms_per_layer_fresh`, called by `stage_ms` and both dashboards.
+The table keeps the number and marks it `· stale`; the node's page omits it rather than accuse
+the hardware. A NULL `ms_per_layer_at` is legacy, **not** expired — reading it as stale would
+reset every pre-column node to the prior, network-wide. This is [P37]'s own lesson, a stale
+diagnostic field read as a live one, recurring in the surface a person actually looks at.
+
+**Second, the flags were manufactured, and the founder was right about it.** `RangeMismatch`
+already refuses to punish a node that *tells* us it holds something else — but [P37] explains why
+that is the minority path: asked for layers it never downloaded, a node raises on uninitialized
+meta tensors, `_handle` catches only three exception types, the thread dies and `conn.close()`
+slams the socket. So drift reaches the verifier as `socket closed mid-message` — the generic
+branch — where [P35]'s `UNREACHABLE_STRIKES` attests it as a real failure every five cycles.
+Two correct fixes composed into a machine that generated evidence against honest volunteers.
+Live proof: 1/18 → 1/22 in twenty minutes. `placement_drift` predicted all of this on 2026-08-10
+and was *"read by nothing"*; it is read by the verifier now, and while it is set neither failure
+path records anything. Asymmetric on purpose — passes are still recorded, because a pass proves
+the node holds the assigned range and the counters only ever grow.
+
+**Third, and it explains the other half of the table:** `82cbee` sat at 2/4, one pass from
+clearing its flag, never re-challenged. The rotation sorts by `last_checked` with a default of
+`0.0` and takes one node per cycle — and the unreachable path `continue`d without stamping. A
+node that never answers therefore parks itself at the front forever and starves everyone else.
+[P35] put flagged nodes on that rotation precisely so they could recover; an unstamped failure
+silently denied it.
+
+### The fix that nearly flagged the driver
+
+With the verifier restarted, a new line appeared every sweep: `agent-optinovate-6ff49d:
+PLACEMENT MISMATCH — node's actual range (None, 10) does not match the expected (0, 10)`. The
+driver. 26/26. `_check_range` tolerates an agent too old to report what it holds; the middle
+probe compared the whole tuple for equality instead, and the driver acks `s2` while omitting
+`s1`. So proof-of-compute had quietly stopped checking the most important node on the network,
+landing in the *"nothing recorded"* branch where it looked harmless — [P35]'s disease returning
+through its own cure. **A check that cannot pass is not a strict check, it is a dead one.**
+
+Fixed by comparing only what the node actually claims. That unblocked a path which had **never
+once executed** — and pointed it at the driver, which came back `max_err 28.6, strike 1 of 3`.
+The verifier was stopped at strike 1. Three would have attested a failure against the only
+machine holding stage 1, and a flagged driver is not a degraded network, it is no network at all.
+
+The cause is a real incompatibility: `make_middle_challenge` computes `layers[s1:s2]` on a raw
+hidden state with no embedding, while a first-stage node embeds token ids first. `28.6` carries
+[P37]'s signature — the right answer to a different question — but that is a hypothesis, and a
+guess is not grounds for scoring somebody's machine. Stage-1 nodes are now skipped and **said**
+to be skipped, once per process at WARNING: *"Proof-of-compute does not currently cover the
+driver."* Deliberately the inverse of [P31]. A node that is stage 1 *and* last stage still goes
+down the fully-verified path.
+
+### The probe, and why it settled nothing about 18f1da
+
+Every online node answers `{"ok": true, "s2": <the value we asked for>}` — no `s1`, no `holds`.
+`18f1da` cheerfully acked `s1=19, s2=28` and then hung up mid-`act`, which proves it does *not*
+hold 19–27. On 0.19 the ack **echoes the request**, so it is not a claim about anything. Its
+`reported_layer_*` of `10-13` remains a stale registration field, and re-pinning placement on a
+stale field is how this started — so nothing was re-pinned. `holds` (0.20) is the answer.
+
+### Results, measured live
+
+| | before | after |
+|---|---|---|
+| `18f1da` | 1/18 → 1/22, climbing | **1/23, frozen** — no further false failures |
+| `82cbee` | 2/4, never re-checked | **12/14**, recovered to `verified` unaided |
+| `node-c-pavilion` | 243/245 | 252/254, checked every rotation |
+| driver | silently unverified | unverified **and says so** |
+
+Network `routable: true`, 2 stages, throughout. **Suite: 69 modules green, 0 failures**, up from
+67 — `coordinator/test_stale_speed_display.py` (13) and `test_drift_is_not_evidence.py` (9), plus
+7 cases in `security/test_proof_of_compute.py`, whose header had recorded this protocol as
+manually-verified-only. The ack comparison is pure logic and needs no weights, which is exactly
+why it went unpinned long enough to break.
+
+One test written this session was thrown away and rewritten: it asserted `... or True`, which
+passes forever and checks nothing — the same failure [P35] logged about the verifier itself.
+
+### Shipped — and the regression that came with it
+
+Everything from sessions 56+ went to the live coordinator: emission, auto-repair, serving-model
+persistence, `POST /network/model`, plus the day's four fixes. DB backed up each time, auth gates
+re-verified at 401, `/status` OK. `/agent/version` still reads 0.19.0 — the version is pinned by
+the VM's environment, so the bump did not leak out and nothing auto-updates until a hash is
+published deliberately.
+
+**Then chat fell to 0.05 tok/s, and it was mine.** `DEFAULT_MS_PER_LAYER` is 40.0, and the
+`ms_per_layer` TTL reached the live coordinator for the first time in this deploy. It scored
+`node-c-pavilion` — 4 cores, 99% reliable, measured at **11.0** — at the 40.0 prior because its
+reading was 12.9 h old, while the 8 GB `82cbee` kept its fresher **20.4**. That inverts the
+preference between them: `fastest_pick` moved traffic off the reliable machine and onto the box
+whose hardware twin now measures 5308 ms/layer. **20 seconds per token.**
+
+The TTL's justification ([P34]: an outlier is excluded, so it never serves, so nothing revises
+it) rests on `agent.remeasure_loop` — which ships in **0.20**. Enabling its consumer on a 0.19
+fleet means expiry has no second measurement to fall back to: it does not age a bad number back
+in, it throws a good one away and substitutes a guess. Routing now uses the measurement whatever
+its age; only the public display treats an old figure as unknown. Recovery measured live:
+**0.05 → 0.9 tok/s**, against 0.64 as the last clean distributed figure.
+
+Two tests failed on that revert, both asserting the old rule, and both were right to fail. They
+now state the new one — including a case reproducing the exact inversion, that `11.0 stale` must
+still beat `20.4 fresh`. Revisit when 0.20 is on every node.
+
+**The lesson worth keeping:** the TTL was correct, tested, and reviewed. What made it a
+regression was a dependency nobody wrote down — it is a **0.20 feature's consumer**, shipped to a
+0.19 network. "Tested" says nothing about which fleet the assumptions hold on.
+
+### Also fixed: an age that measured the wrong thing
+
+`ms_per_layer_at` records the last REGISTRATION, not the last measurement, and the agent re-sends
+its cached figure every time — so a node re-asserting a stale number restamped it as current. The
+upsert now restamps only when the value actually CHANGES. A re-assertion is not a measurement:
+the same shape as [P32], where a node re-states something stale and the coordinator records it as
+new. (An earlier claim of mine that this made the TTL universally dead was wrong, and is
+corrected in [P34]: the driver's figure was 25.0 h old and pavilion's 12.9 h, so expiry did work
+— for nodes that go long enough without re-registering.)
+
+### Not verified
+
+`28.6` is diagnosed by reading the code, not by building a stage-1 challenge and watching it
+pass. Until that exists the driver is uncovered. And every fix above is verifier-side and
+coordinator-side; the node half has never run on a node.
+
+**Emission is now live and has never been watched.** It settles slots on every health sweep and
+writes to the ledger. No `[emission] sweep failed` appeared during the deploys, which is not the
+same as confirming the NRN it distributes is correct.
+
+**0.9 tok/s is one measurement of one prompt.** [P34]'s best-path estimate was 2.6; the gap is
+that stage 2 runs on 8 GB machines, one of which now self-measures 5308 ms/layer.
+
 ## Known limits / next steps
 - **Throughput scales with nodes (single 3.2 → 2-node 4.6 → 3-node 6.2 tok/s), but
   sub-linearly** because the nodes are heterogeneous and node_a carries the fixed

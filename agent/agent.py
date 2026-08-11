@@ -163,6 +163,11 @@ except BaseException:
 
 RETRY_SECONDS = 60
 PING_SECONDS = 30
+# How often the node re-times its own segment. Comfortably inside the coordinator's
+# MS_PER_LAYER_TTL_S (6 h) so a healthy node's figure never ages out and falls back to the
+# default prior — the TTL is there to release a node from a BAD reading, not to forget a good
+# one. Long enough that the benchmark itself is not a meaningful load on a volunteer's machine.
+REMEASURE_INTERVAL_S = 3600
 MIGRATION_POLL_SECONDS = 20
 # How long to wait for the node server to actually bind before treating setup as failed.
 # A bind either works immediately or fails immediately; the only slow case is a previous
@@ -194,6 +199,13 @@ DEFAULT_CONFIG = {
     # layers_pinned: set only by --layers. Left false, a probationary node may be re-placed by
     # the coordinator when its slice turns out to duplicate someone else's.
     "layer_start": None, "layer_end": None, "layers_pinned": False,
+    # The UTC hours this machine is usually left running, e.g. "0,1,2,3,4,5,6". A DECLARATION,
+    # never a promise: the coordinator plans coverage against it and pays for hours actually
+    # attended, and nothing is penalised for missing one. Penalising it would be aimed squarely
+    # at phones, whose availability follows a charger rather than a decision -- and the fastest
+    # way to have an app uninstalled is to fine someone for their charging habits.
+    # None means "not stated"; the node still earns for whatever it does attend.
+    "declared_slots": None,
     "slice_dir": "./model_slice/",
     # "balanced" donates while you work (yielding above 50% CPU, AC only) rather than only
     # when the machine is idle. A node that only ever runs when nobody is at the keyboard
@@ -520,6 +532,13 @@ class Agent:
         ms = self.measure_ms_per_layer(info["layer_start"], info["layer_end"])
         if ms is None:
             return
+        prev = self.cfg.get("ms_per_layer")
+        if prev and ms > 0 and (max(prev, ms) / min(prev, ms)) > 2.0:
+            # Worth saying out loud. A figure that moves by more than 2x between measurements is
+            # either a machine whose load changed a lot or a reading taken under contention --
+            # and the coordinator sizes stages and picks replicas from it, so a silent swing is
+            # a silent routing change.
+            log.info("ms/layer changed materially: %.3f -> %.3f", prev, ms)
         self.cfg["ms_per_layer"] = ms
         self._save()
         log.info("measured %.3f ms/layer over layers %d-%d", ms,
@@ -568,6 +587,18 @@ class Agent:
             "port": self.cfg.get("port", 50999),
             "layer_start": self.cfg["layer_start"],
             "layer_end": self.cfg["layer_end"],
+            # The model this node is ACTUALLY serving, so a coordinator/node divergence is
+            # detectable at all. Without it, both 28-layer Qwen2.5 tiers validate identically:
+            # on 2026-08-10 the coordinator believed 1.5B while nodes ran 7B, every range and
+            # coverage check passed, and the only symptom was the driver seeing a socket close
+            # mid-message. Reported, never obeyed -- placement stays the coordinator's ([P33]).
+            "model_id": self.cfg.get("model_id"),
+            # Availability declaration (TOKENOMICS.md §11.4 emission). Sent only when the owner
+            # has stated one -- an unset value must stay unset rather than becoming a guess the
+            # coordinator then plans coverage around. On Android this should be DERIVED from
+            # observed charge/plug history rather than asked for, since the phone already knows
+            # when it is usually on a charger and its owner does not think in UTC hours.
+            "declared_slots": self.cfg.get("declared_slots"),
             "cores": os.cpu_count(),
             "ram_gb": int(psutil.virtual_memory().total // 10**9),
             # With cores/ram_gb this is the coarse hardware signature the coordinator groups
@@ -866,10 +897,31 @@ class Agent:
             # coordinator hands you whichever gap needs filling, not the range you had.
             have = self.slice_layers_on_disk(weights)
             want = (info["layer_start"], info["layer_end"])
-            if have == want:
+            # WHICH MODEL is this slice for? Layer numbers do not answer that. Two tiers with
+            # the same layer count (Qwen2.5 1.5B and 7B both have 28) produce slices that are
+            # indistinguishable by range -- so when a migration reassigned a node to the SAME
+            # range on a different model, this said "already present, skipping download" and the
+            # node served the old model's weights as the new one. Live 2026-08-10: three of four
+            # nodes came out of a 7B -> 1.5B migration holding 7B weights, answered every request
+            # with token soup, and were BILLED for it. Nothing downstream could tell, because
+            # every check downstream was about layer numbers too.
+            #
+            # An unrecorded slice (downloaded before the marker existed) is treated as a
+            # mismatch: provenance we cannot establish is exactly the case that produced this,
+            # and one re-download is cheap against serving a corrupted stage.
+            on_disk_model = slice_downloader.slice_provenance(slice_dir)
+            wrong_model = on_disk_model != info["model_id"]
+            if wrong_model:
+                log.warning("cached slice is for %s but this node serves %s — discarding it. "
+                            "Layer ranges cannot tell two models apart, so this is checked "
+                            "explicitly.", on_disk_model or "an unrecorded model",
+                            info["model_id"])
+                shutil.rmtree(slice_dir, ignore_errors=True)
+                have = None          # nothing on disk now; go straight to the download below
+            elif have == want:
                 log.info("slice already present (%s) — skipping download", slice_dir)
                 return slice_dir
-            if have and self._slice_covers(weights, have, want, info):
+            if not wrong_model and have and self._slice_covers(weights, have, want, info):
                 # A slice that CONTAINS the assigned range is as good as an exact one, and
                 # re-downloading it is pure waste. `load_slice_model` builds a full model
                 # skeleton and fills in whatever the file holds (strict=False), and this node
@@ -882,10 +934,11 @@ class Agent:
                 log.info("cached slice holds layers %d-%d, which covers this node's %d-%d — "
                          "reusing it, no download needed", have[0], have[1], want[0], want[1])
                 return slice_dir
-            log.warning("cached slice holds layers %s but this node serves %d-%d — "
-                        "discarding it and downloading the right one",
-                        f"{have[0]}-{have[1]}" if have else "an unreadable range",
-                        want[0], want[1])
+            if not wrong_model:
+                log.warning("cached slice holds layers %s but this node serves %d-%d — "
+                            "discarding it and downloading the right one",
+                            f"{have[0]}-{have[1]}" if have else "an unreadable range",
+                            want[0], want[1])
             shutil.rmtree(slice_dir, ignore_errors=True)
         self.state["status"] = "downloading"
         log.info("downloading slice: layers %d-%d (~%.2f GB) ...",
@@ -919,6 +972,31 @@ class Agent:
                 self.state.update(node_id=self.cfg["node_id"],
                                   layers=[info["layer_start"], info["layer_end"]])
                 self.cfg["model_id"] = info["model_id"]      # what we're actually serving now
+                # ...and the RANGE we are actually serving, for exactly the same reason.
+                #
+                # The coordinator owns placement (PROBLEMS.md [P32]). This node already SERVES
+                # whatever slice-info returns; what it did NOT do was remember it, so config.json
+                # kept a stale range and re-asserted it on the next registration -- silently
+                # undoing `neuron fix` and collapsing the chain to one stage. Persisting it here
+                # makes config a CACHE of the coordinator's answer rather than a rival opinion.
+                assigned = (info["layer_start"], info["layer_end"])
+                current = (self.cfg.get("layer_start"), self.cfg.get("layer_end"))
+                if current != assigned and current != (None, None):
+                    if self.cfg.get("layers_pinned"):
+                        # An override that silently does nothing is the same bug with a manual
+                        # trigger, and worse -- someone chose this deliberately and would read a
+                        # quiet startup as confirmation. [P31] is exactly that mistake.
+                        log.warning(
+                            "--layers asked for %s-%s, but the coordinator assigns this node "
+                            "%d-%d and placement is the coordinator's to decide. Serving %d-%d. "
+                            "To change it for real, move it coordinator-side "
+                            "(./coordinator/pin_layers.sh), not with --layers here.",
+                            current[0], current[1], assigned[0], assigned[1],
+                            assigned[0], assigned[1])
+                    else:
+                        log.info("layer range updated by the coordinator: %s-%s -> %d-%d",
+                                 current[0], current[1], assigned[0], assigned[1])
+                self.cfg["layer_start"], self.cfg["layer_end"] = assigned
                 self._save()
                 slice_dir = self.ensure_slice(info)
                 port = self.cfg.get("port", 50999)
@@ -1365,9 +1443,37 @@ class Agent:
         updater.update_loop(self.base, stop=self._stop, busy=self._serving_now,
                             enabled=self.cfg.get("auto_update", True))
 
+    def remeasure_loop(self):
+        """Re-time this node's own segment periodically and report it.
+
+        The measurement used to be taken exactly once, at startup, and believed forever. One
+        taken while the machine was thrashing -- during a slice download, a migration, or simply
+        with the owner compiling something -- became permanent, and the coordinator sizes stages
+        and picks replicas from it. Live 2026-08-10: 4150 ms/layer against 8-22 for its peers,
+        answers at 0.24 tok/s, and no path back because a node excluded from routing never gets
+        traffic that could revise it (PROBLEMS.md [P34]).
+
+        Skipped while paused or while the guard is holding this node back: timing a segment on a
+        machine that is deliberately not serving measures the pause, not the node.
+        """
+        while not self._stop.wait(REMEASURE_INTERVAL_S):
+            try:
+                if self.user_paused.is_set() or self.server is None:
+                    continue
+                info = {"layer_start": self.cfg.get("layer_start"),
+                        "layer_end": self.cfg.get("layer_end")}
+                if info["layer_start"] is None or info["layer_end"] is None:
+                    continue
+                self.report_speed(info)
+            except Exception as e:
+                # Never take the agent down for a benchmark. A stale figure is a routing
+                # nuisance; a dead node is an outage.
+                log.debug("re-measure failed, keeping the previous figure: %s", e)
+
     def run(self):
         self.setup()
         self.bind_payout_address()
+        threading.Thread(target=self.remeasure_loop, daemon=True).start()
         threading.Thread(target=self.update_loop, daemon=True).start()
         threading.Thread(target=self.migration_loop, daemon=True).start()
         threading.Thread(target=self.peer_verify_loop, daemon=True).start()

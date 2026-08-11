@@ -157,6 +157,24 @@ def check_network(base, rep):
         rep.add(OK, "spare capacity for failover", f"{eligible} eligible nodes")
 
     # 5. Coverage without a serving tier is still not serving.
+    # Routability, reported separately from coverage because they fail independently and only
+    # one of them is visible anywhere else. A roster can cover every layer and still walk to a
+    # 1-stage chain, which no driver accepts -- and until 2026-08-09 that state reported
+    # `network_healthy: true` while every chat failed. PROBLEMS.md [P32].
+    if net.get("routable") is False:
+        stages = net.get("stages")
+        if net.get("uncovered_layers"):
+            rep.add(BAD, "chain is routable", f"chain stops at a gap after {stages} stage(s)",
+                    "fill the uncovered layers above; the chain cannot be walked past them")
+        else:
+            rep.add(BAD, "chain is routable",
+                    f"every layer is covered, but the chain walks to {stages} stage(s)",
+                    "a node holding a range that spans another node's wins the chain walk and "
+                    "swallows it. Re-split: ./coordinator/pin_layers.sh --driver <this machine>")
+    elif net.get("routable") is True:
+        rep.add(OK, "chain is routable",
+                f"{net.get('stages')} stage(s) {net.get('chain_ranges')}")
+
     healthy = net.get("network_healthy")
     if healthy is False:
         rep.add(BAD, "coordinator reports healthy", "network_healthy = false",

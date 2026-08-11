@@ -30,8 +30,15 @@ def check(label, cond):
         print(f"  FAIL  {label}")
 
 
-def _fake_slice(path, lo, hi, embed=True, norm=True, tokenizer=True):
-    """A minimal safetensors file: 8-byte LE header length, then the JSON header."""
+def _fake_slice(path, lo, hi, embed=True, norm=True, tokenizer=True, model_id="m"):
+    """A minimal safetensors file: 8-byte LE header length, then the JSON header.
+
+    Writes the provenance marker too, because a real `download_slice` does. Reuse now requires
+    knowing WHICH MODEL a slice is for -- layer numbers cannot say, and comparing only layer
+    numbers is what let a node serve 7B weights as 1.5B after a migration ([P36]). A fixture
+    that omitted the marker would be testing a slice no download ever produces.
+    `model_id=None` simulates a slice downloaded before the marker existed.
+    """
     header = {f"model.layers.{i}.self_attn.q_proj.weight":
               {"dtype": "F32", "shape": [2, 2], "data_offsets": [0, 16]}
               for i in range(lo, hi + 1)}
@@ -48,6 +55,9 @@ def _fake_slice(path, lo, hi, embed=True, norm=True, tokenizer=True):
         f.write(b"\0" * 16)
     if tokenizer:
         open(os.path.join(os.path.dirname(path), "tokenizer.json"), "w").write("{}")
+    if model_id is not None:
+        with open(os.path.join(os.path.dirname(path), "neuron_slice.json"), "w") as f:
+            json.dump({"model_id": model_id, "layer_start": lo, "layer_end": hi}, f)
 
 
 def main():
