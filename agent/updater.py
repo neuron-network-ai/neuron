@@ -40,7 +40,7 @@ import time
 
 import requests
 
-LOCAL_VERSION = "0.20.1"          # bump together with packaging/neuron.iss
+LOCAL_VERSION = "0.20.2"          # bump together with packaging/neuron.iss
 CHECK_SECONDS = 24 * 3600
 DOWNLOAD_TIMEOUT = 600
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -228,7 +228,7 @@ def check_once(base, busy=None, dest_dir=None, exit_after=True):
 
 
 def update_loop(base, stop=None, busy=None, interval=CHECK_SECONDS, initial_delay=60,
-                enabled=True):
+                enabled=True, on_result=None):
     """Check shortly after startup, then every `interval` seconds.
 
     The initial delay lets registration, the slice download and the node server settle; an
@@ -257,9 +257,20 @@ def update_loop(base, stop=None, busy=None, interval=CHECK_SECONDS, initial_dela
         time.sleep(initial_delay)
     while True:
         try:
-            check_once(base, busy=busy)
+            verdict = check_once(base, busy=busy)
         except Exception as e:                                  # noqa: BLE001
             log.warning("update check failed (%s: %s)", e.__class__.__name__, e)
+            verdict = f"error:{e.__class__.__name__}"
+        # The verdict is the ONLY evidence of why a node is not on the published version, and
+        # until 0.20.2 it existed nowhere but this machine's log. `download-failed` on a PC
+        # behind a NAT was invisible -- including when it is a ROLLBACK that failed, which is
+        # the moment it matters most. Reported, never acted on: the caller decides what to do
+        # with it, and a broken callback must not stop the loop that keeps a node current.
+        if on_result is not None:
+            try:
+                on_result(verdict)
+            except Exception:                                   # noqa: BLE001
+                log.debug("update-result callback failed; the check itself was unaffected")
         if stop is not None:
             if stop.wait(interval):
                 return

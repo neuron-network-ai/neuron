@@ -121,7 +121,7 @@ REPLICA_SLOWDOWN_LIMIT = float(os.environ.get("NEURON_REPLICA_SLOWDOWN_LIMIT", "
 # is already treated.
 MS_PER_LAYER_TTL_S = float(os.environ.get("NEURON_MS_PER_LAYER_TTL_S", "21600"))
 
-AGENT_VERSION = os.environ.get("NEURON_AGENT_VERSION", "0.20.1")
+AGENT_VERSION = os.environ.get("NEURON_AGENT_VERSION", "0.20.2")
 # Where a node fetches that version, and the hash it must match before anything is run.
 # The download is NOT served from here: this VM has 1 GB of RAM and the installer is ~200 MB,
 # so the coordinator only advertises metadata and GitHub Releases does the bandwidth.

@@ -64,6 +64,29 @@ those, section 3.
 
 ---
 
+### Confirming a rollback actually took
+
+From 0.20.2 a node reports the build it is running, whether auto-update is on, and the verdict of
+its last check. Before that the recovery above fired blind — you flipped the switch and the only
+evidence was behaviour changing.
+
+```bash
+curl -s -H "X-Register-Secret: $NEURON_REGISTER_SECRET" \
+  https://neuronnet.duckdns.org/node/list \
+  | python -c "import json,sys; [print(f\"{n['node_id']:32} {n.get('agent_version') or 'unreported':10} auto={n.get('auto_update')} last={n.get('update_check')}\") for n in json.load(sys.stdin)['nodes']]"
+```
+
+The public dashboard states the same thing in aggregate (*"3 of 4 online node(s) on the latest
+agent"*), and each operator sees their own node's version on their private page.
+
+**A node still on the old build is one of three things, and it takes all three fields to tell
+them apart:** it has not made its daily check yet (fixes itself), `auto_update` is off (needs the
+operator), or its download is failing (`update_check` says so). `agent_version: null` means an
+agent older than 0.20.2 — **not** "up to date".
+
+**Allow up to 24 h before concluding a rollback failed.** `CHECK_SECONDS` is 86400 and a node
+defers while serving.
+
 ## 2. Publishing a release (and the two ways it silently does nothing)
 
 1. Bump all three, which must agree: `agent/updater.py:LOCAL_VERSION`,

@@ -60,6 +60,13 @@ class RegisterBody(BaseModel):
     gpu_name: str | None = None         # e.g. "NVIDIA GeForce RTX 4070". Operator-only in
                                         # /node/list — a card model is fingerprinting detail,
                                         # like `platform`.
+    # Why a node is not on the version we published (0.20.2). Nothing reported the running build
+    # before this, so a rollout could not be watched and a ROLLBACK could not be confirmed — the
+    # recovery path added the same day fired blind. All three are optional and NULL means "an
+    # agent too old to say", never "up to date".
+    agent_version: str | None = None    # updater.LOCAL_VERSION of the running build
+    auto_update: bool | None = None     # False here explains a node that never moves by itself
+    update_check: str | None = None     # last check verdict: current / download-failed / …
     model_id: str | None = None         # the model this node is ACTUALLY serving. Reported so
                                         # a coordinator/node divergence is detectable at all --
                                         # without it, both 28-layer tiers validate identically
@@ -523,7 +530,9 @@ def register(body: RegisterBody, x_register_secret: str = Header(default=None),
         body.layer_end, body.cores, body.ram_gb, token,
         ms_per_layer=body.ms_per_layer, head_ms=body.head_ms, trusted=trusted,
         platform=body.platform, has_gpu=body.has_gpu, gpu_vram_gb=vram,
-        gpu_name=body.gpu_name)
+        gpu_name=body.gpu_name,
+        agent_version=body.agent_version, auto_update=body.auto_update,
+        update_check=body.update_check)
     if body.declared_slots is not None:
         models.set_declared_slots(body.node_id, body.declared_slots)
     if body.model_id:
@@ -1744,6 +1753,28 @@ def dashboard():
     # serving -- which is the design doing its job, not a warning. Naming the machine answers a
     # question nobody asked and reads as an accusation against a volunteer who, on the evidence
     # of [P37], may well be innocent.
+    # ROLLOUT VISIBILITY, in aggregate. Per-node versions stay off the public page for the same
+    # reason standing does -- but "is this network patched" is a fair question for a visitor, and
+    # until 0.20.2 nobody could answer it at all, including the operator. `unknown` is its own
+    # bucket rather than being folded into "old": an agent too old to report its version is not
+    # the same as one known to be behind, and merging them would invent certainty.
+    online_nodes = [n for n in nodes if n["status"] == "online"]
+    on_latest = sum(1 for n in online_nodes if n.get("agent_version") == config.AGENT_VERSION)
+    unknown_ver = sum(1 for n in online_nodes if not n.get("agent_version"))
+    version_line = ""
+    if online_nodes:
+        parts = [f"<b>{on_latest} of {len(online_nodes)}</b> online node(s) on the latest agent "
+                 f"(v{config.AGENT_VERSION})"]
+        if unknown_ver:
+            parts.append(f"{unknown_ver} running a build too old to report its version")
+        stuck = [n for n in online_nodes
+                 if n.get("auto_update") == 0 and n.get("agent_version") != config.AGENT_VERSION]
+        if stuck:
+            parts.append(f"{len(stuck)} with auto-update switched off, so they will not move on "
+                         f"their own")
+        version_line = (f"<p class='callout'>{' · '.join(parts)}. Nodes check once a day and "
+                        f"never mid-request, so a rollout takes up to 24 hours.</p>")
+
     excluded = network["flagged_nodes"]
     excluded_line = ""
     if excluded:
@@ -1808,7 +1839,10 @@ def dashboard():
     body = f"""
 <h1>Live network</h1>
 <div class="sub">Network of Existing Utilised Resources — open nodes ·
-  serving <b>{serv['model_id']}</b> · agent v{config.AGENT_VERSION} · auto-refresh 5s</div>
+  serving <b>{serv['model_id']}</b> · <span title="the agent release this network offers for
+  download. Nodes update on their own daily check, so some may still be on an older build —
+  the coordinator is not told which version a node runs.">latest agent v{config.AGENT_VERSION}</span>
+   · auto-refresh 5s</div>
 {theme.banner(healthy, banner_text)}
 <div class="stats">
   <div class="stat"><div class="n">{serv_name}</div><div class="l">serving now</div></div>
@@ -1844,6 +1878,7 @@ def dashboard():
 </table></div></div>
 {waiting_line}
 {excluded_line}
+{version_line}
 
 <div class="note">
   <strong>What is not on this page.</strong> Earnings, node addresses, and each node's standing
@@ -1889,6 +1924,28 @@ def node_dashboard(node_id: str, token: str = None,
     # machine thrashed, kept past its TTL, tells an honest volunteer their PC is 500x slower
     # than its peers -- an accusation the coordinator itself has already stopped believing.
     ms = router.ms_per_layer_fresh(node)
+    # THE OPERATOR'S OWN PAGE KEEPS THE DETAIL THE PUBLIC ONE AGGREGATES. This is the person who
+    # can actually act on it: if their node is behind, they are the only one who can switch
+    # auto-update back on or run the installer by hand.
+    av = node.get("agent_version")
+    latest = config.AGENT_VERSION
+    if not av:
+        ver_txt = ("<span class='dash'>not reported</span> <span style='color:#6b7280'>"
+                   "(a build older than 0.20.2 does not say)</span>")
+    elif av == latest:
+        ver_txt = f"v{av} <span style='color:#6b7280'>(current)</span>"
+    else:
+        ver_txt = (f"v{av} <span style='color:#b45309'>— v{latest} is available</span>")
+    bits = [ver_txt]
+    if node.get("auto_update") == 0:
+        bits.append("<span style='color:#b45309'>auto-update is OFF, so this node will not "
+                    "update itself</span>")
+    elif av and av != latest:
+        bits.append("nodes check once a day and never mid-request")
+    chk, chk_at = node.get("update_check"), node.get("update_checked_at")
+    if chk and chk not in ("current",):
+        bits.append(f"last check: <b>{chk}</b>{f' ({_ago(chk_at)})' if chk_at else ''}")
+    version_row = f"<tr><td class=\"key\">agent</td><td>{' · '.join(bits)}</td></tr>"
     # What this node's standing actually MEANS for it, rather than a bare word. A probationary
     # operator's real question is "why is my balance not moving?" ([P24]).
     if st == "probationary":
@@ -1929,6 +1986,7 @@ def node_dashboard(node_id: str, token: str = None,
   <tr><td class="key">hardware</td><td>{node.get('cores', '-')} cores ·
       {node.get('ram_gb', '-')} GB RAM{f" · {ms:.1f} ms/layer measured" if isinstance(ms, (int, float)) else ""}</td></tr>
   {gpu_row}
+  {version_row}
   <tr><td class="key">proof-of-compute</td><td>{f'{rep:.0%}' if rep is not None else 'no challenges yet'}
       (passed {node.get('challenges_passed', 0)} / failed {node.get('challenges_failed', 0)})</td></tr>
   <tr><td class="key">payout address</td><td>{payout_html}</td></tr>

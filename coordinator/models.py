@@ -226,6 +226,24 @@ def init_db():
             c.execute("ALTER TABLE nodes ADD COLUMN ms_per_layer_at REAL")
             c.execute("UPDATE nodes SET ms_per_layer_at=? WHERE ms_per_layer IS NOT NULL",
                       (time.time(),))
+        # WHY A NODE IS NOT ON THE VERSION YOU PUBLISHED. Until 0.20.2 the coordinator was told
+        # nothing about the build a node runs: the version string existed only in the first line
+        # of that machine's own log, which for a PC behind a NAT in somebody's house nobody can
+        # read. So a rollout could not be watched, and -- the sharp one -- a ROLLBACK could not be
+        # confirmed. The remedy built on 2026-08-11 fired blind.
+        #
+        # Three fields, one question. A node still on an old build is either (a) yet to make its
+        # daily check, (b) running with auto_update off, or (c) failing the download. Those are
+        # indistinguishable without all three, and only (a) fixes itself.
+        # NULL everywhere means an agent too old to report -- never "up to date".
+        if "agent_version" not in cols:
+            c.execute("ALTER TABLE nodes ADD COLUMN agent_version TEXT")
+        if "auto_update" not in cols:
+            c.execute("ALTER TABLE nodes ADD COLUMN auto_update INTEGER")
+        if "update_check" not in cols:
+            c.execute("ALTER TABLE nodes ADD COLUMN update_check TEXT")
+        if "update_checked_at" not in cols:
+            c.execute("ALTER TABLE nodes ADD COLUMN update_checked_at REAL")
         if "trusted" not in cols:                                # S12 (open join)
             c.execute("ALTER TABLE nodes ADD COLUMN trusted INTEGER NOT NULL DEFAULT 0")
             # every pre-open-join node registered under the shared secret -> grandfather
@@ -432,7 +450,8 @@ def hardware_fingerprint(cores, ram_gb, platform):
 
 def register_node(node_id, tailscale_ip, port, layer_start, layer_end, cores,
                   ram_gb, token, ms_per_layer=None, head_ms=None, trusted=False,
-                  platform=None, has_gpu=False, gpu_vram_gb=None, gpu_name=None):
+                  platform=None, has_gpu=False, gpu_vram_gb=None, gpu_name=None,
+                  agent_version=None, auto_update=None, update_check=None):
     now = time.time()
     # GPU fields are deliberately NOT folded into hardware_fingerprint. Changing the
     # fingerprint format would give every existing node a new signature, so nothing would
@@ -445,8 +464,9 @@ def register_node(node_id, tailscale_ip, port, layer_start, layer_end, cores,
                                   cores, ram_gb, ms_per_layer, head_ms, trusted, node_token,
                                   platform, hw_fingerprint, has_gpu, gpu_vram_gb, gpu_name,
                                   reported_layer_start, reported_layer_end, ms_per_layer_at,
+                                  agent_version, auto_update, update_check, update_checked_at,
                                   status, last_seen, registered_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'online', ?, ?)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'online', ?, ?)
                ON CONFLICT(node_id) DO UPDATE SET
                    tailscale_ip=excluded.tailscale_ip, port=excluded.port,
                    -- layer_start/layer_end are DELIBERATELY NOT UPDATED HERE. The coordinator
@@ -496,6 +516,17 @@ def register_node(node_id, tailscale_ip, port, layer_start, layer_end, cores,
                        THEN COALESCE(excluded.gpu_vram_gb, nodes.gpu_vram_gb) END,
                    gpu_name=CASE WHEN excluded.has_gpu
                        THEN COALESCE(excluded.gpu_name, nodes.gpu_name) END,
+                   -- COALESCEd, so an agent too old to report these never ERASES what a newer
+                   -- build already told us. That matters most for the one case this exists to
+                   -- watch: a node rolled BACK to a pre-0.20.2 build stops reporting, and the
+                   -- last known version is better evidence than a sudden NULL. `update_checked_at`
+                   -- follows `update_check` so the verdict always carries its own age -- a stale
+                   -- "current" read as live is [P34] and [P37]'s mistake a third time.
+                   agent_version=COALESCE(excluded.agent_version, nodes.agent_version),
+                   auto_update=COALESCE(excluded.auto_update, nodes.auto_update),
+                   update_check=COALESCE(excluded.update_check, nodes.update_check),
+                   update_checked_at=CASE WHEN excluded.update_check IS NOT NULL
+                       THEN excluded.update_checked_at ELSE nodes.update_checked_at END,
                    trusted=excluded.trusted,
                    node_token=excluded.node_token, status='online', last_seen=excluded.last_seen""",
             (node_id, tailscale_ip, port, layer_start, layer_end, cores, ram_gb,
@@ -503,6 +534,10 @@ def register_node(node_id, tailscale_ip, port, layer_start, layer_end, cores,
              1 if has_gpu else 0, gpu_vram_gb, gpu_name,
              layer_start, layer_end,      # reported_* -- what the node CLAIMS it holds
              (now if ms_per_layer is not None else None),
+             agent_version,
+             (None if auto_update is None else (1 if auto_update else 0)),
+             update_check,
+             (now if update_check is not None else None),
              now, now),
         )
         c.execute("INSERT OR IGNORE INTO ledger (node_id) VALUES (?)", (node_id,))

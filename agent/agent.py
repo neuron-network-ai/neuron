@@ -372,6 +372,9 @@ class Agent:
         self.state = {"status": "starting", "node_id": self.cfg.get("node_id"),
                       "layers": None, "coordinator": self.base, "detail": ""}
         self._stop = threading.Event()
+        # Last auto-update verdict, reported on the next registration. None until the first
+        # check runs, and None means "not yet checked" -- never "up to date".
+        self._last_update_check = None
         self.user_paused = threading.Event()   # set by the tray's Pause button
         self.relay = self.cfg.get("relay")     # relay params if this node is behind NAT
         self.server = None                     # the running NodeServer (migration reload target)
@@ -630,6 +633,19 @@ class Agent:
         # erases it.
         if self.cfg.get("ms_per_layer") is not None:
             body["ms_per_layer"] = self.cfg["ms_per_layer"]
+        # WHY THIS NODE IS NOT ON THE VERSION THE COORDINATOR PUBLISHED. Nothing reported the
+        # running build before 0.20.2: the version existed only in the first line of this
+        # machine's own log, which nobody can read on a PC behind a NAT in somebody's house.
+        # So a rollout could not be watched and -- the sharp one -- a ROLLBACK could not be
+        # confirmed. The remedy shipped the same day fired blind.
+        #
+        # Three fields answer one question, and it takes all three: a node on an old build is
+        # either yet to make its daily check, running with auto_update off, or failing the
+        # download. Only the first fixes itself.
+        body["agent_version"] = _version()
+        body["auto_update"] = bool(self.cfg.get("auto_update", True))
+        if self._last_update_check:
+            body["update_check"] = self._last_update_check
         # Open join (Session 12): register with NO secret by default — anyone can join.
         # Only send the header if the operator explicitly set one (that path marks the
         # node TRUSTED and is for the founder's own dev nodes, not strangers).
@@ -1441,7 +1457,17 @@ class Agent:
         themselves should not have to firewall us to do it."""
         from agent import updater
         updater.update_loop(self.base, stop=self._stop, busy=self._serving_now,
-                            enabled=self.cfg.get("auto_update", True))
+                            enabled=self.cfg.get("auto_update", True),
+                            on_result=self._record_update_check)
+
+    def _record_update_check(self, verdict):
+        """Remember the last update verdict so the next registration can report it.
+
+        Kept in memory rather than written to config.json: it is a fact about this RUN, and
+        persisting it would outlive the condition it describes -- a `download-failed` from last
+        week, replayed after a restart that fixed it, is the stale-field mistake this project has
+        now made three times ([P34], [P37], and the ms/layer display)."""
+        self._last_update_check = verdict
 
     def remeasure_loop(self):
         """Re-time this node's own segment periodically and report it.

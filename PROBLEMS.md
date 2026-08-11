@@ -44,6 +44,30 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
      that download, including the ones with no GPU.** Fix the updater before shipping it.
   Rented time is cheap next to the lever: decode is bandwidth-bound at ~30 GB/s on DDR against
   360–1000 GB/s on a consumer card, and 200B needs ~30–80 CPU machines or ~10 GPU ones.
+- **2026-08-11 — A node reports the build it runs, so a rollout can be watched and a rollback
+  confirmed (0.20.2).** The founder's words on the third release of one afternoon: *"take
+  everything, plan, then make it."* Fair. 0.20.0 shipped, then 0.20.1 for rollback, then this —
+  each gap found by reacting rather than by asking up front what a release must carry.
+  The gap itself: nothing reported the running build. The version string existed only in the
+  first line of that machine's own log, unreadable on a PC behind a NAT. So adoption was
+  invisible and — the sharp part — **the rollback added hours earlier could not be confirmed**.
+  A recovery path you cannot check is one you have to trust.
+  Three fields, because it takes three to answer one question. A node still on an old build has
+  either not made its daily check (fixes itself), has `auto_update` off (needs its operator), or
+  is failing the download (`update_check` says which). NULL is "an agent too old to say", never
+  "up to date" — merging those would report a stale fleet as patched, the same class of mistake
+  as [P34] and [P37]. All three are COALESCEd so a node rolled back to a pre-0.20.2 build does
+  not erase what we already knew, at exactly the moment someone is checking whether the rollback
+  worked; and `update_checked_at` follows the verdict so it always carries its own age.
+  Public page aggregates (*"3 of 4 on the latest agent"*) — same rule as standing: *is this
+  network patched* is a fair question for a visitor, *which volunteer is behind* is not. The
+  operator's own page keeps the detail, since they are the only one who can act on it.
+  **Verified before cutting, so this is the last release in the chain:** `holds` (0.20.0),
+  `model_id` (0.20.0), hourly re-measure (0.20.0), rollback (0.20.1) and slice self-heal on a
+  range change are all already shipped, and `setup()` re-reads its range from
+  `/node/{id}/slice-info` and re-downloads when the cached slice does not cover it — so the
+  0.20.2 restart is itself the repair for a mis-placed node. 12 cases in
+  `coordinator/test_agent_version_report.py`.
 - **2026-08-11 — An agent can be rolled BACKWARDS, and only when asked explicitly (0.20.1).**
   The founder's condition for shipping: *"if it goes wrong we have to make setup to fix, we can
   not leave users in loss."* There was no such setup. An agent could only ever move forward —
