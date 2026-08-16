@@ -175,6 +175,31 @@
      by /infer before a chain is even built. Rendered in --bad so it reads as a fault at a
      glance, next to the strip below which says what to do about it. */
   .auth .balance b.empty-bal{color:var(--bad)}
+  /* The wallet id is this account's bearer credential -- knowing it IS the authorization
+     (coordinator/main.py's GET /wallet/{id}). That is why it was never on screen. But the
+     only other way to read your own was GET /auth/me, which no ordinary person will ever
+     find, so the one party entitled to it could not get it. Revealed on request, never by
+     default, and it says what it is when shown. */
+  #walletbox{display:none;position:absolute;right:.9rem;top:3.2rem;z-index:40;
+    background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:.7rem .8rem;max-width:420px;box-shadow:0 8px 26px rgba(0,0,0,.18)}
+  #walletbox.show{display:block}
+  #walletbox .wid{font-family:ui-monospace,Consolas,monospace;font-size:12px;
+    word-break:break-all;color:var(--ink);display:block;margin-bottom:.3rem}
+  #walletbox .note{color:var(--muted);font-size:11.5px;line-height:1.45}
+  #walletbox button{margin-top:.55rem;font:inherit;font-size:12px;cursor:pointer;
+    background:var(--brand);color:var(--on-brand);border:0;border-radius:7px;
+    padding:.32rem .65rem}
+  #walletbox button:disabled{opacity:.55;cursor:not-allowed}
+  /* Payout address: where this wallet's NRN goes when the ledger moves on-chain. An account
+     with none bound is skipped as `unmapped` by blockchain/migrate_ledger.py, so "not set" is
+     a real state to show, not an empty field. */
+  #walletbox .payout{margin-top:.8rem;padding-top:.7rem;border-top:1px solid var(--line)}
+  #walletbox .plabel{font-size:11px;text-transform:uppercase;letter-spacing:.04em;
+    color:var(--muted);margin-bottom:.25rem}
+  #walletbox .pval{font-family:ui-monospace,Consolas,monospace;font-size:12px;
+    word-break:break-all;color:var(--ink)}
+  #walletbox .pval.unset{font-family:inherit;color:var(--muted)}
   /* Sits directly above the composer rather than in #warn, which the network poller rewrites
      on every tick and would clobber this within a second. */
   #lowbal{display:none;max-width:760px;width:100%;margin:0 auto .45rem;
@@ -213,6 +238,9 @@
       <button class="themebtn" id="themebtn" title="Toggle theme"
               aria-label="Toggle light, dark or system theme">🌓</button>
       <div class="auth" id="auth"></div>
+      <!-- Populated only when the wallet link is clicked, and emptied on log out: a
+           credential should not sit in the DOM of a shared screen waiting to be found. -->
+      <div id="walletbox" role="dialog" aria-label="Your wallet ID" aria-live="polite"></div>
     </header>
     <div id="warn" role="status"></div>
 
@@ -411,11 +439,14 @@ async function refreshAuth(){
     const empty = known && bal.balance < MIN_SENDABLE_NRN;
     auth.innerHTML = "<span class='balance'>" + (me.email || "logged in") +
       " · <b" + (empty ? " class='empty-bal'" : "") + ">" + shown +
-      " NRN</b></span> · <a href='#' id='logoutlink'>Log out</a>";
+      " NRN</b></span> · <a href='#' id='walletlink'>Wallet ID</a>" +
+      " · <a href='#' id='logoutlink'>Log out</a>";
     noteBalance(known ? bal.balance : null);
+    wireWalletReveal(me.wallet_id);
     $("#logoutlink").addEventListener("click", async (e) => {
       e.preventDefault();
       await fetch("/auth/logout", {method:"POST"});
+      hideWallet();
       currentConversationId = null;
       refreshAuth();
     });
@@ -425,6 +456,153 @@ async function refreshAuth(){
   }
 }
 refreshAuth();
+
+// ---- wallet id reveal -------------------------------------------------------
+// /auth/me already carries the wallet id; all this decides is when it is on screen. It has to
+// be somewhere: it is what an operator needs in order to claim a node's earnings into this
+// account, and the only way to read it before this was knowing that GET /auth/me exists.
+//
+// Defined AFTER refreshAuth deliberately. ui/test_chat_ui.py slices this source between the
+// low-balance copy and `async function refreshAuth` to scope a keyword ban to that copy, and
+// code sitting inside the slice silently widens what that ban is checking.
+function hideWallet(){
+  const box = $("#walletbox");
+  if(!box) return;
+  box.classList.remove("show");
+  box.innerHTML = "";                  // never leave a credential sitting in the DOM
+}
+
+function wireWalletReveal(walletId){
+  const link = $("#walletlink");
+  if(!link) return;
+  link.addEventListener("click", (e) => {
+    e.preventDefault();
+    const box = $("#walletbox");
+    if(box.classList.contains("show")){ hideWallet(); return; }
+    box.innerHTML = "";
+    // textContent, not innerHTML: this string comes back from the coordinator and is about
+    // to be put on screen -- there is no reason for it to be able to carry markup.
+    const code = document.createElement("span");
+    code.className = "wid";
+    code.textContent = walletId || "(unknown)";
+    const note = document.createElement("div");
+    note.className = "note";
+    note.textContent = "This is your account's key, not just its name — anyone who has it "
+      + "can spend your NRN. Don't post it or paste it into anything but NEURON's own tools.";
+    const copy = document.createElement("button");
+    copy.textContent = "Copy";
+    copy.addEventListener("click", async () => {
+      try{
+        await navigator.clipboard.writeText(walletId);
+        copy.textContent = "Copied";
+      }catch(err){
+        // Clipboard access can be refused (permission, or a non-secure origin). Selecting
+        // the text is worse than copying it and far better than a button that appears to
+        // work and does nothing.
+        const r = document.createRange(); r.selectNodeContents(code);
+        const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+        copy.textContent = "Select + Ctrl-C";
+      }
+      setTimeout(() => { copy.textContent = "Copy"; }, 2500);
+    });
+    box.appendChild(code); box.appendChild(note); box.appendChild(copy);
+    box.appendChild(buildPayoutSection());
+    box.classList.add("show");
+  });
+}
+
+// Where this wallet's NRN goes when the ledger moves on-chain. It lives here rather than in a
+// file somebody has to be told about: an account with no bound address is skipped as
+// `unmapped` by blockchain/migrate_ledger.py, and nobody discovers that on their own.
+//
+// Every coordinator call is proxied through ui/app.py, which takes the wallet id from the
+// SESSION -- the page never sends one, so this cannot be pointed at another person's wallet.
+function buildPayoutSection(){
+  const wrap = document.createElement("div");
+  wrap.className = "payout";
+  const label = document.createElement("div");
+  label.className = "plabel";
+  label.textContent = "Payout address";
+  const val = document.createElement("div");
+  val.className = "pval unset";
+  val.textContent = "checking…";
+  const stat = document.createElement("div");
+  stat.className = "note";
+  wrap.append(label, val);
+
+  const btn = document.createElement("button");
+  btn.textContent = "Set with browser wallet";
+
+  fetch("/wallet/payout").then(r => r.json()).then(d => {
+    if(d.payout_address){
+      val.textContent = d.payout_address;
+      val.className = "pval";
+      // Deliberately NOT a button. Rebinding needs a signature from the CURRENTLY bound key
+      // as well (payout.require_rebind_authority), which means two prompts and an account
+      // switch -- so offering a control here that always fails would be a check that cannot
+      // pass, dressed up as a feature.
+      stat.textContent = "Changing this needs a signature from the current address too — "
+        + "use tools/sign_payout.html for that.";
+    } else {
+      val.textContent = "not set — earnings have no on-chain destination yet";
+      wrap.append(btn);
+    }
+    wrap.append(stat);
+  }).catch(() => {
+    val.textContent = "could not read";
+    wrap.append(stat);
+  });
+
+  btn.addEventListener("click", async () => {
+    if(!window.ethereum){
+      stat.textContent = "No wallet extension in this browser. Open NEURON in the browser that "
+        + "holds your wallet, or use tools/sign_payout.html.";
+      return;
+    }
+    btn.disabled = true;
+    try{
+      stat.textContent = "Connecting…";
+      const accounts = await window.ethereum.request({method: "eth_requestAccounts"});
+      const from = accounts[0];
+      stat.textContent = "Preparing a challenge for " + from + " …";
+      const ch = await (await fetch("/wallet/payout/challenge?address="
+                                    + encodeURIComponent(from))).json();
+      if(ch.error){ stat.textContent = ch.error; btn.disabled = false; return; }
+      stat.textContent = "Approve the signature in your wallet — it moves no funds.";
+      const signature = await window.ethereum.request({
+        method: "personal_sign", params: [ch.message, from]
+      });
+      const res = await (await fetch("/wallet/payout/bind", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({address: ch.address, nonce: ch.nonce, signature})
+      })).json();
+      // A 400 from the coordinator carries the reason someone can act on ("sign with the key
+      // for the address you are claiming"); show it rather than a generic failure.
+      if(res.error){ stat.textContent = res.error; btn.disabled = false; return; }
+      val.textContent = res.payout_address;
+      val.className = "pval";
+      btn.remove();
+      stat.textContent = "Bound. Your NRN now has an on-chain destination.";
+    }catch(err){
+      const denied = err && (err.code === 4001 || /reject|denied/i.test(err.message || ""));
+      stat.textContent = denied
+        ? "You declined the signature. Nothing changed."
+        : ("Could not bind: " + (err && err.message ? err.message : err));
+      btn.disabled = false;
+    }
+  });
+  return wrap;
+}
+
+// Escape, or a click anywhere else, puts it away again: a revealed credential should not
+// stay on screen because the reader walked off.
+document.addEventListener("keydown", (e) => { if(e.key === "Escape") hideWallet(); });
+document.addEventListener("click", (e) => {
+  const box = $("#walletbox");
+  if(!box || !box.classList.contains("show")) return;
+  if(box.contains(e.target) || e.target.id === "walletlink") return;
+  hideWallet();
+});
 
 // ---- sidebar: conversation history -----------------------------------------
 function renderSidebarLoggedOut(){

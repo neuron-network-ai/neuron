@@ -144,6 +144,63 @@ def main():
           'note.textContent = "Stopped. You were charged only for what had been generated."'
           in SRC)
 
+    print("\n-- you can read your own wallet id without knowing an API route exists")
+    # The header showed an email and a balance and nothing else, because wallet_id is the
+    # account's bearer credential (coordinator/main.py: "knowing it is the authorization").
+    # The cost of that silence: the ONE person entitled to it had to discover GET /auth/me.
+    # An operator needs it to claim a node's earnings into their account, so it has to be
+    # reachable — revealed on request, never sitting on screen by default.
+    check("the header offers it", "id='walletlink'" in SRC and "Wallet ID</a>" in SRC)
+    check("...into a container that starts empty", '<div id="walletbox"' in SRC)
+    check("...announced as a dialog, so a screen reader is told it opened",
+          'role="dialog"' in SRC and 'aria-label="Your wallet ID"' in SRC)
+    check("it is NOT rendered until asked for",
+          "box.classList.add(\"show\")" in SRC and "#walletbox{display:none" in SRC)
+    check("logging out takes it off the screen", "hideWallet();" in SRC)
+    check("...and out of the DOM entirely, not just hidden",
+          'box.innerHTML = "";' in SRC and "never leave a credential" in SRC,
+          "display:none still leaves it in the page for anyone who opens devtools")
+    check("Escape closes it", 'e.key === "Escape"' in SRC)
+    check("a click elsewhere closes it", "box.contains(e.target)" in SRC)
+    check("the id is written as text, never as markup",
+          "code.textContent = walletId" in SRC,
+          "it arrives from the coordinator; there is no reason for it to carry markup")
+    # A copy button that silently does nothing is worse than no button: the user believes
+    # they have it and pastes the previous clipboard contents into a payout form.
+    check("copying reports success or falls back to selecting the text",
+          'copy.textContent = "Copied"' in SRC and 'copy.textContent = "Select + Ctrl-C"' in SRC)
+    check("it says what the string IS, not just what it is called",
+          "your account's key, not just its name" in SRC)
+    check("...and that holding it is enough to spend the balance",
+          "can spend your NRN" in SRC)
+
+    print("\n-- setting a payout address is in the product, not in a loose file")
+    # An account with no bound address is skipped as `unmapped` by blockchain/migrate_ledger.py.
+    # A standalone HTML file in tools/ solves that for whoever is told it exists, which is not
+    # a volunteer. It belongs in the panel they already opened to read their wallet id.
+    check("the panel carries a payout section", "buildPayoutSection" in SRC
+          and 'className = "payout"' in SRC)
+    check("an unbound address is shown as a real state, not an empty field",
+          "not set — earnings have no on-chain destination yet" in SRC)
+    check("binding goes through the UI proxy, never straight to the coordinator",
+          '"/wallet/payout/challenge?address="' in SRC and '"/wallet/payout/bind"' in SRC,
+          "the coordinator's CORS is named-origins GET-only, and the proxy takes the wallet "
+          "id from the session so this cannot be aimed at someone else's account")
+    check("the signature request says it moves no funds",
+          "it moves no funds" in SRC,
+          "this is the moment a person is asked to approve a wallet prompt")
+    check("a declined signature is reported as a decline, not a failure",
+          "You declined the signature. Nothing changed." in SRC)
+    check("a coordinator refusal is shown verbatim rather than as 'something went wrong'",
+          "stat.textContent = res.error" in SRC)
+    # Rebinding needs the incumbent key too (payout.require_rebind_authority). Offering a
+    # button here that always fails would be [P37]'s "a check that cannot pass" as a feature.
+    check("an already-bound address does NOT get a change button that cannot work",
+          "needs a signature from the current address too" in SRC
+          and "wrap.append(btn)" in SRC)
+    check("no browser wallet is a stated condition with a way out, not a dead button",
+          "No wallet extension in this browser" in SRC and "tools/sign_payout.html" in SRC)
+
     print("\n-- a node dying is NOT presented as a failure")
     # The load-bearing correction in this file. A node dying mid-answer is RECOVERED, token
     # for token: neuron_driver._reroute takes a fresh chain and replays the junction cache into

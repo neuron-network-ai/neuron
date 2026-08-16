@@ -1296,6 +1296,83 @@ def read_payout_address(node_id: str, x_node_token: str = Header(default=None)):
             "bound_at": bound["bound_at"] if bound else None}
 
 
+def _require_wallet(wallet_id: str):
+    """A wallet must already exist to be bound. `set_payout_address` ends in INSERT OR IGNORE,
+    so without this check a request naming any string at all would CREATE that account and bind
+    an address to it -- an endpoint for manufacturing accounts nobody can sign in as."""
+    row = models.get_ledger(wallet_id)
+    if row is None or row.get("account_type") != "wallet":
+        raise HTTPException(status_code=404, detail="unknown wallet")
+    return row
+
+
+@app.get("/wallet/{wallet_id}/payout-challenge")
+def wallet_payout_challenge(wallet_id: str, address: str = None):
+    """Issue the nonce this wallet must sign to bind its payout address.
+
+    Wallets needed this because node earnings are swept into them (coordinator/
+    claim_node_earnings.py) and `blockchain/migrate_ledger.py` skips any account with no bound
+    address as `unmapped`. Until this existed, moving a node's NRN somewhere spendable also
+    moved it somewhere unmappable, so the two things an operator wants -- spend it now, keep it
+    later -- were mutually exclusive.
+
+    Authorization is the wallet_id itself, matching GET /wallet/{id}: it is an unguessable
+    32-hex bearer capability and this endpoint returns nothing that is not derived from it.
+    The signature is what actually protects the address -- exactly the posture payout.py
+    documents for nodes, including its honest limit: a leaked wallet_id is enough to bind a
+    FIRST address (rebinding already needs the incumbent key). A UI-proxied binding behind
+    X-Wallet-Link-Secret would close that, and is the better shape once the chat UI carries it.
+    """
+    _require_wallet(wallet_id)
+    nonce = models.issue_payout_challenge(wallet_id)
+    out = {"wallet_id": wallet_id, "nonce": nonce,
+           "expires_in_seconds": config.PAYOUT_CHALLENGE_TTL}
+    if address:
+        try:
+            checksummed = payout.normalize_address(address)
+        except payout.PayoutError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        out["address"] = checksummed
+        out["message"] = payout.binding_message(wallet_id, checksummed, nonce, label="wallet")
+    return out
+
+
+@app.post("/wallet/{wallet_id}/payout-address")
+def bind_wallet_payout_address(wallet_id: str, body: PayoutBindBody,
+                               x_register_secret: str = Header(default=None)):
+    """Bind the EVM address this wallet's NRN is paid to, proving control of it.
+
+    Same two-layer shape as the node endpoint: knowing the wallet_id says *this account* is
+    asking, the signature says *the address owner* consents, and rebinding an already-bound
+    address needs `old_signature` from the incumbent key unless the register secret overrides.
+    The signed text says "wallet:", not "node:", so a signature cannot be carried between the
+    two even if one id were ever reused as the other.
+    """
+    _require_wallet(wallet_id)
+    operator = (isinstance(x_register_secret, str)
+                and secrets.compare_digest(x_register_secret, config.REGISTRATION_SECRET))
+    try:
+        result = payout.bind(wallet_id, body.address, body.nonce, body.signature,
+                             old_signature=body.old_signature, operator_override=operator,
+                             account_type="wallet")
+    except payout.PayoutError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    result["wallet_id"] = result.pop("node_id")
+    return result
+
+
+@app.get("/wallet/{wallet_id}/payout-address")
+def read_wallet_payout_address(wallet_id: str):
+    """This wallet's binding. Private for the same reason a node's is: a payout address is a
+    persistent pseudonymous identifier, and publishing the map would tie balances together
+    on-chain for anyone watching."""
+    _require_wallet(wallet_id)
+    bound = models.get_payout_address(wallet_id)
+    return {"wallet_id": wallet_id,
+            "payout_address": bound["payout_address"] if bound else None,
+            "bound_at": bound["bound_at"] if bound else None}
+
+
 # --------------------------------------------------------------------------- #
 # Part 5 — Status + dashboard
 # --------------------------------------------------------------------------- #

@@ -74,7 +74,7 @@ def normalize_address(address):
     return checksummed
 
 
-def binding_message(node_id, address, nonce):
+def binding_message(node_id, address, nonce, label="node"):
     """The exact text that gets signed. Both sides build it from the same three inputs, so
     there is nothing to transmit and nothing to disagree about.
 
@@ -82,24 +82,30 @@ def binding_message(node_id, address, nonce):
     what is being authorised, and the nonce makes it single-use. The closing sentence is there
     because this shows up in a wallet prompt and the reader deserves to know that signing it
     moves no money.
+
+    `label` names what kind of account is being bound, because a wallet is not a node and a
+    signing prompt reading "node: w_3f2a..." would be asking somebody to approve a sentence
+    that is not true. It is part of the signed text, so a signature made for a wallet cannot
+    be replayed to bind a node of the same id, and vice versa. Nodes keep "node" and their
+    message is byte-identical to before.
     """
     return (
         "NEURON payout address binding\n"
-        f"node: {node_id}\n"
+        f"{label}: {node_id}\n"
         f"address: {address}\n"
         f"nonce: {nonce}\n"
         "\n"
-        "Signing this proves you control the address above and authorises NEURON to send "
-        "this node's NRN earnings there. It transfers no funds and grants no spending power."
+        f"Signing this proves you control the address above and authorises NEURON to send "
+        f"this {label}'s NRN earnings there. It transfers no funds and grants no spending power."
     )
 
 
-def recover_signer(node_id, address, nonce, signature):
+def recover_signer(node_id, address, nonce, signature, label="node"):
     """Who signed `binding_message(node_id, address, nonce)`? Checksummed, or PayoutError."""
     if not isinstance(signature, str) or not signature.strip():
         raise PayoutError("signature is required")
     Account, encode_defunct = _eth()
-    message = binding_message(node_id, address, nonce)
+    message = binding_message(node_id, address, nonce, label=label)
     try:
         return Account.recover_message(encode_defunct(text=message), signature=signature.strip())
     except Exception as exc:                                        # noqa: BLE001
@@ -108,10 +114,10 @@ def recover_signer(node_id, address, nonce, signature):
         raise PayoutError(f"signature could not be recovered ({type(exc).__name__})") from exc
 
 
-def verify_binding(node_id, address, nonce, signature):
+def verify_binding(node_id, address, nonce, signature, label="node"):
     """Full check for one claimed address. Returns the checksummed address to store."""
     address = normalize_address(address)
-    signer = recover_signer(node_id, address, nonce, signature)
+    signer = recover_signer(node_id, address, nonce, signature, label=label)
     if signer.lower() != address.lower():
         raise PayoutError(
             f"signature is valid but was made by {signer}, not the address being bound "
@@ -120,7 +126,7 @@ def verify_binding(node_id, address, nonce, signature):
 
 
 def require_rebind_authority(node_id, current_address, new_address, nonce,
-                             old_signature, operator_override=False):
+                             old_signature, operator_override=False, label="node"):
     """Changing an address that is already bound needs the OLD key's consent.
 
     This is the control that makes a stolen `node_token` insufficient to redirect earnings.
@@ -134,10 +140,10 @@ def require_rebind_authority(node_id, current_address, new_address, nonce,
         return
     if not old_signature:
         raise PayoutError(
-            f"this node already pays out to {current_address}. Changing it needs "
+            f"this {label} already pays out to {current_address}. Changing it needs "
             f"`old_signature`: the same message signed by that address's key. If the key is "
             f"lost, the operator must rebind with the register secret.")
-    signer = recover_signer(node_id, new_address, nonce, old_signature)
+    signer = recover_signer(node_id, new_address, nonce, old_signature, label=label)
     if signer.lower() != current_address.lower():
         raise PayoutError(
             f"old_signature was made by {signer}, not the currently bound address "
@@ -151,13 +157,15 @@ def bind(node_id, address, nonce, signature, old_signature=None, operator_overri
     The nonce is consumed FIRST, before any signature is looked at, so a wrong guess costs the
     challenge -- an attacker cannot sit on one nonce and grind signatures against it.
     """
+    label = "wallet" if account_type == "wallet" else "node"
     bad = models.consume_payout_challenge(node_id, nonce, config.PAYOUT_CHALLENGE_TTL)
     if bad:
         raise PayoutError(bad)
-    address = verify_binding(node_id, address, nonce, signature)
+    address = verify_binding(node_id, address, nonce, signature, label=label)
     existing = models.get_payout_address(node_id)
     current = existing["payout_address"] if existing else None
-    require_rebind_authority(node_id, current, address, nonce, old_signature, operator_override)
+    require_rebind_authority(node_id, current, address, nonce, old_signature, operator_override,
+                             label=label)
     models.set_payout_address(node_id, address, account_type=account_type)
     return {"node_id": node_id, "payout_address": address,
             "previous_address": current, "rebound": bool(current and current != address)}

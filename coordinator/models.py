@@ -788,7 +788,7 @@ def consume_payout_challenge(account_id, nonce, ttl_seconds):
         row = c.execute("SELECT nonce, issued_at FROM payout_challenges WHERE account_id=?",
                         (account_id,)).fetchone()
         if row is None:
-            return "no challenge issued -- request GET /node/{id}/payout-challenge first"
+            return "no challenge issued -- request a payout-challenge for this account first"
         c.execute("DELETE FROM payout_challenges WHERE account_id=?", (account_id,))
         if not _secrets.compare_digest(str(row["nonce"]), str(nonce)):
             return "nonce does not match the challenge issued for this account"

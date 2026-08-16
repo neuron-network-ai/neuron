@@ -156,6 +156,80 @@ def wallet_balance_proxy(request: Request):
         return {"logged_in": True, "wallet_id": wallet_id, "error": str(e)}
 
 
+class PayoutBindBody(BaseModel):
+    address: str
+    nonce: str
+    signature: str
+    old_signature: str | None = None
+
+
+@app.get("/wallet/payout")
+def payout_address_read(request: Request):
+    """The address this session's wallet currently pays out to, if any."""
+    wallet_id = request.session.get("wallet_id")
+    if not wallet_id:
+        return {"logged_in": False}
+    try:
+        r = requests.get(f"{COORDINATOR}/wallet/{wallet_id}/payout-address", timeout=8)
+        r.raise_for_status()
+        return {"logged_in": True, **r.json()}
+    except requests.RequestException as e:
+        return {"logged_in": True, "error": str(e)}
+
+
+@app.get("/wallet/payout/challenge")
+def payout_challenge_proxy(address: str, request: Request):
+    """Fetch the nonce and the exact text this session's wallet must sign.
+
+    Proxied server-side for the same reason /wallet/balance is: the browser never talks to the
+    coordinator, whose CORS is deliberately named-origins and GET-only. It also means the
+    wallet id comes from the SESSION rather than from anything the page could be talked into
+    sending — so this route cannot be used to start a binding against somebody else's wallet
+    even by a page that has somehow learned their id.
+    """
+    wallet_id = request.session.get("wallet_id")
+    if not wallet_id:
+        return JSONResponse({"error": "sign in first"}, status_code=401)
+    try:
+        r = requests.get(f"{COORDINATOR}/wallet/{wallet_id}/payout-challenge",
+                         params={"address": address}, timeout=8)
+        if r.status_code == 400:
+            return JSONResponse({"error": r.json().get("detail", "bad address")},
+                                status_code=400)
+        r.raise_for_status()
+        return r.json()
+    except requests.RequestException as e:
+        log.warning("payout challenge failed: %s", e)
+        return JSONResponse({"error": "could not reach the coordinator"}, status_code=502)
+
+
+@app.post("/wallet/payout/bind")
+def payout_bind_proxy(body: PayoutBindBody, request: Request):
+    """Submit the signature. The coordinator does the real verification -- recovering the
+    signer and requiring it to equal the address being claimed -- so this adds no trust of its
+    own beyond binding the request to the logged-in session.
+
+    A 400 from the coordinator is passed through verbatim: payout.py writes those messages to
+    be read by the person who caused them ("sign with the key for the address you are
+    claiming"), and replacing them with a generic failure would throw away the only thing that
+    tells someone what they got wrong.
+    """
+    wallet_id = request.session.get("wallet_id")
+    if not wallet_id:
+        return JSONResponse({"error": "sign in first"}, status_code=401)
+    try:
+        r = requests.post(f"{COORDINATOR}/wallet/{wallet_id}/payout-address",
+                          json=body.model_dump(), timeout=12)
+        if r.status_code == 400:
+            return JSONResponse({"error": r.json().get("detail", "binding refused")},
+                                status_code=400)
+        r.raise_for_status()
+        return r.json()
+    except requests.RequestException as e:
+        log.warning("payout bind failed: %s", e)
+        return JSONResponse({"error": "could not reach the coordinator"}, status_code=502)
+
+
 @app.get("/network")
 def network():
     """Live node count + health, for the UI header. Talks to the coordinator
