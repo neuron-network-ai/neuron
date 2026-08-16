@@ -2255,12 +2255,42 @@ so. Both halves shipped together for that reason:
     (21 tests). `binding_message` gained a `label`, so the prompt reads `wallet:` and a
     signature made for a node cannot bind a wallet of the same id. Node text is byte-identical.
 
-**Still open, and it is the real fix:** this is a sweep, not an owner link. Pavilion earns
-~2–3 NRN/hour and keeps crediting an ownerless account, so somebody has to remember to run a
-script. An owner recorded at registration would make that unnecessary. Also unfixed: a leaked
-`wallet_id` is enough to bind a FIRST payout address (rebinding needs the incumbent key) —
-the same honest limit `payout.py` already documents for `node_token`, and a UI-proxied binding
-behind `X-Wallet-Link-Secret` is the shape that closes it.
+**The owner link now exists (2026-08-16), phase 1 of 4.** `nodes.owner_wallet_id` records the
+wallet a person actually signs into, and `bind_payout_address` accepts it. 17 tests.
+
+Two decisions worth keeping:
+  * **It is recorded only as part of a successful payout binding.** Rebinding already requires
+    the incumbent key, so a copied `node_token` cannot move ownership — which a standalone
+    "set my owner" endpoint would have handed it. Tested: a stolen token rebinding to its own
+    address is refused and the owner still points at the original wallet.
+  * **It never leaves `_node_dict`.** `list_nodes` feeds the public `/node/list`, the public
+    dashboard and the router, and a node→person map is exactly the correlation that private
+    balances and private payout addresses exist to prevent. Dropped at the source rather than
+    filtered per consumer; readable deliberately via `get_node_owner()`, and over the wire
+    only from `/node/{id}/payout-address`, behind the node's own token.
+
+An invented `owner_wallet_id` is refused rather than recorded: `set_payout_address` and
+`transfer` both end in `INSERT OR IGNORE`, so a typo would otherwise write a phantom owner
+nobody can authenticate as — the same trap `claim_node_earnings.py` spends most of its tests
+refusing, one layer earlier. An older agent that sends no owner still binds normally.
+
+**Still open — phases 2 to 4:**
+  2. **Prompt for it at sign-in.** Nothing collects the owner yet; the column is filled only
+     if a caller supplies it. The agent serves the OAuth page on `localhost:8080` and knows
+     both its own `node_id` and the wallet just signed into, so that is the moment to ask.
+     `tools/sign_payout.html` already does the MetaMask half (`eth_requestAccounts`,
+     `personal_sign`) and is ~30 lines to lift. Must be skippable — a volunteer without
+     MetaMask has to be able to run a node. Doing it there is also the UI-proxied binding
+     behind `X-Wallet-Link-Secret` that closes the leaked-`wallet_id` weakness below.
+  3. **Pay the owner directly.** `emission.py` credits `entry["node_id"]`; crediting the owner
+     wallet when one is set (falling back to the node account when it is not) removes the
+     sweep permanently for future earnings. One call site.
+  4. **Sweep the history once.** `claim_node_earnings.py` already does it — run it for
+     Pavilion's 213 NRN after its owner is recorded, not before.
+
+Also still unfixed: a leaked `wallet_id` is enough to bind a FIRST payout address (rebinding
+needs the incumbent key) — the same honest limit `payout.py` documents for `node_token`.
+Phase 2 is the shape that closes it.
 
 Related display bug, not yet fixed: `main.py`'s node dashboard computes `spent = total_earned -
 balance`, so a swept node reports its earnings as **spent on inference**, which is not what

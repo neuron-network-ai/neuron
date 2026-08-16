@@ -114,6 +114,10 @@ class PayoutBindBody(BaseModel):
     nonce: str                            # from GET /node/{id}/payout-challenge
     signature: str                        # binding_message signed by `address`
     old_signature: str | None = None      # required only when changing a bound address
+    # [P39] the signed-in wallet that owns this node's earnings. Optional, so an agent that
+    # predates this keeps working. Recorded only when the binding above succeeds, which means
+    # moving it needs the incumbent key rather than just a copied node_token.
+    owner_wallet_id: str | None = None
 
 
 class SetModelBody(BaseModel):
@@ -1282,6 +1286,18 @@ def bind_payout_address(node_id: str, body: PayoutBindBody,
                              old_signature=body.old_signature, operator_override=operator)
     except payout.PayoutError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    # [P39] record who owns these earnings, but ONLY after the binding succeeded — that is
+    # what makes it need the incumbent key to move, rather than a copied node_token. The
+    # wallet must be a real Google/GitHub login: set_payout_address and transfer both end in
+    # INSERT OR IGNORE, so a typo would silently record an owner nobody can authenticate as.
+    if body.owner_wallet_id:
+        if not models.is_oauth_wallet(body.owner_wallet_id):
+            raise HTTPException(
+                status_code=400,
+                detail="owner_wallet_id is not a wallet backed by a Google/GitHub login; "
+                       "sign in first, then bind")
+        models.set_node_owner(node_id, body.owner_wallet_id)
+        result = {**result, "owner_wallet_id": body.owner_wallet_id}
     return result
 
 
@@ -1293,7 +1309,10 @@ def read_payout_address(node_id: str, x_node_token: str = Header(default=None)):
     _require_own_token(node_id, x_node_token)
     bound = models.get_payout_address(node_id)
     return {"node_id": node_id, "payout_address": bound["payout_address"] if bound else None,
-            "bound_at": bound["bound_at"] if bound else None}
+            "bound_at": bound["bound_at"] if bound else None,
+            # Behind the same node-token gate as the address, and for the same reason: the
+            # node->person map is exactly what must not be public ([P39]).
+            "owner_wallet_id": models.get_node_owner(node_id)}
 
 
 def _require_wallet(wallet_id: str):

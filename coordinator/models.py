@@ -40,7 +40,14 @@ CREATE TABLE IF NOT EXISTS nodes (
     gpu_name      TEXT,
     status        TEXT NOT NULL DEFAULT 'online',
     last_seen     REAL NOT NULL,
-    registered_at REAL NOT NULL
+    registered_at REAL NOT NULL,
+    -- The wallet a person actually signs into, recorded as the OWNER of this node's earnings
+    -- ([P39]). Without it a node's balance is credentialed only by the node_token in one
+    -- config.json: lose the file, lose the money, and blockchain/migrate_ledger.py skips the
+    -- account as `unmapped`. Set only as part of a successful payout binding, so moving it
+    -- needs the incumbent key rather than just a copied token. NEVER public -- it maps a node
+    -- to a person, which is the correlation private balances and addresses exist to prevent.
+    owner_wallet_id TEXT
 );
 -- Sybil SIGNALS, not enforcement. Flags are recorded and shown to the operator; nothing is
 -- blocked on them. The fingerprint is deliberately weak (cores/RAM/OS), so false positives are
@@ -197,6 +204,8 @@ def init_db():
             c.execute("ALTER TABLE nodes ADD COLUMN gpu_vram_gb REAL")
         if "gpu_name" not in cols:
             c.execute("ALTER TABLE nodes ADD COLUMN gpu_name TEXT")
+        if "owner_wallet_id" not in cols:                        # [P39] owner link
+            c.execute("ALTER TABLE nodes ADD COLUMN owner_wallet_id TEXT")
         # What the node CLAIMED at its last registration, kept separate from the range it is
         # ASSIGNED. They diverge exactly when a node is re-asserting a stale config after the
         # operator (or a migration) moved it -- the mechanism behind [P32]. NULL on rows that
@@ -312,6 +321,11 @@ def _status(last_seen, now=None):
 
 def _node_dict(row, now=None):
     d = dict(row)
+    # Dropped here rather than filtered per-consumer: this maps a node to a person, which is
+    # the correlation private balances and private payout addresses exist to prevent, and
+    # `list_nodes` feeds the public /node/list, the public dashboard and the router. Read it
+    # deliberately with get_node_owner() ([P39]).
+    d.pop("owner_wallet_id", None)
     d["status"] = _status(d["last_seen"], now)
     d["assigned_layers"] = [d["layer_start"], d["layer_end"]]
     # True when the node's last registration claimed a DIFFERENT range from the one it is
@@ -805,6 +819,31 @@ def set_payout_address(account_id, address, account_type="node"):
                   (account_id, account_type))
         c.execute("UPDATE ledger SET payout_address=?, payout_bound_at=? WHERE node_id=?",
                   (address, time.time(), account_id))
+
+
+def set_node_owner(node_id, wallet_id):
+    """Record which signed-in wallet owns a node's earnings ([P39]).
+
+    Callers MUST have verified `is_oauth_wallet(wallet_id)` first. `transfer()` and
+    `set_payout_address()` both end in INSERT OR IGNORE, so a typo'd wallet id does not
+    error anywhere in this system — it silently creates an account nobody can authenticate
+    as. That is the exact trap `claim_node_earnings.py` spends most of its tests refusing,
+    and recording a phantom owner would be the same mistake one layer earlier.
+
+    Returns False if the node does not exist, so a caller cannot believe it recorded
+    something it did not.
+    """
+    with _db() as c:
+        cur = c.execute("UPDATE nodes SET owner_wallet_id=? WHERE node_id=?",
+                        (wallet_id, node_id))
+        return cur.rowcount > 0
+
+
+def get_node_owner(node_id):
+    with _db() as c:
+        row = c.execute("SELECT owner_wallet_id FROM nodes WHERE node_id=?",
+                        (node_id,)).fetchone()
+    return row["owner_wallet_id"] if row else None
 
 
 def get_payout_address(account_id):
