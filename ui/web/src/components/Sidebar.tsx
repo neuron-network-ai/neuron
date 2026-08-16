@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ChatThread, Folder } from '../types';
 import { Wallet, NetworkState, formatNrn, networkLabel } from '../services/wallet';
+import { NodeOwnerPanel } from './NodeOwnerPanel';
 import {
   Plus,
   Pin,
@@ -241,6 +242,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <span className="text-[11px] text-ink-muted truncate">{networkLabel(network)}</span>
           </div>
         </div>
+
+        {/* [P39]: this machine's node earnings have no owner until someone signs for them.
+            Renders null unless there IS a node and it has no owner yet, so a driver-only
+            install and an already-claimed one both show nothing. A panel, not a gate. */}
+        <NodeOwnerPanel />
 
         {/* Footer actions */}
         <div className="p-2 border-t border-line flex items-center gap-1">

@@ -11,8 +11,48 @@ import { defineConfig } from 'vite';
 //
 // base is relative on purpose: the bundle is served from a sub-path, and absolute /assets/...
 // URLs would 404 there.
+// DEV ONLY (`apply: 'serve'`), and it never reaches a build. `npm run dev` serves the React app
+// with no `ui/app.py` behind it, so every proxied endpoint 404s and the UI renders as a
+// signed-out machine with no node — which means the parts that only appear for a CONTRIBUTOR
+// (the wallet rows, and the [P39] claim panel) could not be looked at at all without running an
+// agent, a coordinator and an OAuth round trip. That is why the claim panel had never been
+// clicked by anyone.
+//
+// These are canned answers in the same shapes `ui/app.py` returns, nothing more. The signature
+// itself still needs a real wallet: MetaMask injects `window.ethereum`, and no dev server can.
+const devMocks = {
+  name: 'neuron-dev-mocks',
+  apply: 'serve' as const,
+  configureServer(server: { middlewares: { use: (fn: any) => void } }) {
+    const canned: Record<string, unknown> = {
+      '/node/owner': { is_node: true, needs_owner: true, node_id: 'node-c-pavilion' },
+      '/node/payout/challenge': {
+        message: 'neuron node:node-c-pavilion binds 0xAbC…  nonce=n-1',
+        nonce: 'n-1', address: '0xAbC0000000000000000000000000000000000001',
+      },
+      '/node/payout/bind': {
+        ok: true, payout_address: '0xAbC0000000000000000000000000000000000001',
+      },
+      '/wallet/balance': {
+        logged_in: true, wallet_id: 'w_dev', email: 'dev@example.com',
+        balance: 12.5, total_earned: 213.4954,
+      },
+      '/network': {
+        reachable: true, online_nodes: 2, healthy: true, local_capable: false,
+        model_id: 'Qwen/Qwen2.5-1.5B-Instruct',
+      },
+    };
+    server.middlewares.use((req: any, res: any, next: any) => {
+      const path = String(req.url || '').split('?')[0];
+      if (!(path in canned)) return next();
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify(canned[path]));
+    });
+  },
+};
+
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), devMocks],
   base: './',
   resolve: {
     alias: { '@': path.resolve(__dirname, '.') },
