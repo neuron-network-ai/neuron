@@ -7,6 +7,16 @@ shared network when you're not using it, and you earn **NRN** for that.
 The network is small right now, so the numbers are small. Nothing you type ever leaves your
 computer, and nothing is collected about you.
 
+**What your computer needs:** Windows, macOS or Linux; about 4 GB of free disk space; and a
+processor from roughly 2013 or later — specifically one that supports **AVX2**. Any Intel Core
+from the 4th generation ("Haswell") onwards, and any AMD Ryzen, has it. Apple Silicon and
+Raspberry Pi are fine too.
+
+If your processor is older than that, NEURON will tell you so on the first run and stop,
+instead of crashing with no explanation. That is not your machine being broken — the AI library
+we ship is built for newer instructions. You can tell it to try anyway (it says how), and if it
+works we would genuinely like to hear about it.
+
 ---
 
 ### Step 1 — Install Python

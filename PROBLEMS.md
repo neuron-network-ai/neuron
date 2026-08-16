@@ -314,7 +314,45 @@ see that.
 Related: [P37] (the flagging that followed), [P36] (a slice that does not cover its range),
 [P35] (`UNREACHABLE_STRIKES` attesting an ambiguous socket close as a real failure).
 
-### [P41] 🟡 No CPU floor is checked anywhere, and torch's bundled MKL can fault on the old machines we recruit (2026-08-16)
+### [P41] 🟢 No CPU floor is checked anywhere, and torch's bundled MKL can fault on the old machines we recruit — detect-and-explain shipped (2026-08-16)
+
+**Closed as far as it honestly can be, which is not the same as fixed.** `agent/cpu_check.py`
+probes for AVX2 and refuses to start with a sentence a person can act on, so the failure below
+is now a message instead of `0xC000001D`. The underlying incompatibility is untouched: this
+does not make a pre-AVX2 machine work, it makes the refusal legible.
+
+Four decisions worth keeping, all of them about not over-reaching on an unreproduced risk:
+  * **It runs before the heavy imports.** `agent.py` pulls torch in at module level via
+    `node_server`, and it is torch's bundled MKL that faults — a probe underneath that import
+    sits downstream of the thing it guards. It reports through `crash_log`, which is the one
+    path that works before `_setup_logging()` and inside the frozen tray app where stderr goes
+    nowhere.
+  * **It refuses only a POSITIVE determination** of x86-without-AVX2. An unreadable probe, an
+    OS nobody here has tried, an unrecognised `platform.machine()`, or an exception inside the
+    probe itself all resolve to UNDETERMINED, which proceeds. "We could not check" must never
+    behave like "we checked and it failed" ([P24]).
+  * **ARM is undetermined, not unsupported.** The agent is pure Python + psutil + requests
+    precisely so a phone or a Pi can run it, and AVX is not a question there.
+  * **The refusal names an override** (`NEURON_SKIP_CPU_CHECK=1`) and says plainly that this
+    has not been reproduced on hardware like theirs. The machine being turned away may well be
+    one that works, and its owner is better placed to find out than we are.
+
+`STRANGER_INSTALL.md` now states the floor in a sentence a non-engineer can check against their
+own machine ("any Intel Core from the 4th generation onwards, and any AMD Ryzen"), which is the
+part that prevents the download rather than explaining it afterwards.
+`agent/test_cpu_floor.py`: 24 tests, most of them about the refusals it must NOT make.
+
+**Still open:** the capability is not reported at registration, so the coordinator still cannot
+see the fleet's real instruction-set floor and nobody can answer "would raising it exclude
+anyone?" from data. `cpu_check.summary()` produces the string; it needs a `RegisterBody` field
+and a column, the same shape `weight_dtype` took in [P43]. And the real fix — a torch built
+`USE_MKL=0 USE_MKLDNN=0` against OpenBLAS — remains a wire-compatibility decision rather than a
+packaging one, because `requirements.txt` says the pin is load-bearing: **nodes exchange pickled
+tensors over TCP.**
+
+The original entry follows, because the risk it describes is unchanged.
+
+### [P41-orig] 🟡 The report this was filed from (2026-08-16)
 
 **The pitch is "ordinary computers" and "spare hardware". That is exactly the population
 with the oldest CPUs, and nothing in the agent, the installer or the docs checks what the

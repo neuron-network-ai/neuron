@@ -147,6 +147,26 @@ def _apply_device_preference(argv=None, environ=None):
 # the execution device at import and never reconsiders it. Logged in main(), once logging is up.
 _DEVICE_NOTE = _apply_device_preference()
 
+# [P41] — and it runs BEFORE the heavy imports below, which is the whole point. `cpu_check` is
+# stdlib-only and cheap; torch is neither, and it is torch's bundled MKL that has been reported
+# executing an AVX-512 kernel on a CPU that has none. Probing after that import would mean the
+# check lives downstream of the thing it is meant to protect against.
+#
+# `crash_log` rather than `log`, for the same reason it exists at all: this is before
+# `_setup_logging()`, and in the frozen tray app stderr goes nowhere a person can see. A refusal
+# nobody can read is the silent crash again, with extra steps.
+#
+# It refuses only a POSITIVE determination of x86-without-AVX2 — `refusal()` returns None for
+# anything undetermined, and names an override in its own text, because the risk is documented
+# elsewhere and has never been reproduced here.
+from agent import cpu_check                               # noqa: E402
+
+_CPU = cpu_check.probe()
+_CPU_REFUSAL = cpu_check.refusal(_CPU)
+if _CPU_REFUSAL:
+    crash_log(_CPU_REFUSAL)
+    raise SystemExit(2)
+
 # The imports below are the heavy ones (node_server and local_chat pull in torch), and they
 # run at MODULE level — before main(), before any config is read, before logging exists. A
 # failure here used to be completely silent. It is the single most likely place for a version
@@ -1559,6 +1579,10 @@ def main():
     # should be able to find out why from its own log.
     if _DEVICE_NOTE:
         log.info("%s", _DEVICE_NOTE)
+    # Decided before the heavy imports (see _CPU) and reported here, once there is somewhere
+    # for it to go. Logged on EVERY node, not only on a refusal: the fleet's real instruction-set
+    # floor is a thing to learn from the machines that join, not to assume.
+    log.info("%s", cpu_check.summary(_CPU))
     ap = argparse.ArgumentParser(description="Run a NEURON node agent.")
     # One machine could only ever run ONE agent, because the config path was a module
     # constant. That is fine for a stranger donating one PC, and wrong for anyone holding the
