@@ -292,22 +292,6 @@ def canonical_assignment(nodes, total, s1=None, max_stages=None, serving_model_i
     if len(elig) < config.MIN_PIPELINE_STAGES or total <= s1:
         return []
 
-    want1 = (0, s1 - 1)
-    holding = [n for n in elig if (n["layer_start"], n["layer_end"]) == want1]
-    if holding:
-        driver = sorted(holding, key=lambda n: n["node_id"])[0]
-    else:
-        # No incumbent. Prefer the machine most able to carry the head, deterministically --
-        # stage 1 also runs the embedding and the lm_head, so it is the worst place for the
-        # weakest node. Deterministic ties keep two sweeps a second apart from disagreeing.
-        driver = sorted(elig, key=lambda n: (-(n.get("ram_gb") or 0.0), n["node_id"]))[0]
-
-    rest = sorted([n for n in elig if n["node_id"] != driver["node_id"]],
-                  key=lambda n: (n["layer_start"], n["node_id"]))
-    n_stages = min(max_stages - 1, len(rest))
-    remaining = total - s1
-    base, extra = divmod(remaining, n_stages)
-
     # MEMORY. An even split is a fine default and a bad promise -- the same lesson [P26] cost a
     # live outage for, and this function reproduced it: on the 1.5B floor an even split is
     # harmless, but on the 7B tier it would hand an 8 GB office PC 9 layers (~8.4 GB at fp32).
@@ -315,6 +299,52 @@ def canonical_assignment(nodes, total, s1=None, max_stages=None, serving_model_i
     # spills onto the next stage. gb_per_layer of None (an unknown model) means no constraint,
     # which is exactly the behaviour from before tiers carried the figure.
     gpl = model_tiers.gb_per_layer_for(serving_model_id) if serving_model_id else None
+    head = model_tiers.head_gb_for(serving_model_id) if serving_model_id else None
+
+    def _can_drive(n):
+        """Can this node hold stage 1 AND the head it comes with? ([P44])
+
+        The driver's capacity was the one this function never asked about: `out[0]` was emitted
+        unconditionally while `caps` covered only `rest`. That put the largest fixed cost in the
+        model -- the embedding and lm_head, which stage 1 runs -- on the single machine nothing
+        checked. Unknown footprint means unknown, i.e. no constraint, as everywhere else here.
+        """
+        if not gpl:
+            return True
+        cap = balancer.max_layers_for(n, gpl, head_gb=head)
+        return cap is None or cap >= s1
+
+    want1 = (0, s1 - 1)
+    holding = [n for n in elig if (n["layer_start"], n["layer_end"]) == want1]
+    # The incumbent keeps the seat -- UNLESS it cannot hold it. Stability is the reason the
+    # incumbent rule exists, and it is worth a great deal; it is not worth keeping a driver that
+    # will be OOM-killed on the first token, because that is not stability, it is a chain that
+    # breaks every time it is repaired.
+    holding = [n for n in holding if _can_drive(n)]
+    if holding:
+        driver = sorted(holding, key=lambda n: n["node_id"])[0]
+    else:
+        # No incumbent. Prefer the machine most able to carry the head, deterministically --
+        # stage 1 also runs the embedding and the lm_head, so it is the worst place for the
+        # weakest node. Deterministic ties keep two sweeps a second apart from disagreeing.
+        # `balancer.head_node_index` mirrors this ordering and is pinned to it by a test.
+        by_ram = sorted(elig, key=lambda n: (-(n.get("ram_gb") or 0.0), n["node_id"]))
+        able = [n for n in by_ram if _can_drive(n)]
+        if not able:
+            # Nobody can hold stage 1 of this model. There IS no routable shape, which is the
+            # same answer this function already gives for too few nodes -- and the remedy is a
+            # smaller model (the TierController's demotion), not a plan that OOM-kills whoever
+            # drew the short straw. Returning a plan here would be the 2026-08-07 promotion
+            # arriving through the repair path instead of the promote path.
+            return []
+        driver = able[0]
+
+    rest = sorted([n for n in elig if n["node_id"] != driver["node_id"]],
+                  key=lambda n: (n["layer_start"], n["node_id"]))
+    n_stages = min(max_stages - 1, len(rest))
+    remaining = total - s1
+    base, extra = divmod(remaining, n_stages)
+
     caps = [balancer.max_layers_for(rest[i], gpl) if gpl else None for i in range(n_stages)]
 
     out = [{"node_id": driver["node_id"], "layer_start": 0, "layer_end": s1 - 1}]
@@ -342,6 +372,47 @@ def canonical_assignment(nodes, total, s1=None, max_stages=None, serving_model_i
         depth[seg] += 1
         out.append({"node_id": n["node_id"], "layer_start": seg[0], "layer_end": seg[1]})
     return out
+
+
+def assignment_overflow(nodes, assignment, serving_model_id):
+    """Layers this assignment gives nodes that cannot hold them. [] when every node fits.
+
+    **`canonical_assignment` deliberately overfills the last stage and this does not change
+    that.** `cnt = min(cnt, left) if i < n_stages - 1 else left` gives the tail to the final
+    node whatever its cap says, and that is the right call: a gap means not one request
+    completes, while an over-full node might still swap rather than die. Covering the tail
+    beats refusing to.
+
+    What was wrong is that it did so SILENTLY. `main.py` applied the plan and printed
+    `routable=True`, which is exactly the half-answer `chain_shape` was written to end -- a
+    roster can satisfy every structural check and still be dead, and "the chain is repaired" is
+    not the same claim as "every node can hold what it was given". So the overflow is returned
+    rather than swallowed, and the repair log says which node is over and by how much.
+
+    Separate from `canonical_assignment` rather than folded into it because that function
+    returns a LIST and every caller and test unpacks it as one. A pure follow-up query costs
+    nothing and changes no signature.
+
+    Returns [{node_id, layers, max_layers, over}], worst first.
+    """
+    gpl = model_tiers.gb_per_layer_for(serving_model_id) if serving_model_id else None
+    if not gpl:
+        return []
+    head = model_tiers.head_gb_for(serving_model_id)
+    by_id = {n["node_id"]: n for n in nodes}
+    out = []
+    for a in assignment:
+        n = by_id.get(a["node_id"])
+        if not n:
+            continue
+        got = a["layer_end"] - a["layer_start"] + 1
+        # The head follows layer 0, wherever this plan put it -- not whichever machine is
+        # biggest. This describes an assignment that already exists.
+        cap = balancer.max_layers_for(n, gpl, head_gb=(head if a["layer_start"] == 0 else None))
+        if cap is not None and got > cap:
+            out.append({"node_id": a["node_id"], "layers": got, "max_layers": cap,
+                        "over": got - cap})
+    return sorted(out, key=lambda x: -x["over"])
 
 
 def _first_replica(replicas):

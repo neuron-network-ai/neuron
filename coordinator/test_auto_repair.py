@@ -292,6 +292,90 @@ def test_a_node_too_old_to_report_its_model_is_not_a_mismatch():
     assert net["network_healthy"] is True
 
 
+# --------------------------------------------------------------------------- #
+# [P44]: the two stages this function never checked it could fill
+#
+# `caps` covered `rest` only, so the DRIVER -- the node that also holds the embedding and
+# lm_head, the largest fixed cost in the model -- was the one machine whose capacity was never
+# asked about. And the LAST stage takes the whole tail regardless of its cap, which is the right
+# call (a gap means not one request completes) made silently, which is not: main.py applied the
+# plan and printed `routable=True`.
+# --------------------------------------------------------------------------- #
+Q4 = "Qwen/Qwen3-4B-Instruct-2507"
+Q4_LAYERS = 36
+
+
+def _capacity_roster(dtype=None):
+    """The founder's two machines, as the coordinator holds them: a 12 GB Pavilion and an
+    8 GB node, with the 64 GiB OptiPlex deliberately absent."""
+    _clear()
+    for nid, ram, ls, le in (("pavilion", 12.0, 0, 9), ("node-b", 8.0, 10, 27)):
+        models.register_node(nid, "1.1.1.1", 50999, ls, le, 8, ram, f"tok-{nid}",
+                             ms_per_layer=10, trusted=True, weight_dtype=dtype)
+    return models.list_nodes()
+
+
+def test_the_driver_is_checked_for_stage_1_like_every_other_stage():
+    """fp32 Qwen3-4B is 0.4 GB/layer plus a 1.56 GB head. An 18-layer stage 1 is 8.8 GB, which
+    no machine here has. Before this, that plan was emitted anyway."""
+    roster = _capacity_roster()
+    assert router.canonical_assignment(roster, Q4_LAYERS, s1=18, serving_model_id=Q4) == [], \
+        "no node can hold 18 layers of a 4B at fp32; there is no routable shape to return"
+    # and the remedy is a smaller model, which the roster CAN hold
+    assert router.canonical_assignment(roster, N, serving_model_id=config.MODEL_ID)
+
+
+def test_the_same_roster_places_it_once_the_nodes_say_they_store_fp16():
+    """The capacity case. 8.04 GB across two machines that hold 12 and 8 -- neither alone."""
+    roster = _capacity_roster(dtype="fp16")
+    plan = router.canonical_assignment(roster, Q4_LAYERS, s1=18, serving_model_id=Q4)
+    got = {a["node_id"]: (a["layer_start"], a["layer_end"]) for a in plan}
+    assert got == {"pavilion": (0, 17), "node-b": (18, 35)}, got
+    assert router.assignment_overflow(roster, plan, Q4) == [], \
+        "every node must hold what it was given, or this is not a capacity case"
+
+
+def test_an_overfilled_tail_is_still_assigned_but_no_longer_silent():
+    """The tail must stay covered -- a gap means not one request completes. What must stop is
+    covering it without saying so. s1=10 on a 36-layer model leaves 26 layers for one node."""
+    roster = _capacity_roster(dtype="fp16")
+    plan = router.canonical_assignment(roster, Q4_LAYERS, s1=10, serving_model_id=Q4)
+    got = {a["node_id"]: (a["layer_start"], a["layer_end"]) for a in plan}
+    assert got["node-b"] == (10, 35), got            # still covered, deliberately
+    over = router.assignment_overflow(roster, plan, Q4)
+    assert [o["node_id"] for o in over] == ["node-b"]
+    assert over[0]["layers"] == 26 and over[0]["max_layers"] == 18 and over[0]["over"] == 8
+
+
+def test_an_incumbent_driver_that_cannot_hold_its_seat_loses_it():
+    """The incumbent rule exists for STABILITY, which is worth a lot -- but keeping a driver
+    that is OOM-killed on the first token is not stability, it is a chain that breaks every
+    time it is repaired."""
+    _clear()
+    # the small machine is the incumbent on exactly stage 1; the big one is not
+    models.register_node("small", "1.1.1.1", 50999, 0, S1 - 1, 8, 8.0, "tok-small",
+                         ms_per_layer=10, trusted=True)
+    models.register_node("big", "1.1.1.1", 50999, S1, 27, 8, 64.0, "tok-big",
+                         ms_per_layer=10, trusted=True)
+    roster = models.list_nodes()
+    plan = router.canonical_assignment(roster, Q4_LAYERS, s1=14, serving_model_id=Q4)
+    assert plan and plan[0]["node_id"] == "big", (
+        f"stage 1 went to {plan[0]['node_id'] if plan else None}; 14 fp32 layers + head is "
+        f"7.2 GB and `small` has a 3.75 GB budget")
+    # ...and on the model it CAN hold, the incumbent is left exactly where it is
+    keep = router.canonical_assignment(roster, N, serving_model_id=config.MODEL_ID)
+    assert keep[0]["node_id"] == "small", "a driver that fits must not be moved"
+
+
+def test_overflow_reports_nothing_when_the_model_footprint_is_unknown():
+    """An unknown model means unknown footprint, which means no constraint -- the behaviour
+    from before tiers carried a figure, and the answer for an env-injected tier."""
+    roster = _capacity_roster()
+    plan = router.canonical_assignment(roster, N, serving_model_id=config.MODEL_ID)
+    assert router.assignment_overflow(roster, plan, "some/model-nobody-measured") == []
+    assert router.assignment_overflow(roster, plan, None) == []
+
+
 def _run():
     fns = [v for k, v in sorted(globals().items())
            if k.startswith("test_") and callable(v)]

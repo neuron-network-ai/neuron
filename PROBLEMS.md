@@ -124,7 +124,50 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
 
 ## Problems & risks
 
-### [P44] 🔴 Auto-repair assigns the driver and the last node slices it never checks they can hold (2026-08-16)
+### [P44] 🟡 Auto-repair assigns the driver and the last node slices it never checks they can hold — two of three fixed (2026-08-16)
+
+**Fixed: the driver is now checked.** `_can_drive` asks `max_layers_for(n, gpl, head_gb=…)`
+before a node is given stage 1, and the incumbent rule yields to it — stability is worth a
+great deal, and it is not worth keeping a driver that is OOM-killed on the first token, because
+that is not stability, it is a chain that breaks every time it is repaired. When no eligible
+node can hold stage 1 the function returns `[]`, the same answer it already gives for too few
+nodes; the remedy is a smaller model, which is the TierController's demotion, not a plan that
+OOM-kills whoever drew the short straw.
+
+**Fixed: the overfilled tail is no longer silent.** `router.assignment_overflow` is a pure
+follow-up query — separate because `canonical_assignment` returns a list every caller unpacks —
+and `main.py` now logs *"node-b was given 26 layers but can hold 18 — 8 over"* beside the
+repair line. **The tail is still assigned**, deliberately: a gap means not one request
+completes, while an over-full node might swap rather than die. Covering it beats refusing to;
+doing so while printing `routable=True` and nothing else was the half-answer.
+
+**Open, and this is the hard third:** `DRIVER_STAGE1_LAYERS` is a global constant where the
+right value is a function of the model and the roster. 10 is right for 28 layers over three
+machines; 18 is right for 36 over two. It is read from `NEURON_S1` **at import, in two
+processes on two different machines** — `coordinator/config.py` and `neuron_driver.py` — and
+`node_a.coord_get_chain` refuses any chain whose stage 1 is not `[0, expected_s1 - 1]`. So
+changing it means a coordinated restart of the coordinator and every driver, one of which is a
+volunteer's PC nobody can reach. Layer *ranges* have the whole prepare→ready→cutover handshake
+for exactly this reason; `s1` has an env var.
+
+**The fix worth considering** is to delete the constant rather than distribute it.
+`coord_get_chain` does not check a fixed 10 — it checks stage 1 against `expected_s1`, which
+the caller supplies, and the driver already learns its own range from
+`/node/{id}/slice-info`. If `neuron_driver` derived `S1` from its assigned slice instead of
+from the environment, `s1` would follow placement automatically, the coordinator could pick a
+width per model, and the existing migration handshake would carry it safely. That turns a
+value two machines must agree on into one with a single owner. It touches the inference path,
+so it is a deliberate change rather than a tidy-up.
+
+**Until then**, a 36-layer model over two machines needs `NEURON_S1=18` set on the coordinator
+and on the driver. Verified: at `s1=18` with both nodes reporting fp16 the repair path produces
+`pavilion 0-17 / node-b 18-35` with no overflow, and at fp32 it correctly returns no plan.
+
+`coordinator/test_auto_repair.py`: 24 tests, 5 new.
+
+The original filing follows.
+
+### [P44-orig] 🔴 The three holes as first found (2026-08-16)
 
 **`router.canonical_assignment` caps the memory of every stage except the two that most need
 it.** It is applied automatically — `main.py:302`, on any health sweep where the chain reads

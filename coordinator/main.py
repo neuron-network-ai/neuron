@@ -308,6 +308,18 @@ async def health_loop():
                     print(f"[repair] chain was unroutable — reassigned {len(plan)} node(s) to "
                           f"{shape['ranges']} ({shape['stages']} stage(s), "
                           f"routable={shape['routable']})")
+                    # ROUTABLE IS NOT THE SAME CLAIM AS SERVABLE ([P44]). The tail is handed to
+                    # the last node whatever its memory cap says, because a gap means not one
+                    # request completes -- but until now that happened silently and the line
+                    # above was the only thing said about it. A node over its budget is
+                    # OOM-killed on the first token, and the operator's evidence was a repair
+                    # that reported success followed by a chain that broke again.
+                    for o in router.assignment_overflow(roster, plan,
+                                                        serving_model()["model_id"]):
+                        print(f"[repair] WARNING {o['node_id']} was given {o['layers']} layers "
+                              f"but can hold {o['max_layers']} — {o['over']} over. It is "
+                              f"expected to be OOM-killed; the network needs a smaller model "
+                              f"or another machine.")
                 else:
                     print(f"[repair] chain is unroutable and cannot be fixed from this roster: "
                           f"{len(roster)} node(s) known, need at least "
