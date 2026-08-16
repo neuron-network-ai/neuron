@@ -129,6 +129,7 @@ def close_slots(total_layers, now=None, log=print):
 
     spent_today = models.emitted_since(now - 86400.0)
     total_paid, nodes_paid, capped = 0.0, 0, False
+    settled_zero = 0
 
     for slot in sorted(by_slot):
         for entry in plan_slot(by_slot[slot], total_layers, now=now):
@@ -143,7 +144,8 @@ def close_slots(total_layers, now=None, log=print):
             if not models.settle_attendance(entry["node_id"], slot, reward, now=now):
                 continue                      # already settled by another pass -- never pay twice
             if reward <= 0:
-                continue
+                settled_zero += 1             # claimed the hour, paid nothing -- counted so the
+                continue                      # log can tell this apart from "nothing to do"
             if not models.transfer(config.GENESIS_BUCKETS_EMISSION_ID, entry["node_id"], reward):
                 # The pool is empty. The row stays settled at 0 rather than being retried
                 # forever, and this is said loudly: emission ending is a tokenomics event, not
@@ -157,11 +159,20 @@ def close_slots(total_layers, now=None, log=print):
             total_paid += reward
             nodes_paid += 1
 
+    # Log every sweep that had rows, not only the ones that paid. A sweep that settled ten
+    # node-slots at zero and a sweep that did nothing were previously indistinguishable in
+    # the log, which is half of why [P40] could not be answered from the logs alone. The
+    # early return above still keeps a genuinely idle sweep silent.
+    tail = " (daily emission cap reached)" if capped else ""
     if nodes_paid:
         log(f"[emission] paid {total_paid:.4f} NRN to {nodes_paid} node-slot(s) across "
-            f"{len(by_slot)} slot(s)" + (" (daily cap reached)" if capped else ""))
+            f"{len(by_slot)} slot(s)"
+            + (f", {settled_zero} settled at 0" if settled_zero else "") + tail)
+    else:
+        log(f"[emission] settled {settled_zero} node-slot(s) at 0 across "
+            f"{len(by_slot)} slot(s), paid nothing" + tail)
     return {"slots": len(by_slot), "paid": round(total_paid, 6), "nodes": nodes_paid,
-            "capped": capped}
+            "zero": settled_zero, "capped": capped}
 
 
 def coverage_report(nodes, total_layers, now=None):
