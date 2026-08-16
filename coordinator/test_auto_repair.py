@@ -376,6 +376,69 @@ def test_overflow_reports_nothing_when_the_model_footprint_is_unknown():
     assert router.assignment_overflow(roster, plan, None) == []
 
 
+# --------------------------------------------------------------------------- #
+# [P44] part 3: the coordinator is now the SOLE owner of stage-1 width
+#
+# It used to be a value two processes on two machines had to agree on, both reading NEURON_S1 at
+# import. `neuron_driver` now derives it from the shard it actually downloaded, and the
+# coordinator publishes it on slice-info. That removes the cross-machine coupling and leaves a
+# closer one: PLACEMENT (canonical_assignment) and VALIDATION (chain_shape) are still two
+# separate readers of the same constant, and if they ever disagree auto-repair re-places a chain
+# on every sweep that validation then calls unroutable -- a loop that never converges, on the
+# path that runs every 60 seconds.
+# --------------------------------------------------------------------------- #
+def test_placement_and_validation_agree_on_how_wide_stage_one_is():
+    _clear()
+    _reg("driver", 0, 27, ram=68.0)          # one node holding everything: unroutable
+    _reg("mid", 0, 27)
+    _reg("tail", 0, 27)
+    plan = router.canonical_assignment(models.list_nodes(), N)
+    _apply(plan)
+    shape = _shape()
+    assert shape["stage1_ok"], (
+        f"placement produced stage 1 {shape['ranges'][0]} and validation expects "
+        f"{shape['expected_stage1']} — the repair loop cannot converge")
+    assert shape["routable"]
+    # ...and the value both of them used is the one published to drivers, so a driver that
+    # believes slice-info believes what the chain will actually say.
+    assert shape["expected_stage1"] == [0, config.DRIVER_STAGE1_LAYERS - 1]
+
+
+def test_a_repair_at_a_different_width_still_validates_at_that_width():
+    """The capacity case runs at s1=18. Placement and validation have to move together, so
+    this asserts the pair rather than the constant: chain_shape reads the config, so a plan
+    built at any OTHER width must read as unroutable -- which is what stops a hand-placed
+    split from being silently accepted."""
+    _clear()
+    _reg("a", 0, 27, ram=68.0)
+    _reg("b", 0, 27)
+    _apply(router.canonical_assignment(models.list_nodes(), N, s1=S1 + 4))
+    shape = _shape()
+    assert not shape["stage1_ok"], (
+        "a split placed at a width the coordinator does not validate at must NOT read as "
+        "routable, or the driver refuses every request while the dashboard says green")
+    assert shape["expected_stage1"] == [0, S1 - 1]
+
+
+def test_slice_info_publishes_the_width_a_driver_must_build_at():
+    """The field that replaces the shared env var. A driver reads it, downloads a shard of
+    that width, and asserts that width back at the coordinator -- so it has to be the SAME
+    number placement uses, not a second opinion."""
+    _clear()
+    _reg("solo", 0, 9, ram=68.0)
+    from coordinator import sliceinfo
+    real = sliceinfo.slice_info
+    sliceinfo.slice_info = lambda *a, **k: {"model_id": a[0], "layer_start": a[1],
+                                            "layer_end": a[2], "total_layers": a[3]}
+    try:
+        info = main.slice_info("solo")
+    finally:
+        sliceinfo.slice_info = real
+    assert info["driver_stage1_layers"] == config.DRIVER_STAGE1_LAYERS
+    assert info["driver_stage1_layers"] == router.chain_shape(
+        models.list_nodes(), N)["expected_stage1"][1] + 1
+
+
 def _run():
     fns = [v for k, v in sorted(globals().items())
            if k.startswith("test_") and callable(v)]

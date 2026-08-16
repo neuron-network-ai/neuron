@@ -115,7 +115,20 @@ def coord_get_chain(base, prompt, max_tokens, expected_s1, wallet_id, prompt_tok
             f"chain={[n.get('layers') for n in chain]}")
     a, rest = chain[0], chain[1:]
     if a["layers"] != [0, expected_s1 - 1]:
-        raise RuntimeError(f"chain assigns node_a {a['layers']} but shard is 0..{expected_s1-1}")
+        # Refusing is correct and must stay: this driver holds layers 0..expected_s1-1, and
+        # running them against a chain planned for a different width would hand the next node
+        # an activation from the wrong depth -- a wrong answer instead of a clean error.
+        #
+        # The message says what to DO because since [P44] the width is no longer a constant
+        # both sides read from the environment: the coordinator owns it and the driver derives
+        # it from the shard it downloaded. So this now means "my shard is stale", and the fix
+        # is to restart the agent, which re-asks the coordinator and re-fetches. Nothing
+        # re-checks it while running -- the migration handshake covers a node's COMPUTE slice,
+        # not the driver shard, which is a separate download loaded once per process.
+        raise RuntimeError(
+            f"chain assigns node_a {a['layers']} but this driver holds 0..{expected_s1-1}. "
+            f"The coordinator has changed how wide stage 1 is; this driver's shard predates "
+            f"that. Restart the agent to re-fetch it.")
     nxt, last = rest[0], rest[-1]
     # Only a 3-stage chain has a hop beyond the next one. `s2` is where the LAST stage begins
     # either way, which is what both roles slice on.

@@ -76,7 +76,13 @@ def main():
         get_chain(two, 10)                       # our shard is 0..9, chain says 0..13
         check("a chain that does not match our own shard is refused", False)
     except RuntimeError as e:
-        check("a chain that does not match our own shard is refused", "shard is 0..9" in str(e))
+        check("a chain that does not match our own shard is refused", "0..9" in str(e))
+        # Since [P44] the width is no longer a constant both sides read from the environment:
+        # the coordinator owns it and this driver derives it from the shard it downloaded. So
+        # this refusal now means "my shard is stale", and the message has to say what to do
+        # about it -- there is no env var for the operator to go and fix any more.
+        check("...and the refusal names the remedy, not just the mismatch",
+              "Restart" in str(e))
 
     # ---- shapes this driver genuinely cannot route --------------------------- #
     one = [hop("a", "10.0.0.1", 0, 27)]

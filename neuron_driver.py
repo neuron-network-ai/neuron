@@ -45,6 +45,23 @@ from safety import moderation
 log = logging.getLogger("neuron.driver")
 
 # node_a owns layers 0..S1-1; MAX cap guards against runaway generations.
+#
+# **THIS IS NOW A FALLBACK, NOT THE SOURCE.** Read `DRIVER.s1`, which is derived from the shard
+# this process actually loaded. [P44]:
+#
+# `node_a.coord_get_chain` refuses any chain whose stage 1 is not `[0, expected_s1 - 1]`, so
+# this value had to be identical in two processes on two different machines -- here and in
+# `coordinator/config.DRIVER_STAGE1_LAYERS` -- and both read it from the environment AT IMPORT.
+# Changing the width of stage 1 therefore meant a coordinated restart of the coordinator and
+# every driver, including volunteers' PCs nobody can reach. Layer ranges have the whole
+# prepare->ready->cutover handshake for exactly this problem; s1 had an env var and a comment
+# saying "Must match neuron_driver.S1".
+#
+# So the coordinator owns the number alone now (it publishes it on `/node/{id}/slice-info` as
+# `driver_stage1_layers`), the agent downloads a driver shard of that width, and the driver
+# reads its width back off the shard it loaded. This constant remains for the paths with no
+# coordinator and no slice marker -- `node_a.py`, the benchmarks, a bare `neuron_driver` run --
+# and as the last resort when nothing else can be determined.
 S1 = int(os.environ.get("NEURON_S1", "10"))
 MAX_TOKENS_CAP = int(os.environ.get("NEURON_MAX_TOKENS", "512"))
 
@@ -79,6 +96,10 @@ def log_chain_failure(node_ids, err):
 class _Driver:
     def __init__(self):
         self.model = self.tok = self.n = self.eos_id = None
+        # Where stage 1 ends, for THIS process. Set from the shard actually loaded — see the
+        # note on the module-level S1 for why it is not simply that constant. Until something
+        # is loaded there is nothing better to say, so it starts at the fallback.
+        self.s1 = S1
         # Kept for the load path only. It used to serialise this process's own forward pass,
         # which made the DRIVER the bottleneck once agent/node_server.py started batching:
         # measured 99% utilisation on the driver against 7-78% on the nodes. Concurrent
@@ -93,21 +114,32 @@ class _Driver:
     def loaded(self) -> bool:
         return self.model is not None
 
-    def ensure_loaded(self):
+    def ensure_loaded(self, s1=None):
+        """Load the driver shard from the full local HF cache.
+
+        `s1` is the width to load; None keeps whatever this driver already believes. There is
+        no slice marker on this path -- it reads the whole model cache -- so the caller is the
+        only thing that can know better than the fallback.
+        """
         with self._load_lock:
             if self.model is None:
-                print(f"[driver] loading shard (embed + layers 0..{S1 - 1} + lm_head) ...")
+                if s1:
+                    self.s1 = int(s1)
+                print(f"[driver] loading shard (embed + layers 0..{self.s1 - 1} + lm_head) ...")
                 t0 = time.time()
-                tok, model, n = common.load_model_shard(0, S1, embed=True, head=True)
+                tok, model, n = common.load_model_shard(0, self.s1, embed=True, head=True)
                 self._finish_load(tok, model, n, t0, common.MODEL_ID)
 
     def load_from_slice(self, slice_dir):
         """Alternate loader for a byte-range-downloaded SLICE directory (agent/local_chat.py)
         instead of the full local HF cache ensure_loaded() reads from -- same driver role
-        (embed + layers 0..S1-1 + lm_head), same fixed S1, just a lighter on-disk footprint
-        so a personal agent install doesn't need the whole model just to run its own Chat UI.
-        The slice must have been downloaded with is_first_node=True (slice_downloader),
-        which for a tied-lm_head model pulls in everything this role needs."""
+        (embed + layers 0..s1-1 + lm_head), just a lighter on-disk footprint so a personal
+        agent install doesn't need the whole model just to run its own Chat UI. The slice must
+        have been downloaded with is_first_node=True (slice_downloader), which for a
+        tied-lm_head model pulls in everything this role needs.
+
+        **This is where `self.s1` is decided**, from the slice's own marker -- not from the
+        environment, and not from what the coordinator currently wants. See [P44]."""
         with self._load_lock:
             if self.model is None:
                 from transformers import AutoConfig, AutoTokenizer
@@ -115,6 +147,21 @@ class _Driver:
                 import slice_downloader
                 print(f"[driver] loading personal driver slice from {slice_dir} ...")
                 t0 = time.time()
+                # THE SHARD DECIDES s1, not the environment ([P44]). This is the number
+                # `coord_get_chain` asserts against the coordinator's chain, and asserting one
+                # this process cannot serve turns a clean refusal into a wrong answer: the
+                # driver would run 10 layers where the chain expects 18 and hand the next node
+                # an activation from the middle of the model.
+                rng = slice_downloader.slice_range(slice_dir)
+                if rng and rng[0] == 0:
+                    self.s1 = rng[1] + 1
+                elif rng:
+                    # A driver shard must start at layer 0 -- it holds the embedding and runs
+                    # the lm_head. A marker saying otherwise means this directory is a COMPUTE
+                    # slice, not a driver one, and its width is not stage 1's.
+                    print(f"[driver] WARNING slice at {slice_dir} starts at layer {rng[0]}, "
+                          f"not 0 — that is a compute slice, not a driver shard. Keeping "
+                          f"s1={self.s1}.")
                 model = slice_downloader.load_slice_model(slice_dir)
                 tok = AutoTokenizer.from_pretrained(slice_dir)
                 n = AutoConfig.from_pretrained(slice_dir).num_hidden_layers
@@ -123,7 +170,7 @@ class _Driver:
     def _finish_load(self, tok, model, n, t0, source):
         self.tok, self.model, self.n, self.eos_id = tok, model, n, tok.eos_token_id
         print(f"[driver] ready in {time.time() - t0:.1f}s | {source} | "
-              f"layers={n} | owns 0..{S1 - 1}")
+              f"layers={n} | owns 0..{self.s1 - 1}")
 
     def _batchers(self):
         """Two MicroBatchers shared by every concurrent request in this process, built once
@@ -134,7 +181,7 @@ class _Driver:
                 model = self.model
                 self._stage_batcher = batching.MicroBatcher(
                     lambda ids, cache, lengths: batching.first_stage_batched(
-                        model, S1, ids, cache, lengths))
+                        model, self.s1, ids, cache, lengths))
                 self._head_batcher = batching.MicroBatcher(
                     lambda h, _c, _l: batching.apply_lm_head_batched(model, h))
             return self._stage_batcher, self._head_batcher
@@ -160,11 +207,12 @@ class _Driver:
         prompt_tokens = int(input_ids.shape[1])
         t_start = time.time()
 
-        # 1) ask the coordinator for a chain matching our shard (layers 0..S1-1)
+        # 1) ask the coordinator for a chain matching our shard (layers 0..self.s1-1)
         try:
             (host_c, port_c, host_b, port_b, s2, node_ids, request_id, complete_token,
-             hold_amount) = node_a.coord_get_chain(coordinator, router_prompt, max_new, S1,
-                                                   wallet_id, prompt_tokens_estimate=prompt_tokens)
+             hold_amount) = node_a.coord_get_chain(coordinator, router_prompt, max_new,
+                                                   self.s1, wallet_id,
+                                                   prompt_tokens_estimate=prompt_tokens)
         except node_a.InsufficientFunds as e:
             yield {"type": "error", "detail": str(e), "code": "insufficient_funds"}
             return
@@ -195,7 +243,7 @@ class _Driver:
             # might predate wire_codec -- and offers the codecs we can decode. The ack names
             # the peer's pick, or omits it, in which case codec stays None and this
             # connection keeps using the legacy format for the whole request.
-            cfg = {"type": "config", "s1": S1, "s2": chain["s2"],
+            cfg = {"type": "config", "s1": self.s1, "s2": chain["s2"],
                    "wire": wire_codec.preference(model.config.hidden_size)}
             # host_b present -> the next hop relays to a further stage (node_c's role); absent
             # -> it IS the final stage and returns the normed hidden itself (node_b's role).
@@ -257,7 +305,7 @@ class _Driver:
                                    f"{jcache.tokens} tokens)")
             _settle_current(tokens_now)
             (hc, pc, hb, pb, s2b, nids, rid, ctok, hold) = node_a.coord_get_chain(
-                coordinator, router_prompt, max_new, S1, wallet_id,
+                coordinator, router_prompt, max_new, self.s1, wallet_id,
                 prompt_tokens_estimate=prompt_tokens)
             chain.update(host_c=hc, port_c=pc, host_b=hb, port_b=pb, s2=s2b, node_ids=nids,
                          request_id=rid, complete_token=ctok, hold_amount=hold,

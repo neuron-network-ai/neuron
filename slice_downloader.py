@@ -214,6 +214,28 @@ def slice_provenance(target_dir):
         return None
 
 
+def slice_range(target_dir):
+    """(layer_start, layer_end) this directory was downloaded for, or None if unrecorded.
+
+    Ground truth for what a shard HOLDS, which is a different question from what the
+    coordinator currently wants it to hold. `neuron_driver` derives its `s1` from this rather
+    than from an environment variable ([P44]): `node_a.coord_get_chain` refuses any chain whose
+    stage 1 is not the driver's own shard, so the number the driver asserts has to be the
+    number it can actually serve. Claiming the coordinator's newer value while still holding
+    the old weights would turn a clean refusal into a wrong answer.
+
+    The marker rather than the safetensors header because `download_slice` writes it LAST and
+    only on success, so it cannot describe a half-finished download -- and reading it costs a
+    100-byte JSON parse instead of a header fetch, on a path that runs at every driver start.
+    """
+    try:
+        with open(os.path.join(target_dir, SLICE_MARKER)) as f:
+            m = json.load(f)
+        return int(m["layer_start"]), int(m["layer_end"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def download_slice(model_id, layer_start, layer_end, target_dir, is_first_node, is_last_node,
                    revision="main"):
     os.makedirs(target_dir, exist_ok=True)

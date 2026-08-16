@@ -882,8 +882,20 @@ def slice_info(node_id: str):
     from coordinator import sliceinfo
     try:
         sm = serving_model()
-        return sliceinfo.slice_info(sm["model_id"], node["layer_start"],
+        info = sliceinfo.slice_info(sm["model_id"], node["layer_start"],
                                     node["layer_end"], sm["layers"])
+        # HOW WIDE STAGE 1 IS, which is a NETWORK fact and not this node's own range ([P44]).
+        # The driver's shard (embed + 0..s1-1 + lm_head) is a different download from a node's
+        # compute slice, so a machine assigned 18-35 still needs to know stage 1 is 18 wide to
+        # build its Chat UI driver. It rides on slice-info because the agent already calls this
+        # on every start -- a second endpoint would be a second thing to keep in step.
+        #
+        # This is what ends the two-machine env var. `NEURON_S1` had to be set identically on
+        # the coordinator AND on every driver, because `node_a.coord_get_chain` refuses a chain
+        # whose stage 1 is not its own shard; changing it meant a coordinated restart across
+        # machines nobody can reach. Published here, the coordinator owns the number alone.
+        info["driver_stage1_layers"] = config.DRIVER_STAGE1_LAYERS
+        return info
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"could not read model header: {e}")
 

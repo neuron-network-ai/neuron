@@ -18,7 +18,10 @@ tunnel already used for compute nodes) left to the user, not the default.
 """
 import logging
 import os
+import shutil
 import threading
+
+import requests
 
 log = logging.getLogger("neuron.agent.local_chat")
 
@@ -39,21 +42,95 @@ _OAUTH_ENV_MAP = {
 }
 
 
-def ensure_driver_slice(model_id, target_dir):
-    """Download the fixed driver shard if not already present. Reuses the exact same
-    byte-range slice mechanism as a compute-node's slice (slice_downloader) -- just a
-    DIFFERENT, fixed layer range (0..S1-1) with is_first_node=True, which for a tied-
-    lm_head model (Qwen2.5) also pulls in everything this role needs (no separate
-    lm_head.weight tensor exists to fetch)."""
-    import slice_downloader
-    from neuron_driver import S1
+def driver_stage1_layers(coordinator, node_id, fallback=None):
+    """How wide stage 1 is, asked of the coordinator that decides it. [P44]
 
+    The width used to come from `NEURON_S1`, read at import in BOTH this process and the
+    coordinator's, and `node_a.coord_get_chain` refuses any chain whose stage 1 is not the
+    driver's own shard -- so changing it meant a coordinated restart across machines including
+    volunteers' PCs. The coordinator owns it now and publishes it on slice-info, which the
+    agent already calls, so there is no extra request and nothing to keep in step by hand.
+
+    **A driver that cannot reach the coordinator must not become unable to infer**, so every
+    failure here falls back rather than raising: the caller passes what is already on disk, and
+    the last resort is `neuron_driver.S1`. Being unreachable is the moment a personal Chat UI
+    matters most, and a driver that refuses to load because a status endpoint timed out has
+    turned a coordinator outage into a local one.
+
+    Note this is a NETWORK fact, not this node's own range: a machine assigned layers 18-35
+    still drives a chain whose stage 1 is 0-17, and its driver shard is a separate download.
+    """
+    import neuron_driver
+
+    if coordinator and node_id:
+        try:
+            r = requests.get(f"{coordinator.rstrip('/')}/node/{node_id}/slice-info", timeout=15)
+            if r.status_code == 200:
+                s1 = r.json().get("driver_stage1_layers")
+                if isinstance(s1, int) and s1 > 0:
+                    return s1
+                log.info("coordinator did not report driver_stage1_layers (an older build) — "
+                         "using %s", fallback or neuron_driver.S1)
+            else:
+                log.warning("slice-info returned %s asking for the stage-1 width; using %s",
+                            r.status_code, fallback or neuron_driver.S1)
+        except Exception as e:
+            log.warning("could not ask the coordinator for the stage-1 width (%s); using %s",
+                        e, fallback or neuron_driver.S1)
+    return fallback or neuron_driver.S1
+
+
+def _stage1(coordinator, node_id, slice_dir):
+    """The width to build this driver at: what the coordinator says, else what is already on
+    disk, else the compiled-in fallback.
+
+    The middle term is what keeps an offline start working. A driver that has run before holds
+    a shard of a known width, and re-using it is strictly better than downloading a fallback
+    width that may be wrong -- and better than refusing to start, which would turn a
+    coordinator outage into a dead local Chat UI.
+    """
+    import slice_downloader
+    have = slice_downloader.slice_range(slice_dir)
+    on_disk = have[1] + 1 if have and have[0] == 0 else None
+    return driver_stage1_layers(coordinator, node_id, fallback=on_disk)
+
+
+def ensure_driver_slice(model_id, target_dir, s1=None):
+    """Download the driver shard if what is on disk is not the shard we need.
+
+    Reuses the exact same byte-range mechanism as a compute-node's slice (slice_downloader) --
+    just a DIFFERENT layer range (0..s1-1) with is_first_node=True, which for a tied-lm_head
+    model also pulls in everything this role needs (no separate lm_head.weight to fetch).
+
+    `s1` now comes from the coordinator rather than the environment ([P44]), so the width can
+    change -- and a cached shard of the WRONG width is worse than no shard: the driver would
+    assert a stage 1 the coordinator is not planning and every request would be refused by its
+    own consistency check. Existence is therefore no longer sufficient; the range on disk has
+    to match. `os.path.exists(weights)` was the whole test before, which was correct only
+    because the width could never change.
+    """
+    import slice_downloader
+    import neuron_driver
+
+    s1 = int(s1 or neuron_driver.S1)
     weights = os.path.join(target_dir, "model.safetensors")
     if os.path.exists(weights):
-        log.info("personal driver slice already present (%s) — skipping download", target_dir)
-        return target_dir
-    log.info("downloading personal driver slice (layers 0-%d, ~1.4GB) ...", S1 - 1)
-    slice_downloader.download_slice(model_id, 0, S1 - 1, target_dir,
+        have = slice_downloader.slice_range(target_dir)
+        on_model = slice_downloader.slice_provenance(target_dir)
+        if have == (0, s1 - 1) and on_model == model_id:
+            log.info("personal driver slice already present (%s, layers 0-%d) — skipping "
+                     "download", target_dir, s1 - 1)
+            return target_dir
+        # An unrecorded range is treated as a mismatch for the reason `agent.ensure_slice`
+        # treats an unrecorded MODEL as one: provenance we cannot establish is exactly the
+        # case that produces a shard serving something it is not.
+        log.warning("driver slice on disk is %s of %s but this driver needs layers 0-%d of "
+                    "%s — discarding it",
+                    f"layers {have[0]}-{have[1]}" if have else "an unrecorded range",
+                    on_model or "an unrecorded model", s1 - 1, model_id)
+        shutil.rmtree(target_dir, ignore_errors=True)
+    log.info("downloading personal driver slice (layers 0-%d) ...", s1 - 1)
+    slice_downloader.download_slice(model_id, 0, s1 - 1, target_dir,
                                     is_first_node=True, is_last_node=False)
     return target_dir
 
@@ -76,11 +153,16 @@ def start(coordinator, model_id, slice_dir, port=DEFAULT_PORT, host="127.0.0.1",
                      "the pipeline-driver slice", model_id)
             if local_gguf.ensure_weights(model_id) is None:
                 log.warning("quantized weights unavailable; falling back to the driver slice")
-                ensure_driver_slice(model_id, slice_dir)
+                ensure_driver_slice(model_id, slice_dir, _stage1(coordinator, node_id,
+                                                                slice_dir))
                 import neuron_driver
                 neuron_driver.DRIVER.load_from_slice(slice_dir)
         else:
-            ensure_driver_slice(model_id, slice_dir)
+            # Ask the coordinator how wide stage 1 is BEFORE downloading, so the shard matches
+            # what the chain will be planned as ([P44]). This is the whole of "no coordinated
+            # restart": the width follows placement, and a change is carried by re-downloading
+            # a shard rather than by editing an environment variable on every machine.
+            ensure_driver_slice(model_id, slice_dir, _stage1(coordinator, node_id, slice_dir))
             # neuron_driver.DRIVER is a process-wide singleton also used by ui.app / api.
             # openai_compat -- pre-load it from OUR slice dir before ui.app's own lifespan
             # hook calls ensure_loaded(), which is then a no-op (self.model is already set).
