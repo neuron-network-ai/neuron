@@ -230,6 +230,105 @@ def payout_bind_proxy(body: PayoutBindBody, request: Request):
         return JSONResponse({"error": "could not reach the coordinator"}, status_code=502)
 
 
+# --------------------------------------------------------------------------- #
+# This machine's own node: recording who owns its earnings  ([P39] phase 2)
+#
+# A node's balance is credentialed only by the node_token in config.json. Lose the file, lose
+# the money, and migrate_ledger.py skips the account as `unmapped`. The fix is to record the
+# wallet a person actually signs into -- and this is the one moment both facts are in the same
+# process: the agent knows its node_id, and the session knows who just logged in.
+#
+# NODE_TOKEN is read from the environment the agent put it in and never leaves this process.
+# The browser sees a node_id and an address; it never sees the token, and it never supplies the
+# wallet id either -- that comes from the session, so this cannot be used to bind somebody
+# else's wallet as the owner.
+# --------------------------------------------------------------------------- #
+NODE_ID = os.environ.get("NEURON_NODE_ID") or None
+NODE_TOKEN = os.environ.get("NEURON_NODE_TOKEN") or None
+
+
+class NodeBindBody(BaseModel):
+    address: str
+    nonce: str
+    signature: str
+    old_signature: str | None = None
+
+
+@app.get("/node/owner")
+def node_owner(request: Request):
+    """Does this machine serve a node, and is its owner recorded yet?
+
+    Drives whether the UI offers the prompt at all. A driver-only machine has no node_id and
+    gets `is_node: false` — there is nothing to own, and asking would be noise.
+    """
+    wallet_id = request.session.get("wallet_id")
+    if not (NODE_ID and NODE_TOKEN):
+        return {"is_node": False, "logged_in": bool(wallet_id)}
+    try:
+        r = requests.get(f"{COORDINATOR}/node/{NODE_ID}/payout-address",
+                         headers={"X-Node-Token": NODE_TOKEN}, timeout=8)
+        r.raise_for_status()
+        data = r.json()
+    except requests.RequestException as e:
+        return {"is_node": True, "node_id": NODE_ID, "logged_in": bool(wallet_id),
+                "error": str(e)}
+    return {"is_node": True, "node_id": NODE_ID, "logged_in": bool(wallet_id),
+            "payout_address": data.get("payout_address"),
+            "owner_wallet_id": data.get("owner_wallet_id"),
+            # The prompt is worth showing only when there is something to record AND somebody
+            # to record it against.
+            "needs_owner": bool(wallet_id) and not data.get("owner_wallet_id")}
+
+
+@app.get("/node/payout/challenge")
+def node_payout_challenge(address: str, request: Request):
+    """The nonce and exact text this MACHINE's node must sign, for `address`."""
+    if not (NODE_ID and NODE_TOKEN):
+        return JSONResponse({"error": "this machine does not serve a node"}, status_code=404)
+    if not request.session.get("wallet_id"):
+        return JSONResponse({"error": "sign in first"}, status_code=401)
+    try:
+        r = requests.get(f"{COORDINATOR}/node/{NODE_ID}/payout-challenge",
+                         params={"address": address},
+                         headers={"X-Node-Token": NODE_TOKEN}, timeout=8)
+        if r.status_code == 400:
+            return JSONResponse({"error": r.json().get("detail", "bad address")},
+                                status_code=400)
+        r.raise_for_status()
+        return r.json()
+    except requests.RequestException as e:
+        log.warning("node payout challenge failed: %s", e)
+        return JSONResponse({"error": "could not reach the coordinator"}, status_code=502)
+
+
+@app.post("/node/payout/bind")
+def node_payout_bind(body: NodeBindBody, request: Request):
+    """Bind the address AND record the owner in one call.
+
+    `owner_wallet_id` is taken from the SESSION, never from the request body — the page cannot
+    nominate somebody else as the owner of this machine's earnings. The coordinator records it
+    only if the signature verifies, which is what makes a copied node_token insufficient to
+    move ownership later.
+    """
+    if not (NODE_ID and NODE_TOKEN):
+        return JSONResponse({"error": "this machine does not serve a node"}, status_code=404)
+    wallet_id = request.session.get("wallet_id")
+    if not wallet_id:
+        return JSONResponse({"error": "sign in first"}, status_code=401)
+    payload = {**body.model_dump(), "owner_wallet_id": wallet_id}
+    try:
+        r = requests.post(f"{COORDINATOR}/node/{NODE_ID}/payout-address", json=payload,
+                          headers={"X-Node-Token": NODE_TOKEN}, timeout=12)
+        if r.status_code == 400:
+            return JSONResponse({"error": r.json().get("detail", "binding refused")},
+                                status_code=400)
+        r.raise_for_status()
+        return r.json()
+    except requests.RequestException as e:
+        log.warning("node payout bind failed: %s", e)
+        return JSONResponse({"error": "could not reach the coordinator"}, status_code=502)
+
+
 @app.get("/network")
 def network():
     """Live node count + health, for the UI header. Talks to the coordinator

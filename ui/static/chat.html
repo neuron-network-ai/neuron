@@ -507,6 +507,7 @@ function wireWalletReveal(walletId){
     });
     box.appendChild(code); box.appendChild(note); box.appendChild(copy);
     box.appendChild(buildPayoutSection());
+    box.appendChild(buildNodeOwnerSection());
     box.classList.add("show");
   });
 }
@@ -588,6 +589,81 @@ function buildPayoutSection(){
       stat.textContent = denied
         ? "You declined the signature. Nothing changed."
         : ("Could not bind: " + (err && err.message ? err.message : err));
+      btn.disabled = false;
+    }
+  });
+  return wrap;
+}
+
+// If this machine also SERVES the network, its earnings land in a node account whose only
+// credential is the node_token in config.json -- lose the file, lose the money ([P39]). This
+// is the one screen where both halves are present: the agent knows its node_id, and this
+// session knows who is signed in. Recording the owner here is the difference between "your
+// computer earns NRN" being true and being technically true.
+//
+// Shown only when there is a node AND no owner yet. A driver-only machine gets nothing, and
+// nobody is nagged twice. Skippable by construction: it is a panel, not a gate -- a volunteer
+// without a browser wallet must still be able to run a node.
+function buildNodeOwnerSection(){
+  const wrap = document.createElement("div");
+  wrap.className = "payout";
+  wrap.style.display = "none";
+  const label = document.createElement("div");
+  label.className = "plabel";
+  label.textContent = "This computer's earnings";
+  const val = document.createElement("div");
+  val.className = "pval unset";
+  const stat = document.createElement("div");
+  stat.className = "note";
+  const btn = document.createElement("button");
+  btn.textContent = "Claim with browser wallet";
+  wrap.append(label, val);
+
+  fetch("/node/owner").then(r => r.json()).then(d => {
+    if(!d.is_node || !d.needs_owner) return;      // nothing to own, or already owned
+    wrap.style.display = "";
+    val.textContent = "not claimed — this node's NRN is held under " + d.node_id;
+    stat.textContent = "Sign once to record that these earnings are yours. Without it they "
+      + "are tied to a file on this disk, and are lost with it.";
+    wrap.append(btn, stat);
+  }).catch(() => { /* the chat must not care that this failed */ });
+
+  btn.addEventListener("click", async () => {
+    if(!window.ethereum){
+      stat.textContent = "No wallet extension in this browser. Open NEURON in the browser that "
+        + "holds your wallet, or use tools/sign_payout.html.";
+      return;
+    }
+    btn.disabled = true;
+    try{
+      stat.textContent = "Connecting…";
+      const accounts = await window.ethereum.request({method: "eth_requestAccounts"});
+      const from = accounts[0];
+      stat.textContent = "Preparing a challenge for " + from + " …";
+      const ch = await (await fetch("/node/payout/challenge?address="
+                                    + encodeURIComponent(from))).json();
+      if(ch.error){ stat.textContent = ch.error; btn.disabled = false; return; }
+      stat.textContent = "Approve the signature in your wallet — it moves no funds.";
+      const signature = await window.ethereum.request({
+        method: "personal_sign", params: [ch.message, from]
+      });
+      // No wallet id is sent: ui/app.py takes it from the session, so this cannot record
+      // somebody else as the owner of this machine's earnings.
+      const res = await (await fetch("/node/payout/bind", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({address: ch.address, nonce: ch.nonce, signature})
+      })).json();
+      if(res.error){ stat.textContent = res.error; btn.disabled = false; return; }
+      val.textContent = res.payout_address;
+      val.className = "pval";
+      btn.remove();
+      stat.textContent = "Claimed. These earnings are now recorded as yours, and survive "
+        + "losing this machine.";
+    }catch(err){
+      const denied = err && (err.code === 4001 || /reject|denied/i.test(err.message || ""));
+      stat.textContent = denied
+        ? "You declined the signature. Nothing changed — you can do this any time."
+        : ("Could not claim: " + (err && err.message ? err.message : err));
       btn.disabled = false;
     }
   });

@@ -1238,7 +1238,8 @@ class Agent:
         port = self.cfg.get("local_chat_port", local_chat.DEFAULT_PORT)
         self.local_chat_server = local_chat.start(
             self.base, self.cfg["model_id"], driver_slice_dir,
-            port=port, oauth_cfg=self.cfg.get("oauth"))
+            port=port, oauth_cfg=self.cfg.get("oauth"),
+            node_id=self.cfg.get("node_id"), node_token=self.cfg.get("node_token"))
         if self.local_chat_server is None:
             self.local_chat_state = "failed"
             # Report the ACTUAL exception. This used to assert "check whether that port is

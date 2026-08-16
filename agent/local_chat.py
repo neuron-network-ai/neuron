@@ -58,7 +58,8 @@ def ensure_driver_slice(model_id, target_dir):
     return target_dir
 
 
-def start(coordinator, model_id, slice_dir, port=DEFAULT_PORT, host="127.0.0.1", oauth_cfg=None):
+def start(coordinator, model_id, slice_dir, port=DEFAULT_PORT, host="127.0.0.1", oauth_cfg=None,
+          node_id=None, node_token=None):
     """Download the driver slice (if needed) and serve the Chat UI on `host:port` in a
     background thread. Returns the running uvicorn.Server (call .should_exit = True to stop
     it) or None if startup failed -- a broken local chat UI must never take down the agent's
@@ -95,6 +96,15 @@ def start(coordinator, model_id, slice_dir, port=DEFAULT_PORT, host="127.0.0.1",
             value = (oauth_cfg or {}).get(cfg_key)
             if value:
                 os.environ.setdefault(env_name, value)
+        # This machine's own node identity, so the Chat UI can offer to record the wallet that
+        # owns its earnings ([P39] phase 2). The UI runs in THIS process and proxies
+        # server-side, exactly as it already does for the wallet payout routes -- the token
+        # never reaches the browser. Absent when this machine is a driver only, and the UI
+        # then simply does not show the prompt.
+        if node_id:
+            os.environ.setdefault("NEURON_NODE_ID", node_id)
+        if node_token:
+            os.environ.setdefault("NEURON_NODE_TOKEN", node_token)
         import uvicorn
         from ui.app import app
 
