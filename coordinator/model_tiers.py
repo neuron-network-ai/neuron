@@ -89,10 +89,12 @@ _DEFAULT_TIERS = [
     # 8 GB machines with room: caps of 29 + 18 against 36 layers needed.
     #
     # `manual_only` because this is an EXPERIMENT, and because the ladder would take it: at
-    # min_nodes 2 the live 3-node network clears the promote margin, and the 68 GB machine
-    # makes it placeable at fp32 — so the network would migrate itself onto a 4B model on a
-    # health sweep, which is not what "run a model your machine can't run" is supposed to mean.
-    # Reach it with `pinned_model_id`, deliberately, on the roster you meant.
+    # min_nodes 2 the live 3-node network clears the promote margin, and the 64 GiB OptiPlex
+    # makes it placeable even at fp32 — so the network would migrate itself onto a 4B model on
+    # a health sweep, which is not what "run a model your machine can't run" is supposed to
+    # mean. Reach it with `pinned_model_id`, deliberately, on the roster you meant.
+    # (That machine appears on the roster as 68 GB: `agent.py` reports decimal GB and 64 GiB
+    # is 68.7 of them. 64 is the machine; 68 is the unit. Neither is a typo.)
     #
     # Figures measured 2026-08-16 by tools/measure_model.py from the published safetensors
     # header: 36 layers x 100,930,816 params, embedding 388,956,160 and tied, Apache-2.0,

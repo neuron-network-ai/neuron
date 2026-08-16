@@ -5478,7 +5478,7 @@ claim — that GEMM work is now the dominant cost — remains inferred, not obse
 ## Session 60 (2026-08-16) — the capacity case, and the precision nobody could declare
 
 The goal was a ~4B model in fp32 across the 12 GB Pavilion and the 8 GB node, excluding the
-68 GB machine: neither can hold it, together they can. The download side was never in doubt —
+64 GiB OptiPlex: neither can hold it, together they can. The download side was never in doubt —
 `slice_downloader.py` has fetched per-tensor byte ranges since Session 8, which is exactly what
 Sergio's `spikingbrain-cpu-cluster` shows working on 2012-era hardware. The coordinator's
 arithmetic was the blocker, in two places, and the first thing measurement did was move the
@@ -5551,7 +5551,7 @@ browser. That is [P34] a third time. The reasoning now sits in the comment that 
 invite it.
 
 **A promotable 4b tier.** At `min_nodes` 2 the live 3-node network clears the 15% promote
-margin, and the 68 GB machine makes it placeable even at fp32 — so shipping the row plainly
+margin, and the OptiPlex makes it placeable even at fp32 — so shipping the row plainly
 would have migrated production onto a 4B model on the next health sweep. That is the
 2026-08-07 auto-promotion arriving from a new direction. `manual_only` makes a tier invisible to
 the ladder in both directions: never promoted to, and never the answer a demotion falls back
@@ -5566,6 +5566,25 @@ deliberately bypassed. On this roster that means the driver takes layers 0–9 (
 3.75 GB budget. `balancer.solve` proposes 18/18 for the same two machines and `plan_migration`
 respects the caps; auto-repair runs last, writes directly, and overrides both. Filed as [P44],
 🔴 because it is the automatic path and nothing downstream re-checks what it wrote.
+
+### 68 GB of RAM does not exist, and the roster says it anyway
+
+The founder read the machine sizes back and stopped on one: the OptiPlex is a 64 GB box, and
+nothing about "68 GB" is a real specification. It is also not bad data. `agent.py` reports
+`int(psutil.virtual_memory().total // 10**9)` — **decimal** GB — while RAM is installed in
+**binary** GiB, and 64 GiB is 68.7 decimal GB. The dashboard has been printing 68 since the
+first roster (there is a line of it in Session 43's output). Same box, different unit.
+
+Worth writing down for two reasons. The number is load-bearing — every capacity decision in
+this session came out of it — and the truncation always rounds down, so every machine is
+credited less than it has: the 12 GiB Pavilion is 12.88 GB and gets 12, the 8 GiB node is 8.59
+and gets 8. About 3 and 2 layers of Qwen3-4B at fp16, thrown away. The direction is the safe
+one and the units are at least self-consistent (the tier table is decimal too), so nothing
+here is wrong — but a figure that reads as a typo is a figure people stop trusting, and this
+one is the input to every OOM decision the coordinator makes. Recorded as [P43] item 4.
+
+Every capacity figure above is on the reported basis, so the true margins are slightly better.
+The fp32 refusal does not move: on true decimal GB the pair holds 24 of 36 layers, not 21.
 
 So the honest state: the arithmetic is right, tested, and says yes at fp16. **No forward pass
 of a 4B model has been run.** Everything here is a published header plus a dtype measurement

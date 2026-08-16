@@ -336,7 +336,7 @@ def test_snapshot_separates_feasible_from_placeable():
 # manual_only: a tier the ladder can see and must never climb to
 #
 # The 4b capacity tier is an EXPERIMENT, and the live 3-node network would take it: min_nodes 2
-# clears the 15% promote margin at 3 nodes, and the 68 GB machine makes it placeable even at
+# clears the 15% promote margin at 3 nodes, and the 64 GiB OptiPlex makes it placeable even at
 # fp32. Without this flag, adding the row migrates the production network onto a 4B model on
 # the next health sweep -- the 2026-08-07 auto-promotion, again, from a different direction.
 # --------------------------------------------------------------------------- #
@@ -401,7 +401,9 @@ def test_the_capacity_case_is_the_one_that_was_measured():
     assert mt.placeable(fp16, t) is True
     for one in fp16:
         assert mt.placeable([one], t) is False, f"{one['node_id']} alone must not hold it"
-    # and the 68 GB machine is exactly what makes it NOT a capacity case
+    # ...and the big machine is exactly what makes it NOT a capacity case. 68.0 because that
+    # is what a 64 GiB box REPORTS -- agent.py converts binary GiB to decimal GB, so the
+    # roster figure is 68. Fixtures use the reported value, not the sticker on the DIMM.
     assert mt.placeable([dict(pav, node_id="optiplex", ram_gb=68.0)], t) is True
     assert balancer.capacity_shortfall(fp16, t["layers"], t["gb_per_layer"], t["head_gb"]) == 0
 

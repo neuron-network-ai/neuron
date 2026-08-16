@@ -648,6 +648,18 @@ class Agent:
             # when it is usually on a charger and its owner does not think in UTC hours.
             "declared_slots": self.cfg.get("declared_slots"),
             "cores": os.cpu_count(),
+            # DECIMAL GB, truncated — and this is where the roster's odd-looking numbers are
+            # manufactured, so it is worth stating once. RAM is sold and installed in binary
+            # GiB, and `// 10**9` converts to decimal GB: **a 64 GiB machine reports 68**
+            # (68,719,476,736 / 1e9 = 68.7). Nobody buys 68 GB of RAM; the dashboard says it
+            # because this line said it. Same box, different unit.
+            #
+            # The truncation always rounds DOWN, so every node is credited slightly less than
+            # it has: the 12 GiB Pavilion is 12.88 decimal GB and reports 12, the 8 GiB node is
+            # 8.59 and reports 8. Safe (under-crediting costs throughput, over-crediting costs
+            # a volunteer's machine) and consistent with the tier table, whose figures are also
+            # decimal — but it is ~0.9 GB of real budget thrown away on a 12 GiB machine, which
+            # is ~3 layers of Qwen3-4B at fp16. See [P43].
             "ram_gb": int(psutil.virtual_memory().total // 10**9),
             # What this node will STORE weights at, which halves or doubles every footprint the
             # coordinator sizes it from ([P43]). `balancer.weight_bytes_for` has read this field

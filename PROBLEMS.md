@@ -236,6 +236,22 @@ budget all day. That is [P34] a third time. It needs an age and a heartbeat re-r
   3. **The 4b tier is `manual_only`** and reachable only by an operator pin, deliberately — at
      min_nodes 2 the live 3-node network clears the promote margin, so shipping it on the
      ladder would migrate production onto an experiment on a health sweep.
+  4. **Every node is credited slightly less RAM than it has, and the roster reads oddly
+     because of it.** `agent.py` sends `int(psutil.virtual_memory().total // 10**9)` — decimal
+     GB, truncated — while RAM is installed in binary GiB. So **the 64 GiB OptiPlex reports
+     68**, which is arithmetically right (68.7 decimal GB) and looks like a typo, because
+     nobody sells 68 GB of RAM. Raised by the founder reading the number back, which is exactly
+     how a unit artifact gets caught.
+     The sizing is not wrong — the tier table is decimal too, so the units agree — but the
+     truncation always rounds DOWN: the 12 GiB Pavilion is 12.88 GB and is credited 12, the
+     8 GiB node is 8.59 and is credited 8. That is ~0.9 GB and ~0.6 GB of real budget thrown
+     away, which at fp16 is about 3 and 2 layers of Qwen3-4B. Conservative, so not urgent —
+     under-crediting costs throughput, over-crediting costs a volunteer's machine — but it is a
+     systematic error in the one number every capacity decision rests on. Reporting bytes, or
+     GiB with the tier table converted to match, would remove both the lost budget and the
+     confusing display. **Every figure in this entry is on the reported (truncated) basis**, so
+     the real margins are slightly better than stated; the fp32 refusal is unaffected — on true
+     decimal GB the two machines hold 24 of 36 layers rather than 21.
 
 Related: [P44] (the placement path that ignores all of this), [P2] (why compute stays fp32),
 [P26] and the 2026-08-07 promotion (aggregate RAM is not a per-node answer).

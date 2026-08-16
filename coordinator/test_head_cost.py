@@ -208,8 +208,8 @@ def main():
           and budget(4.0) < head32)
 
     # ---------- 10. the capacity case itself ------------------------------------
-    # The thing this was built for: a model neither machine can hold, across both. The 68 GB
-    # box is deliberately absent -- with it there is no capacity case, only a big node.
+    # The thing this was built for: a model neither machine can hold, across both. The 64 GiB
+    # OptiPlex is deliberately absent -- with it there is no capacity case, only a big node.
     two = [node("pavilion", 12.0), node("node-b", 8.0)]
     short32 = balancer.capacity_shortfall(two, Q4_LAYERS, Q4_GB_PER_LAYER, Q4_HEAD_GB)
     two16 = [dict(n, weight_dtype="fp16") for n in two]
