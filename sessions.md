@@ -5399,7 +5399,87 @@ already looking; the scout is the sole part that reaches a stranger, and its las
 human deciding the reply genuinely helps and pasting it. There is no lawful automation of that
 step, and the deferred work is listed in `neuron-growth/README.md` rather than here.
 
+## Session 59 (2026-08-16) — the Pavilion on Ethernet, and a measurement that had to be taken twice
+
+Session 23 concluded *"the real bottleneck is now the network, not the kernel"* — three
+machines at 15%/14%/11% utilisation, idle ~85% of the time waiting on the wire — and made
+one recommendation: **put node_c on Ethernet before any further engine work.** Session 24
+repeated it. It sat undone for two weeks. It is done now, and the number is larger than the
+one that motivated it.
+
+### Plugging the cable in was not what fixed it
+
+`enp2s0` came up at 1000 Mb/s full duplex and then sat in `connecting (getting IP
+configuration)` indefinitely. Not a driver fault: DHCP requests went out and the router
+answered — with `192.168.1.10`, which the OptiPlex already holds **statically**, because it
+is the household DNS server the router itself advertises to every client. NetworkManager's
+conflict detection refused the lease, correctly, every 40 seconds.
+
+The router's Static DHCP table had a reservation for `.10` against MAC
+`00:11:22:33:44:55`, which reads exactly like a placeholder someone typed once. It is not:
+that is the Pavilion's own wired MAC. So the reservation was doing precisely what it was
+told, and the mistake was older — `.10` was handed to the Pavilion while the OptiPlex was
+already sitting on it. **The router was advertising an address as the DNS server while
+simultaneously treating it as free to lease.** Any new wired device would have hit this;
+the Pavilion was just the first to ask.
+
+Resolved by giving the Pavilion `192.168.1.11` (`nmcli ... ipv4.method manual`), which the
+wired profile takes at route metric 100 against Wi-Fi's 600, so it wins the default route
+without disturbing Wi-Fi as a fallback. **The router still does not know about `.11`** — the
+reservation row should be moved from `.10` to `.11`, or this recurs the day the pool reaches
+it. Removing `.10` from the OptiPlex was considered and rejected: it would have taken
+household DNS down for everyone, on a box also running ~60 containers.
+
+### The measurement, taken twice, because the first one was of the wrong thing
+
+ICMP first: Tailscale RTT to the Pavilion fell from a logged 44–148 ms to 0.68–9.6 ms. That
+looked like a 30–60× win, so it was checked with the real payload — 12,508 bytes, the fp32
+activation size from `bench_wire.py` — round-tripping between the OptiPlex and the Pavilion:
+
+    300 round trips, back to back:
+      wired   p50 0.94 ms   stdev 0.14   max 1.89
+      wi-fi   p50 1.90 ms   stdev 0.45   max 5.09
+
+Two times, not sixty. That was written down as a correction to Session 23 — **and the
+correction was wrong.** 300 back-to-back round trips keep a Wi-Fi radio awake. NEURON never
+produces that pattern: each link carries one activation, then waits 100–300 ms while the
+node downstream computes. Per link, the traffic is *sparse*, which is the case power-save
+punishes. Re-run with a gap between sends:
+
+    60 round trips, paced:
+                  gap=0ms    gap=150ms   gap=300ms
+      wired        0.81 ms     2.40 ms      4.00 ms
+      wi-fi        1.88 ms    54.54 ms    108.71 ms
+
+**At the duty cycle the pipeline actually runs at, Wi-Fi cost 54–109 ms per hop and Ethernet
+costs 2.4–4.0 ms.** Session 23 was right; the intermediate "correction" was an artefact of
+benchmarking a pattern the system does not have. Two hops per token puts **110–220 ms per
+token of pure wire wait** into the old numbers, against a token that cost 300–1100 ms — which
+is the same story as "idle ~85% waiting on the wire", arrived at independently.
+
+The lesson is narrower than "measure, don't guess", because both measurements were real: a
+link's latency is not a property of the link alone, it is a property of the link **and the
+duty cycle you drive it at**. Back-to-back and paced differed by 29× on the same hardware in
+the same minute. Same family as [P34] — a number that was true when captured and false when
+applied to a different question.
+
+### What this unblocks
+
+Every throughput figure on record was measured across that penalty, including the
+`3.2 → 4.6 → 6.2 tok/s` scaling curve and the sub-linearity attributed to heterogeneity and
+the head cost. Those should be re-run. Jitter is also down from 23.9 ms to 0.44 ms (mdev,
+LAN ping), which is the noise that forced config-by-config interleaving and manufactured the
+fake +73% — so for the first time a block-vs-block A/B on this network may be trustworthy.
+
+Not verified: end-to-end tok/s. `/infer` requires an OAuth-linked wallet and holds NRN, so no
+generation was run; everything above is the transport measured directly. The engine-side
+claim — that GEMM work is now the dominant cost — remains inferred, not observed.
+
 ## Known limits / next steps
+- **The 3.2 / 4.6 / 6.2 tok/s scaling curve predates Ethernet** and was measured with
+  54–109 ms of Wi-Fi power-save latency on every node_c hop (Session 59). The sub-linearity
+  attributed to heterogeneity and node_a's head cost may be substantially that instead.
+  Re-run before optimising against it.
 - **Emission has never been observed, and it is distributing NRN now** — [P40]. Ranked
   first here because it is the only unverified path whose output a volunteer will
   actually check, and `total_earned` only grows, so an error compounds silently rather
