@@ -278,7 +278,8 @@ async def health_loop():
                       f"and will retry): {type(e).__name__}: {e}")
             roster = models.list_nodes()
             sm_layers = serving_model()["layers"]
-            shape = router.chain_shape(roster, sm_layers)
+            shape = router.chain_shape(roster, sm_layers,
+                                       serving_model_id=serving_model()['model_id'])
             # AUTO-REPAIR. Detection alone meant a human had to notice and run `neuron fix`
             # after every join or leave -- which on 2026-08-10 meant the chain sat unroutable
             # overnight while nobody was awake. The coordinator knows the one routable shape for
@@ -304,7 +305,8 @@ async def health_loop():
                 if plan:
                     for a in plan:
                         models.update_layers(a["node_id"], a["layer_start"], a["layer_end"])
-                    shape = router.chain_shape(models.list_nodes(), sm_layers)
+                    shape = router.chain_shape(models.list_nodes(), sm_layers,
+                                               serving_model_id=serving_model()['model_id'])
                     print(f"[repair] chain was unroutable — reassigned {len(plan)} node(s) to "
                           f"{shape['ranges']} ({shape['stages']} stage(s), "
                           f"routable={shape['routable']})")
@@ -894,7 +896,7 @@ def slice_info(node_id: str):
         # the coordinator AND on every driver, because `node_a.coord_get_chain` refuses a chain
         # whose stage 1 is not its own shard; changing it meant a coordinated restart across
         # machines nobody can reach. Published here, the coordinator owns the number alone.
-        info["driver_stage1_layers"] = config.DRIVER_STAGE1_LAYERS
+        info["driver_stage1_layers"] = model_tiers.stage1_for(sm["model_id"])
         return info
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"could not read model header: {e}")
@@ -1452,7 +1454,7 @@ def _network_summary():
     total_covered = len(covered & set(range(sm_layers)))
     # Reuses the roster already fetched above rather than calling build_chain(), which would hit
     # the DB a second time inside a function the dashboard calls on every page load.
-    shape = router.chain_shape(nodes, sm_layers)
+    shape = router.chain_shape(nodes, sm_layers, serving_model_id=sm['model_id'])
     return {
         "total_nodes": len(nodes),
         "online_nodes": len(online),

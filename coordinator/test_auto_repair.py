@@ -420,6 +420,41 @@ def test_a_repair_at_a_different_width_still_validates_at_that_width():
     assert shape["expected_stage1"] == [0, S1 - 1]
 
 
+def test_stage1_width_is_per_model_now_that_the_driver_follows_it():
+    """A global constant was the wrong shape: 10 is right for 28 layers over three machines
+    and wrong for 36 over two, where the second node would be handed 26 layers. It could not
+    vary while the driver read NEURON_S1 at import; it can now."""
+    assert model_tiers.stage1_for(config.MODEL_ID) == config.DRIVER_STAGE1_LAYERS, \
+        "the serving model must be placed exactly as before this change"
+    assert model_tiers.stage1_for(Q4) == 18
+    assert model_tiers.stage1_for("some/model-with-no-tier") == config.DRIVER_STAGE1_LAYERS, \
+        "an unknown model keeps the global default rather than becoming unplaceable"
+
+
+def test_the_capacity_case_places_with_no_environment_variables_at_all():
+    """The end of the coordinated restart. Two machines, a 36-layer model, and the split that
+    fits — chosen because the TIER says stage 1 is 18, not because someone exported NEURON_S1
+    on the coordinator and on every driver."""
+    roster = _capacity_roster(dtype="fp16")
+    plan = router.canonical_assignment(roster, Q4_LAYERS, serving_model_id=Q4)   # no s1= !
+    _apply(plan)
+    got = {a["node_id"]: (a["layer_start"], a["layer_end"]) for a in plan}
+    assert got == {"pavilion": (0, 17), "node-b": (18, 35)}, got
+    assert router.assignment_overflow(roster, plan, Q4) == []
+    shape = router.chain_shape(models.list_nodes(), Q4_LAYERS, serving_model_id=Q4)
+    assert shape["routable"] and shape["expected_stage1"] == [0, 17], shape
+    # ...and a driver asking slice-info is told the same 18, so what it builds is what the
+    # chain will assert. That is the whole loop closed without an environment variable.
+    assert model_tiers.stage1_for(Q4) == shape["expected_stage1"][1] + 1
+
+
+def test_the_capacity_case_is_still_refused_at_fp32():
+    """Placing it is not the same as it fitting. 16.09 GB does not go into two machines
+    holding 20 GB between them, and no per-model stage-1 width changes that."""
+    roster = _capacity_roster()                       # no weight_dtype -> pessimistic fp32
+    assert router.canonical_assignment(roster, Q4_LAYERS, serving_model_id=Q4) == []
+
+
 def test_slice_info_publishes_the_width_a_driver_must_build_at():
     """The field that replaces the shared env var. A driver reads it, downloads a shard of
     that width, and asserts that width back at the coordinator -- so it has to be the SAME

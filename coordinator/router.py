@@ -216,7 +216,7 @@ def covering_and_missing(nodes, total, pick=None):
     return missing, covering_ids
 
 
-def chain_shape(nodes, total, pick=None):
+def chain_shape(nodes, total, pick=None, serving_model_id=None):
     """The SHAPE of the chain a driver would be handed: how many stages, and whether that count
     is one any driver can actually route.
 
@@ -247,7 +247,13 @@ def chain_shape(nodes, total, pick=None):
     # wrong width. Live on 2026-08-10: a halted migration left [[0,16],[17,23],[24,27]] — three
     # stages, 28/28 covered, and this function called it routable while every chat would have
     # been refused. Counting stages answered two thirds of the question.
-    want_stage1 = [0, config.DRIVER_STAGE1_LAYERS - 1]
+    # Resolved per MODEL, because a 36-layer model across two machines needs a stage 1 of
+    # 18 where a 28-layer model across three needs 10 ([P44]). Placement resolves it the
+    # same way through the same function; if these two ever disagreed, auto-repair would
+    # re-place a chain on every sweep that validation then called unroutable.
+    s1 = (model_tiers.stage1_for(serving_model_id) if serving_model_id
+          else config.DRIVER_STAGE1_LAYERS)
+    want_stage1 = [0, s1 - 1]
     stage1_ok = bool(ranges) and ranges[0] == want_stage1
     return {
         "stages": stages,
@@ -286,7 +292,9 @@ def canonical_assignment(nodes, total, s1=None, max_stages=None, serving_model_i
     Returns [] when the roster genuinely cannot form a chain (fewer than MIN_PIPELINE_STAGES
     eligible nodes) -- there is no shape to apply, and saying so is better than inventing one.
     """
-    s1 = config.DRIVER_STAGE1_LAYERS if s1 is None else s1
+    if s1 is None:
+        s1 = (model_tiers.stage1_for(serving_model_id) if serving_model_id
+              else config.DRIVER_STAGE1_LAYERS)
     max_stages = config.PIPELINE_STAGES if max_stages is None else max_stages
     elig = [n for n in nodes if n.get("status") == "online" and n.get("eligible")]
     if len(elig) < config.MIN_PIPELINE_STAGES or total <= s1:

@@ -141,29 +141,62 @@ repair line. **The tail is still assigned**, deliberately: a gap means not one r
 completes, while an over-full node might swap rather than die. Covering it beats refusing to;
 doing so while printing `routable=True` and nothing else was the half-answer.
 
-**Open, and this is the hard third:** `DRIVER_STAGE1_LAYERS` is a global constant where the
-right value is a function of the model and the roster. 10 is right for 28 layers over three
-machines; 18 is right for 36 over two. It is read from `NEURON_S1` **at import, in two
-processes on two different machines** — `coordinator/config.py` and `neuron_driver.py` — and
-`node_a.coord_get_chain` refuses any chain whose stage 1 is not `[0, expected_s1 - 1]`. So
-changing it means a coordinated restart of the coordinator and every driver, one of which is a
-volunteer's PC nobody can reach. Layer *ranges* have the whole prepare→ready→cutover handshake
-for exactly this reason; `s1` has an env var.
+**Fixed: `s1` no longer has to be identical on two machines.** It was read from `NEURON_S1`
+**at import, in two processes** — `coordinator/config.py` and `neuron_driver.py`, each with a
+comment saying it had to match the other — while `node_a.coord_get_chain` refuses any chain
+whose stage 1 is not `[0, expected_s1 - 1]`. Changing it meant a coordinated restart of the
+coordinator and every driver, one of which is a volunteer's PC nobody can reach.
 
-**The fix worth considering** is to delete the constant rather than distribute it.
-`coord_get_chain` does not check a fixed 10 — it checks stage 1 against `expected_s1`, which
-the caller supplies, and the driver already learns its own range from
-`/node/{id}/slice-info`. If `neuron_driver` derived `S1` from its assigned slice instead of
-from the environment, `s1` would follow placement automatically, the coordinator could pick a
-width per model, and the existing migration handshake would carry it safely. That turns a
-value two machines must agree on into one with a single owner. It touches the inference path,
-so it is a deliberate change rather than a tidy-up.
+The constant was deleted rather than distributed. `coord_get_chain` never checked a fixed 10 —
+it checks stage 1 against `expected_s1`, supplied by the caller — so the coordinator now
+publishes `driver_stage1_layers` on `/node/{id}/slice-info` (which the agent already calls),
+the agent fetches a driver shard of that width, and `_Driver` reads the width back off the
+shard it loaded. **The shard decides, deliberately:** a driver must assert only what it can
+serve, because claiming the coordinator's newer value while holding the old weights would run
+10 layers where the chain expects 18 and hand the next node an activation from the wrong depth
+— a wrong answer instead of a clean refusal.
 
-**Until then**, a 36-layer model over two machines needs `NEURON_S1=18` set on the coordinator
-and on the driver. Verified: at `s1=18` with both nodes reporting fp16 the repair path produces
-`pavilion 0-17 / node-b 18-35` with no overflow, and at fp32 it correctly returns no plan.
+Note the width is a NETWORK fact, not a node's own range: a machine assigned 18-35 still
+drives a chain whose stage 1 is 0-17, and its driver shard is a separate download.
 
-`coordinator/test_auto_repair.py`: 24 tests, 5 new.
+**And that unlocked the actual fix: `s1` is now per MODEL.** `model_tiers.stage1_for()` reads
+a tier's `stage1_layers`, falling back to the global default, so the 4b tier declares 18 while
+the 1.5B floor keeps 10 and is placed exactly as before. A global constant was always the
+wrong shape for a value that depends on the model and the roster; it simply could not vary
+while two machines had to agree on it by hand.
+
+Three failure modes guarded:
+  * **Fallbacks never raise.** Coordinator unreachable, non-200, or an older build omitting
+    the field all fall back to what is on disk, then to the constant. Being unreachable is
+    when a personal Chat UI matters most, and a driver that will not load because a status
+    call timed out has turned an outage into a local one.
+  * **A cached driver shard is checked for WIDTH, not just existence.** That test was correct
+    only while the width could never change. A shard of the wrong width is worse than none:
+    the driver asserts a stage 1 the coordinator is not planning and every request is refused
+    on a machine whose weights look perfectly fine. Model and provenance are checked too, as
+    `agent.ensure_slice` already does for a compute slice ([P36]).
+  * **Placement and validation must not drift.** `canonical_assignment` and `chain_shape` are
+    two readers of the same per-model width; if they disagreed, auto-repair would re-place a
+    chain on every 60-second sweep that validation then called unroutable — a loop that never
+    converges. Pinned by test.
+
+**Still open, and verified rather than assumed:** the migration handshake does **not** cover
+the driver shard. It covers a node's COMPUTE slice (`ensure_slice` + `node_server.reload()`);
+the driver shard is a separate download, loaded once per process, and `start_local_chat()` is
+called once at agent startup with nothing re-invoking it. A driver whose shard predates a width
+change keeps refusing chains until the agent restarts. Refusing is the safe direction, so the
+remedy for now is that `coord_get_chain` says *the shard is stale, restart the agent* instead
+of printing two ranges at a person. A real fix is a driver-side reload — `_Driver` would need
+to drop `self.model` and rebuild its batchers under the load lock, with requests in flight —
+and that is inference-path surgery worth doing deliberately.
+
+Verified end to end, with no environment variables set anywhere: two nodes reporting fp16,
+`canonical_assignment` produces `pavilion 0-17 / node-b 18-35`, `assignment_overflow` is empty,
+`chain_shape` reports routable with `expected_stage1 [0, 17]`, and slice-info hands a driver
+the same 18. At fp32 the same roster is refused outright.
+
+`coordinator/test_auto_repair.py`: 30 tests. `test_driver_s1.py`: 17.
+`agent/test_local_chat.py`: 25.
 
 The original filing follows.
 

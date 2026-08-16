@@ -5586,10 +5586,46 @@ one is the input to every OOM decision the coordinator makes. Recorded as [P43] 
 Every capacity figure above is on the reported basis, so the true margins are slightly better.
 The fp32 refusal does not move: on true decimal GB the pair holds 24 of 36 layers, not 21.
 
+### The env var that had to be identical on two machines
+
+`node_a.coord_get_chain` refuses any chain whose stage 1 is not `[0, expected_s1 - 1]`, and
+that number was read from `NEURON_S1` **at import, in two processes on two different
+machines** — `neuron_driver` and `coordinator/config` — each carrying a comment that it had to
+match the other. So changing the width of stage 1 meant a coordinated restart of the
+coordinator and every driver, including volunteers' PCs nobody can reach. Layer ranges have
+the whole prepare→ready→cutover handshake for exactly this problem; `s1` had an environment
+variable and a comment.
+
+The constant was deleted rather than distributed. `coord_get_chain` never checked a fixed 10 —
+it checks against `expected_s1`, which the caller supplies. So the coordinator publishes the
+width on slice-info, the agent fetches a driver shard of that width, and the driver reads the
+width back off the shard it loaded. **The shard decides**, and that direction is the load-
+bearing one: a driver must assert only what it can serve, because claiming the coordinator's
+newer number while holding the old weights would run 10 layers where the chain expects 18 and
+hand the next node an activation from the wrong depth — a wrong answer instead of a clean
+refusal.
+
+Which then unlocked the thing that was actually wanted: **`s1` is per MODEL now.** 10 is right
+for 28 layers over three machines and wrong for 36 over two, where the second node would be
+handed 26 layers it cannot hold. A global constant was always the wrong shape for that; it
+simply could not vary while two machines had to agree on it by hand. The 4b tier declares 18,
+the floor keeps 10, and the capacity case places with **no environment variables set
+anywhere**: `pavilion 0-17 / node-b 18-35`, no overflow, routable, and slice-info hands a
+driver the same 18 the chain will assert.
+
+Checked rather than assumed, and it does not hold: the migration handshake does **not** cover
+the driver shard. It covers a node's compute slice; the driver shard is a separate download
+loaded once per process, and `start_local_chat()` runs once at startup with nothing
+re-invoking it. A driver whose shard predates a width change refuses every chain until the
+agent restarts. Refusing is the safe direction, so for now `coord_get_chain` says *the shard
+is stale, restart the agent* rather than printing two ranges at a person. Recorded in [P44]
+instead of papered over.
+
 So the honest state: the arithmetic is right, tested, and says yes at fp16. **No forward pass
 of a 4B model has been run.** Everything here is a published header plus a dtype measurement
-taken on the 1.5B. The experiment needs `NEURON_S1=18`, `NEURON_WEIGHT_DTYPE=fp16` on both
-nodes, and ~1.6 GB and ~4.4 GB downloaded to machines that have never held a 4B slice.
+taken on the 1.5B. What remains is a deploy, `NEURON_WEIGHT_DTYPE=fp16` on both nodes, the
+OptiPlex out of the roster, a model pin, and 4.41 GB and 3.63 GB downloaded to machines that
+have never held a 4B slice. `CAPACITY_CASE.md` is the runbook.
 
 ## Known limits / next steps
 - **The 3.2 / 4.6 / 6.2 tok/s scaling curve predates Ethernet** and was measured with
@@ -5611,8 +5647,10 @@ nodes, and ~1.6 GB and ~4.4 GB downloaded to machines that have never held a 4B 
   - **A model too big for one node** (the capacity case) — sized and tiered as of
     Session 60, NOT yet run. Qwen3-4B is 16.09 GB at fp32 and does not fit across
     the 12 GB + 8 GB pair; at fp16 storage it is 8.04 GB and does, 29 + 18 layer
-    slots against 36. Blocked on [P44] (auto-repair ignores the caps) and needs
-    `NEURON_S1=18` plus `NEURON_WEIGHT_DTYPE=fp16` on both nodes to try.
+    slots against 36. Placement is done and needs no env var — the 4b tier
+    declares `stage1_layers: 18` and the driver follows it ([P44]). To run it:
+    deploy, `NEURON_WEIGHT_DTYPE=fp16` on both nodes, the OptiPlex out of the
+    roster, pin the model. `CAPACITY_CASE.md` is the runbook.
   - **Dynamic layer assignment** as nodes join/leave.
   - **More concurrency** keeps lifting throughput until every node is ~100% (N 4→8
     took 5.86→6.16); a bigger connection backlog lets more clients queue.

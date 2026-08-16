@@ -23,7 +23,7 @@ model strictly needs more nodes/RAM, so "highest feasible index" == "biggest ser
 import json
 import os
 
-from coordinator import balancer
+from coordinator import balancer, config
 
 
 # A tier = a model + the capacity needed to serve it WITH redundancy.
@@ -100,9 +100,16 @@ _DEFAULT_TIERS = [
     # header: 36 layers x 100,930,816 params, embedding 388,956,160 and tied, Apache-2.0,
     # ungated. min_ram_gb is documentation here — a pinned target is gated by the per-node
     # memory check in migration.update(), not by the aggregate.
+    # `stage1_layers` 18, not the global 10, and this is the setting the whole [P44] fix was
+    # for. 36 layers across two machines splits 18/18; at the global 10 the second node is
+    # handed 26, which is 5.25 GB against a 3.75 GB budget. Until the driver stopped reading
+    # NEURON_S1 this could not be expressed at all -- one number had to serve every model on
+    # every machine, and changing it meant restarting the coordinator and every driver.
+    #   fp16, per node: driver 18 x 0.2019 + 0.7779 head = 4.41 GB of a 6.75 GB budget;
+    #                   tail   18 x 0.2019             = 3.63 GB of a 3.75 GB budget.
     {"name": "4b", "model_id": "Qwen/Qwen3-4B-Instruct-2507", "layers": 36,
      "min_nodes": 2, "min_ram_gb": 18.0, "min_replicas": 1,
-     "gb_per_layer": 0.2019, "head_gb": 0.7779, "manual_only": True,
+     "gb_per_layer": 0.2019, "head_gb": 0.7779, "stage1_layers": 18, "manual_only": True,
      "description": "Qwen3-4B — the capacity case: too big for any one machine here, "
                     "servable across two at fp16 storage."},
     {"name": "7b",   "model_id": "Qwen/Qwen2.5-7B-Instruct", "layers": 28,
@@ -179,6 +186,24 @@ def gb_per_layer_for(model_id):
         if t.get("model_id") == model_id and t.get("gb_per_layer"):
             return float(t["gb_per_layer"])
     return None
+
+
+def stage1_for(model_id):
+    """How wide stage 1 is for this model. [P44]
+
+    **A global constant was the wrong shape for this.** `config.DRIVER_STAGE1_LAYERS` is 10,
+    which is right for a 28-layer model across three machines and wrong for a 36-layer model
+    across two — there, stage 1 has to be 18 or the second node is handed 26 layers it cannot
+    hold. One number cannot be both, and until the driver stopped reading `NEURON_S1` it could
+    not vary at all: changing it meant a coordinated restart of the coordinator and every
+    driver. Now that the driver derives its width from the shard the coordinator told it to
+    fetch, the coordinator is free to answer this per model.
+
+    A tier that does not declare one keeps the global default, so every model served before
+    this is placed exactly as it was.
+    """
+    t = tier_for(model_id) or {}
+    return int(t.get("stage1_layers") or config.DRIVER_STAGE1_LAYERS)
 
 
 def head_gb_for(model_id):
