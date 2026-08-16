@@ -67,6 +67,28 @@ for.)
 
 ---
 
+## Checking it before you deploy anything
+
+```bash
+python tools/capacity_dryrun.py
+```
+
+Prints what the coordinator will decide — driver, layer ranges, resident GB per node, whether
+anyone is over budget, and the downloads. It calls the coordinator's own
+`canonical_assignment` / `chain_shape` / `assignment_overflow` / `capacity_shortfall` on an
+in-memory roster, so it is the real answer rather than a second arithmetic that can drift.
+No database, no server, no VM. Exit code 0 means it would place cleanly, so it can gate a
+deploy.
+
+Worth running the contrast too — it is the whole argument in two commands:
+
+```bash
+python tools/capacity_dryrun.py --dtype fp32
+```
+
+...which is refused, and `--nodes pavilion:12,node-b:8,optiplex:68`, which shows the OptiPlex
+holding all 36 layers by itself and so not being a capacity case at all.
+
 ## Running it
 
 **Nothing here needs `NEURON_S1`.** It used to: stage-1 width was a global constant read from
