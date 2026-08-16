@@ -107,14 +107,24 @@ bash coordinator/deploy.sh
 
 ### 2. Put both nodes on fp16 storage
 
-On the Pavilion and on node-b, before the agent starts:
+**`export` does not work here.** The agent runs as a `systemd --user` service whose unit
+(`agent/install.py:358`) has no `Environment=` line, so a variable exported in a shell never
+reaches it — the command would look like it worked and change nothing, which is the Session 58
+failure exactly. Use a drop-in, on the Pavilion and on the second node:
 
 ```bash
-export NEURON_WEIGHT_DTYPE=fp16
+mkdir -p ~/.config/systemd/user/neuron-agent.service.d && printf '[Service]\nEnvironment=NEURON_WEIGHT_DTYPE=fp16\n' > ~/.config/systemd/user/neuron-agent.service.d/dtype.conf && systemctl --user daemon-reload && systemctl --user restart neuron-agent
 ```
 
-This is what the coordinator sizes them by. Without it they report `fp32`, are budgeted at
-4 bytes/param, and the model is refused — correctly, because at fp32 it genuinely does not fit.
+Verify it actually took, rather than assuming:
+
+```bash
+systemctl --user show neuron-agent -p Environment && grep -i 'weight_dtype\|cpu ' ~/neuron/agent/agent.log | tail -3
+```
+
+The agent logs its dtype at registration. The coordinator then sizes the node by it: without
+it the node reports `fp32`, is budgeted at 4 bytes/param, and the model is refused — correctly,
+because at fp32 it genuinely does not fit.
 
 ### 3. Take the big machine out of the roster
 
