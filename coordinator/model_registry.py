@@ -61,6 +61,24 @@ MODELS = {
         "license_url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct",
         "ready": True,
     },
+    # The capacity case ([P43]). Listed so the catalog and the licence are on the record;
+    # `ready: False` because no node holds these weights yet — the 4b tier is `manual_only`
+    # and reachable only by an operator pin.
+    #
+    # Apache-2.0 and ungated, and neither is incidental. Qwen2.5 at 3B is under the separate
+    # Qwen Licence, so the obvious "a slightly bigger Qwen" move is a LICENCE change wearing a
+    # size change's clothes — the exact trap this file's header names. Qwen3-4B is genuinely
+    # Apache-2.0; verified against the model API by tools/measure_model.py, which refuses to
+    # emit a tier row for anything else.
+    "Qwen/Qwen3-4B-Instruct-2507": {
+        "id": "Qwen/Qwen3-4B-Instruct-2507",
+        "layers": 36,
+        "description": "Qwen3-4B — too big for any one machine on this network (16.1 GB at "
+                       "fp32), servable across two at fp16 storage.",
+        "license": "apache-2.0",
+        "license_url": "https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507",
+        "ready": False,
+    },
 }
 
 

@@ -37,6 +37,15 @@ from coordinator import balancer
 #                  8+8+12, and none of those machines can hold a third of a 7B model. Without
 #                  it the network promoted itself onto Qwen2.5-7B on 2026-08-07 and handed
 #                  9-10 layers to an 8 GB laptop. Consumed by balancer.max_layers_for.
+#   head_gb      : the DRIVER's extra weights — the embedding, plus lm_head when untied. A
+#                  FIXED cost, so its share of a machine grows as the network shrinks: noise
+#                  across ten nodes, decisive across two. Measured by tools/measure_model.py;
+#                  absent means unmeasured and nothing is charged, exactly as before it existed.
+#   manual_only  : this tier is NEVER chosen by the capacity ladder — `feasible_tier_index`
+#                  skips it, so only an operator pin can reach it. For a model being TESTED
+#                  rather than served. Without it, adding an experimental tier is how a live
+#                  network migrates itself onto an experiment overnight, which is the
+#                  2026-08-07 auto-promotion wearing a different hat.
 #
 # The gb_per_layer figures are computed from each model's config at the fp16 STORAGE dtype
 # (2 bytes/param), which is the same basis the min_ram_gb column was re-derived on in b5b4f22.
@@ -73,6 +82,27 @@ _DEFAULT_TIERS = [
     {"name": "1.5b", "model_id": "Qwen/Qwen2.5-1.5B-Instruct", "layers": 28,
      "min_nodes": 2,  "min_ram_gb": 6.0,   "min_replicas": 1, "gb_per_layer": 0.094,
      "description": "Qwen2.5-1.5B — the always-available floor."},
+    # THE CAPACITY CASE. 16.09 GB at fp32 — more than the 12 GB Pavilion has in total, so no
+    # single machine here can hold it, which is the entire claim NEURON is built to make. At
+    # fp16 STORAGE with fp32 compute (common.WEIGHT_DTYPE, measured by test_weight_dtype.py at
+    # 2 B/param resident with the GEMMs untouched) it is 8.04 GB and fits across the 12 GB and
+    # 8 GB machines with room: caps of 29 + 18 against 36 layers needed.
+    #
+    # `manual_only` because this is an EXPERIMENT, and because the ladder would take it: at
+    # min_nodes 2 the live 3-node network clears the promote margin, and the 68 GB machine
+    # makes it placeable at fp32 — so the network would migrate itself onto a 4B model on a
+    # health sweep, which is not what "run a model your machine can't run" is supposed to mean.
+    # Reach it with `pinned_model_id`, deliberately, on the roster you meant.
+    #
+    # Figures measured 2026-08-16 by tools/measure_model.py from the published safetensors
+    # header: 36 layers x 100,930,816 params, embedding 388,956,160 and tied, Apache-2.0,
+    # ungated. min_ram_gb is documentation here — a pinned target is gated by the per-node
+    # memory check in migration.update(), not by the aggregate.
+    {"name": "4b", "model_id": "Qwen/Qwen3-4B-Instruct-2507", "layers": 36,
+     "min_nodes": 2, "min_ram_gb": 18.0, "min_replicas": 1,
+     "gb_per_layer": 0.2019, "head_gb": 0.7779, "manual_only": True,
+     "description": "Qwen3-4B — the capacity case: too big for any one machine here, "
+                    "servable across two at fp16 storage."},
     {"name": "7b",   "model_id": "Qwen/Qwen2.5-7B-Instruct", "layers": 28,
      "min_nodes": 3,  "min_ram_gb": 20.0,  "min_replicas": 1, "gb_per_layer": 0.466,
      "description": "Qwen2.5-7B — the first model no single volunteer machine can hold."},
@@ -187,6 +217,11 @@ def feasible_tier_index(cap, margin=0.0, nodes=None):
     """
     best = -1
     for i, t in enumerate(TIERS):
+        # A manual_only tier is invisible to the ladder in BOTH directions: it can never be
+        # promoted to, and it can never be the answer a demotion falls back to. An experiment
+        # the operator aimed the network at must not become the tier the network settles on.
+        if t.get("manual_only"):
+            continue
         if _meets(cap, t, margin) and (nodes is None or placeable(nodes, t)):
             best = i
     return best
@@ -203,7 +238,12 @@ def next_tier_gap(cap, current_index):
 
     Powers the "you're N nodes away from a bigger model" growth prompt in the UI.
     """
+    # Skip past any manual_only tier: the ladder will never climb to it, so telling an operator
+    # they are "2 nodes away" from a model no amount of growth will select is a false promise
+    # printed on the dashboard and in every growth prompt.
     nxt = current_index + 1
+    while nxt < len(TIERS) and TIERS[nxt].get("manual_only"):
+        nxt += 1
     if nxt >= len(TIERS):
         return None
     t = TIERS[nxt]
@@ -295,9 +335,12 @@ def snapshot(nodes, controller, now=None):
             # `feasible` is the aggregate gate; `placeable` is whether any one machine can hold
             # a slice. feasible-but-not-placeable is a real state ("you have the RAM, but not
             # on any single node") and the reason a qualified promotion can sit still.
+            # `manual_only` rides along so a reader is not left to infer why a tier that is
+            # both feasible and placeable is sitting there unadopted.
             {"name": t["name"], "model_id": t["model_id"], "layers": t["layers"],
              "min_nodes": t["min_nodes"], "min_ram_gb": t["min_ram_gb"],
-             "feasible": _meets(cap, t, 0.0), "placeable": placeable(nodes, t)}
+             "feasible": _meets(cap, t, 0.0), "placeable": placeable(nodes, t),
+             "manual_only": bool(t.get("manual_only"))}
             for t in TIERS
         ],
     }
