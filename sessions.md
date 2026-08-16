@@ -5478,7 +5478,7 @@ claim — that GEMM work is now the dominant cost — remains inferred, not obse
 ## Session 60 (2026-08-16) — the capacity case, and the precision nobody could declare
 
 The goal was a ~4B model in fp32 across the 12 GB Pavilion and the 8 GB node, excluding the
-64 GiB OptiPlex: neither can hold it, together they can. The download side was never in doubt —
+big 16-core Windows PC: neither can hold it, together they can. The download side was never in doubt —
 `slice_downloader.py` has fetched per-tensor byte ranges since Session 8, which is exactly what
 Sergio's `spikingbrain-cpu-cluster` shows working on 2012-era hardware. The coordinator's
 arithmetic was the blocker, in two places, and the first thing measurement did was move the
@@ -5551,7 +5551,7 @@ browser. That is [P34] a third time. The reasoning now sits in the comment that 
 invite it.
 
 **A promotable 4b tier.** At `min_nodes` 2 the live 3-node network clears the 15% promote
-margin, and the OptiPlex makes it placeable even at fp32 — so shipping the row plainly
+margin, and the big Windows PC makes it placeable even at fp32 — so shipping the row plainly
 would have migrated production onto a 4B model on the next health sweep. That is the
 2026-08-07 auto-promotion arriving from a new direction. `manual_only` makes a tier invisible to
 the ladder in both directions: never promoted to, and never the answer a demotion falls back

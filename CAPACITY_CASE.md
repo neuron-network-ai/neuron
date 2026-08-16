@@ -1,8 +1,8 @@
 # The capacity case — running a model no single machine here can hold
 
 The claim NEURON exists to make, reduced to something runnable on two computers in one house:
-**Qwen3-4B across the 12 GB Pavilion and the 8 GB node, with the 64 GiB OptiPlex switched out
-of it.** Neither machine can hold the model. Together they can. That is a different product
+**Qwen3-4B across the 12 GB Pavilion and the 8 GB node, with the big 16-core Windows PC
+switched out of it.** Neither machine can hold the model. Together they can. That is a different product
 from "a 1.5B model, slower than your laptop", and it is the reason someone would join.
 
 Everything below is arithmetic and placement that has been run and tested. **No forward pass of
@@ -86,8 +86,8 @@ Worth running the contrast too — it is the whole argument in two commands:
 python tools/capacity_dryrun.py --dtype fp32
 ```
 
-...which is refused, and `--nodes pavilion:12,node-b:8,optiplex:68`, which shows the OptiPlex
-holding all 36 layers by itself and so not being a capacity case at all.
+...which is refused, and `--nodes pavilion:12,node-b:8,windows-pc:68`, which shows the big
+machine holding all 36 layers by itself and so not being a capacity case at all.
 
 ## Running it
 
@@ -116,10 +116,11 @@ export NEURON_WEIGHT_DTYPE=fp16
 This is what the coordinator sizes them by. Without it they report `fp32`, are budgeted at
 4 bytes/param, and the model is refused — correctly, because at fp32 it genuinely does not fit.
 
-### 3. Take the OptiPlex out of the roster
+### 3. Take the big machine out of the roster
 
-With a 64 GiB machine present there is no capacity case, only a big node: it can hold all 36
-layers by itself even at fp32. Stop its agent, or the coordinator will place the model on it.
+With the 64 GiB Windows PC (`agent-optinovate-67e4eb`) present there is no capacity case, only
+a big node: it holds all 36 layers by itself even at fp32. Stop its agent, or the coordinator
+will place the model on it.
 
 ### 4. Pin the model
 

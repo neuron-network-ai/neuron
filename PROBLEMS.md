@@ -314,7 +314,7 @@ budget all day. That is [P34] a third time. It needs an age and a heartbeat re-r
      ladder would migrate production onto an experiment on a health sweep.
   4. **Every node is credited slightly less RAM than it has, and the roster reads oddly
      because of it.** `agent.py` sends `int(psutil.virtual_memory().total // 10**9)` — decimal
-     GB, truncated — while RAM is installed in binary GiB. So **the 64 GiB OptiPlex reports
+     GB, truncated — while RAM is installed in binary GiB. So **the 64 GiB Windows PC reports
      68**, which is arithmetically right (68.7 decimal GB) and looks like a typo, because
      nobody sells 68 GB of RAM. Raised by the founder reading the number back, which is exactly
      how a unit artifact gets caught.

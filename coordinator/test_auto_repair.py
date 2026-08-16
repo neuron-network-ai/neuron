@@ -307,7 +307,7 @@ Q4_LAYERS = 36
 
 def _capacity_roster(dtype=None):
     """The founder's two machines, as the coordinator holds them: a 12 GB Pavilion and an
-    8 GB node, with the 64 GiB OptiPlex deliberately absent."""
+    8 GB node, with the big 16-core Windows PC deliberately absent."""
     _clear()
     for nid, ram, ls, le in (("pavilion", 12.0, 0, 9), ("node-b", 8.0, 10, 27)):
         models.register_node(nid, "1.1.1.1", 50999, ls, le, 8, ram, f"tok-{nid}",
