@@ -149,6 +149,19 @@ def gb_per_layer_for(model_id):
     return None
 
 
+def head_gb_for(model_id):
+    """The DRIVER's extra weight for a model: the embedding, plus `lm_head` when untied.
+
+    Same fp16 basis as `gb_per_layer`, and `balancer.effective_gb` corrects both together.
+    None means unmeasured, which is the pre-existing behaviour — the head simply is not
+    charged — so a tier added without this figure is sized exactly as it was before.
+    """
+    for t in TIERS:
+        if t.get("model_id") == model_id and t.get("head_gb"):
+            return float(t["head_gb"])
+    return None
+
+
 def partition_shortfall(nodes, tier):
     """Layers of `tier`'s model the online+eligible nodes cannot hold BETWEEN THEM.
 
@@ -158,7 +171,7 @@ def partition_shortfall(nodes, tier):
     """
     live = [n for n in nodes if n.get("status") == "online" and n.get("eligible")]
     return balancer.capacity_shortfall(live, int(tier.get("layers") or 0),
-                                       tier.get("gb_per_layer"))
+                                       tier.get("gb_per_layer"), tier.get("head_gb"))
 
 
 def placeable(nodes, tier):

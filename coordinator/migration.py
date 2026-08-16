@@ -50,17 +50,21 @@ def eligible_nodes(nodes):
     return [n for n in nodes if n.get("status") == "online" and n.get("eligible")]
 
 
-def partition_shortfall(nodes, layers, gb_per_layer):
+def partition_shortfall(nodes, layers, gb_per_layer, head_gb=None):
     """Layers the online+eligible nodes cannot hold BETWEEN THEM at `gb_per_layer`.
 
     0 means a valid per-node partition exists — and also means "unknown", when the model's
     per-layer footprint isn't known (an env-supplied tier with no `gb_per_layer`), because an
     unknown footprint can't justify refusing to serve.
+
+    `head_gb` adds the driver's embedding + lm_head, charged to one machine — see
+    `balancer.head_node_index` for which, and for the one case where it and `plan_migration`
+    can name different nodes.
     """
-    return balancer.capacity_shortfall(eligible_nodes(nodes), layers, gb_per_layer)
+    return balancer.capacity_shortfall(eligible_nodes(nodes), layers, gb_per_layer, head_gb)
 
 
-def plan_migration(nodes, layers, start=0, gb_per_layer=None, max_stages=None):
+def plan_migration(nodes, layers, start=0, gb_per_layer=None, max_stages=None, head_gb=None):
     """Contiguous partition of `layers` across the eligible online nodes, beginning at
     layer `start` (default 0, every existing caller unaffected).
 
@@ -122,8 +126,12 @@ def plan_migration(nodes, layers, start=0, gb_per_layer=None, max_stages=None):
     base, rem = divmod(layers, n)
     counts = [base + (1 if i < rem else 0) for i in range(n)]
     if gb_per_layer:
+        # head_index=0 rather than balancer's max-RAM guess: the sort above has ALREADY put the
+        # head-carrying node first, and says so in its own comment. Using the guess here would
+        # charge the head to a machine this planner is not putting it on.
         counts, _ = balancer.fit_to_capacity(
-            counts, balancer.layer_caps(stage_nodes, gb_per_layer, layers))
+            counts, balancer.layer_caps(stage_nodes, gb_per_layer, layers, head_gb,
+                                        head_index=0))
     plan, stages, cur = [], [], start
     for node, cnt in zip(stage_nodes, counts):
         if cnt == 0:
@@ -191,7 +199,7 @@ class MigrationController:
         # stayed qualified -- the network would be both unable to grow AND unable to repair.
         # Blocked is a fact ABOUT a steady network, so it rides in status() instead.
         shortfall = partition_shortfall(nodes, int(target["layers"]),
-                                        target.get("gb_per_layer"))
+                                        target.get("gb_per_layer"), target.get("head_gb"))
         if shortfall:
             if self.phase != "steady":
                 self._reset()
@@ -213,9 +221,11 @@ class MigrationController:
         if self.phase != "preparing" or (self.target or {}).get("model_id") != target["model_id"] \
                 or node_dropped:
             self.target = {"model_id": target["model_id"], "layers": int(target["layers"]),
-                           "gb_per_layer": target.get("gb_per_layer")}
+                           "gb_per_layer": target.get("gb_per_layer"),
+                           "head_gb": target.get("head_gb")}
             self.plan = plan_migration(nodes, self.target["layers"],
-                                       gb_per_layer=self.target["gb_per_layer"])
+                                       gb_per_layer=self.target["gb_per_layer"],
+                                       head_gb=self.target["head_gb"])
             self.ready = set()
             self.phase = "preparing"
             # A real tier migration always wins -- abandon any in-flight self-heal rather than
@@ -335,10 +345,15 @@ class MigrationController:
         # Try each gap in order; heal the first one a proposal can actually cover so an
         # unhealable earlier gap never starves a later, healable one.
         gb_per_layer = serving.get("gb_per_layer")
+        # The head belongs to whoever holds layer 0. A gap heal that does not START at 0
+        # leaves the head where it already is, so charging it to this proposal's first node
+        # would bill a middle-of-the-pipeline machine for weights it will never load.
+        head_gb = serving.get("head_gb")
         proposal, target_gap = [], None
         for gap_start, gap_end in missing:
             candidate = plan_migration(surplus, gap_end - gap_start + 1, start=gap_start,
-                                       gb_per_layer=gb_per_layer)
+                                       gb_per_layer=gb_per_layer,
+                                       head_gb=(head_gb if gap_start == 0 else None))
             if candidate:
                 proposal, target_gap = candidate, (gap_start, gap_end)
                 break
@@ -365,9 +380,10 @@ class MigrationController:
         # the survivors can take and REPORT the shortfall (heal_status) rather than hide it.
         resplit = False
         if not proposal:
-            proposal = plan_migration(nodes, serving["layers"], gb_per_layer=gb_per_layer)
+            proposal = plan_migration(nodes, serving["layers"], gb_per_layer=gb_per_layer,
+                                      head_gb=head_gb)
             resplit = bool(proposal)
-        shortfall = (partition_shortfall(nodes, serving["layers"], gb_per_layer)
+        shortfall = (partition_shortfall(nodes, serving["layers"], gb_per_layer, head_gb)
                      if resplit else 0)
 
         if not proposal:

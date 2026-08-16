@@ -72,16 +72,27 @@ def weight_bytes_for(node=None):
     return ASSUMED_WEIGHT_BYTES
 
 
-def effective_gb_per_layer(gb_per_layer, node=None):
-    """The tier's per-layer figure corrected to the dtype the node really stores at.
+def effective_gb(gb, node=None):
+    """Any fp16-basis GB figure from the tier table, corrected to the dtype a node really
+    stores at.
+
+    `gb_per_layer` and `head_gb` are both on that basis and both scale by the same factor,
+    because the correction is a property of the DTYPE, not of which weights are being counted.
+    Kept as one function so the two figures cannot drift onto different bases -- which is the
+    exact fault this correction exists to fix, one level up.
 
     None in, None out: an unknown footprint is not a constraint, which is what every consumer
     already assumed and is the right answer for a model injected via NEURON_MODEL_TIERS with
     no measurement behind it.
     """
-    if not gb_per_layer:
-        return gb_per_layer
-    return float(gb_per_layer) * (weight_bytes_for(node) / TIER_BASIS_BYTES)
+    if not gb:
+        return gb
+    return float(gb) * (weight_bytes_for(node) / TIER_BASIS_BYTES)
+
+
+def effective_gb_per_layer(gb_per_layer, node=None):
+    """The tier's per-layer figure corrected to the dtype the node really stores at."""
+    return effective_gb(gb_per_layer, node)
 
 # May a node's VRAM be counted toward how many layers it can HOLD?
 #
@@ -177,7 +188,7 @@ def _apportion(raw, total, min_each=1):
     return [min_each + floors[i] for i in range(n)]
 
 
-def max_layers_for(node, gb_per_layer, headroom=0.75):
+def max_layers_for(node, gb_per_layer, headroom=0.75, head_gb=None):
     """How many layers this node can actually HOLD, from its reported free RAM.
 
     The balancer optimises for TIME and knew nothing about memory, which is fine until the
@@ -204,10 +215,27 @@ def max_layers_for(node, gb_per_layer, headroom=0.75):
     RAM_OS_RESERVE_GB. The last one is the only figure real nodes actually report — see
     RAM_OS_RESERVE_GB for why that mattered.
 
+    `head_gb` is weight this node must hold ON TOP of its layers — the embedding, and the
+    `lm_head` when the model does not tie them. It belongs to the DRIVER, which runs the output
+    head (`common.apply_lm_head`), and it is charged against the same post-headroom budget the
+    layers come out of. `model_tiers` called this out as unmodelled and said so in a comment;
+    the figure it wanted now exists, measured, via `tools/measure_model.py`.
+    Why it matters at all: it is a fixed cost, so it hurts most on the SMALLEST machine and on
+    the FEWEST nodes — i.e. exactly the two-machine capacity case, where it is the difference
+    between a plan and an OOM. On Qwen3-4B the embedding is 389M params: 1.56 GB at fp32,
+    against an 8 GB machine's 3.75 GB budget.
+
     Never returns 0: `solve` gives every node at least one layer, and a node that cannot hold
     even one layer is a node that should not be in the pipeline at all — an eligibility
     decision, not one for this function. `capacity_shortfall` is what says "this network cannot
     hold this model".
+
+    The floor is why a driver charged a head BIGGER than its whole budget still reports 1 rather
+    than 0, understating the shortfall by a layer. Left deliberately: dropping the floor would
+    let `solve` emit a zero-width range for stage 1, and a degenerate assignment on the live
+    placement path is a worse failure than a one-layer error in a refusal that is already going
+    to refuse. `head_node_index` puts the head on the biggest machine anyway, mirroring the
+    router, which is what keeps that case remote.
     """
     free = node.get("ram_free_gb")
     total = node.get("ram_gb")
@@ -221,19 +249,62 @@ def max_layers_for(node, gb_per_layer, headroom=0.75):
     else:
         return None                     # unknown -> no constraint, same as before
     # Corrected to the dtype this node actually stores weights at. The tier table's column is
-    # on an fp16 basis that nothing in the shipped build uses -- see effective_gb_per_layer.
-    gb_per_layer = effective_gb_per_layer(gb_per_layer, node)
+    # on an fp16 basis that nothing in the shipped build uses -- see effective_gb.
+    gb_per_layer = effective_gb(gb_per_layer, node)
     if not gb_per_layer:
         return None
-    return max(int((usable * headroom) / gb_per_layer), 1)
+    # The head is weight like any other, so it comes out of the same post-headroom budget the
+    # layers do. The quarter held back by `headroom` stays held back on top of it.
+    budget = usable * headroom - (effective_gb(head_gb, node) or 0.0)
+    return max(int(budget / gb_per_layer), 1)
 
 
-def layer_caps(nodes, gb_per_layer, unconstrained):
+def head_node_index(nodes):
+    """Which node in `nodes` would carry the embedding + lm_head, i.e. be the driver.
+
+    **`coordinator/router.canonical_assignment` is the authority and this function only mirrors it** — the
+    machine with the most RAM, tie-broken by node_id, for the reason stated there: stage 1 runs
+    the embedding and the lm_head, so it is the worst place for the weakest node. Mirrored
+    rather than imported because `router` needs config and a DB and this module is deliberately
+    pure; `test_head_cost.py` pins the two together so they cannot drift.
+
+    Drift would be the expensive kind: a feasibility check that charges the head to a different
+    machine from the one that ends up holding it either clears a plan that OOMs the driver, or
+    refuses one that would have fitted.
+
+    **The router's other rule — an incumbent stage-1 holder KEEPS the driver seat — is
+    deliberately not mirrored.** That rule exists for STABILITY (moving the driver breaks chat)
+    and is tested against the ranges nodes hold for the model being served now. Every caller
+    here is asking about a DIFFERENT model, whose layer count makes the current stage-1 range
+    meaningless, and whose adoption re-solves every range anyway. The residual gap is real and
+    worth naming: if a small machine is the incumbent driver and a big one is not, the router
+    will keep the head on the small machine while this charges it to the big one. That is a
+    feasibility answer one machine too generous, not a placement that runs — `solve` charges
+    the head where the pipeline order actually puts it.
+
+    Returns None for an empty roster.
+    """
+    if not nodes:
+        return None
+    return min(range(len(nodes)),
+               key=lambda i: (-(nodes[i].get("ram_gb") or 0.0),
+                              str(nodes[i].get("node_id") or "")))
+
+
+def layer_caps(nodes, gb_per_layer, unconstrained, head_gb=None, head_index=None):
     """Per-node hard caps in layers, in `nodes` order. A node that reports no memory at all is
     left `unconstrained` (pass the model's layer count) — exactly the behaviour from before
-    memory was considered at all."""
+    memory was considered at all.
+
+    `head_gb` is charged to exactly ONE node: `head_index` when the caller knows the pipeline
+    order (`solve` does — its contract is driver-first), otherwise whichever node the router
+    would make the driver. Charging it to every node would refuse networks that fit; charging
+    it to none is the behaviour this replaces.
+    """
+    hi = head_index if head_index is not None else (head_node_index(nodes) if head_gb else None)
     return [c if c is not None else unconstrained
-            for c in (max_layers_for(n, gb_per_layer) for n in nodes)]
+            for c in (max_layers_for(n, gb_per_layer, head_gb=(head_gb if i == hi else None))
+                      for i, n in enumerate(nodes))]
 
 
 def fit_to_capacity(counts, caps, prefer=None):
@@ -265,7 +336,7 @@ def fit_to_capacity(counts, caps, prefer=None):
     return counts, sum(max(0, counts[i] - caps[i]) for i in range(len(counts)))
 
 
-def capacity_shortfall(nodes, total_layers, gb_per_layer):
+def capacity_shortfall(nodes, total_layers, gb_per_layer, head_gb=None):
     """How many layers this set of nodes cannot hold BETWEEN THEM. 0 means a valid per-node
     partition exists.
 
@@ -274,12 +345,15 @@ def capacity_shortfall(nodes, total_layers, gb_per_layer):
     caps can be laid out as contiguous ranges. If the caps sum to at least `total_layers`, some
     plan fits; `fit_to_capacity` finds one.
 
+    `head_gb` is charged to ONE node — the one `head_node_index` says would be the driver — so
+    a network is not refused for a cost only one of its machines pays.
+
     Unknown `gb_per_layer` (a model not in the tier table) means unknown footprint, which means
     no constraint — the same answer this module gave before it knew about memory at all.
     """
     if not nodes or total_layers <= 0 or not gb_per_layer:
         return 0
-    return max(0, total_layers - sum(layer_caps(nodes, gb_per_layer, total_layers)))
+    return max(0, total_layers - sum(layer_caps(nodes, gb_per_layer, total_layers, head_gb)))
 
 
 def _prefers_gpu(nodes):
@@ -292,13 +366,17 @@ def _prefers_gpu(nodes):
     return lambda i: (0 if nodes[i].get("has_gpu") else 1)
 
 
-def solve(nodes, total_layers, gb_per_layer=None):
+def solve(nodes, total_layers, gb_per_layer=None, head_gb=None):
     """nodes: list of {"node_id", "ms_per_layer", "head_ms"(optional), "ram_free_gb"(optional),
     "has_gpu"(optional), "gpu_vram_gb"(optional)} in PIPELINE ORDER (driver first). Returns a
     list of assignments with contiguous layer ranges and the predicted per-stage time.
 
     `gb_per_layer` (when known) turns each node's free RAM into a hard cap on its layer
     count -- see max_layers_for. Without it the behaviour is exactly as before.
+
+    `head_gb` is charged to nodes[0], because that is what "PIPELINE ORDER (driver first)"
+    means and it is the same node `head_ms` is already keyed to: the head's cost in TIME and
+    its cost in MEMORY are the same weights, and they must land on the same machine.
     """
     if not nodes:
         return []
@@ -313,7 +391,8 @@ def solve(nodes, total_layers, gb_per_layer=None):
     # that cannot hold its time-optimal share onto nodes with room, cheapest-first. If the
     # network genuinely cannot hold the model, `capacity_shortfall` says so rather than
     # returning a plan that OOM-kills a volunteer's machine.
-    caps = [max_layers_for(n, gb_per_layer) for n in nodes]
+    caps = [max_layers_for(n, gb_per_layer, head_gb=(head_gb if i == 0 else None))
+            for i, n in enumerate(nodes)]
     gpu_first = _prefers_gpu(nodes)
     if any(c is not None for c in caps):
         caps = [c if c is not None else total_layers for c in caps]
@@ -351,12 +430,13 @@ def equal_split(nodes, total_layers):
                  total_layers)
 
 
-def plan(nodes, total_layers, gb_per_layer=None):
+def plan(nodes, total_layers, gb_per_layer=None, head_gb=None):
     """Full comparison: the balanced assignment vs. the naive equal split, scored by
     predicted bottleneck (lower = faster).
 
     `gb_per_layer` makes the assignment memory-aware and adds `capacity_shortfall`: the layers
-    this network cannot hold at all, which is a REFUSAL signal, not a slow plan.
+    this network cannot hold at all, which is a REFUSAL signal, not a slow plan. `head_gb` adds
+    the driver's embedding + lm_head to that arithmetic.
     """
     # No node has self-measured yet -- the normal state of a freshly deployed network, since
     # ms_per_layer stays NULL until benchmark.py runs. This used to fall through to the
@@ -368,7 +448,7 @@ def plan(nodes, total_layers, gb_per_layer=None):
                 "equal_split_bottleneck_ms": 0.0, "speedup_vs_equal": 1.0,
                 "total_layers": total_layers, "capacity_shortfall": 0,
                 "note": "no online eligible node has reported ms_per_layer yet"}
-    balanced = solve(nodes, total_layers, gb_per_layer)
+    balanced = solve(nodes, total_layers, gb_per_layer, head_gb)
     # score the equal split using the REAL speeds so the comparison is apples-to-apples
     eq_layers = [a["layers"] for a in equal_split(nodes, total_layers)]
     s = [max(float(n["ms_per_layer"]), 1e-6) for n in nodes]
@@ -381,5 +461,5 @@ def plan(nodes, total_layers, gb_per_layer=None):
         "equal_split_bottleneck_ms": round(eq_bottleneck, 2),
         "speedup_vs_equal": round(eq_bottleneck / bal_bottleneck, 3) if bal_bottleneck else 1.0,
         "total_layers": total_layers,
-        "capacity_shortfall": capacity_shortfall(nodes, total_layers, gb_per_layer),
+        "capacity_shortfall": capacity_shortfall(nodes, total_layers, gb_per_layer, head_gb),
     }

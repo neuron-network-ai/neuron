@@ -342,7 +342,11 @@ async def health_loop():
             # along so the migration can refuse a target no single node could hold — the tier
             # gate qualifies on AGGREGATE RAM, which is not the same question.
             target = {"model_id": tier["model_id"], "layers": tier["layers"],
-                      "gb_per_layer": tier.get("gb_per_layer")}
+                      "gb_per_layer": tier.get("gb_per_layer"),
+                      # The DRIVER's extra weight (embedding + lm_head). A fixed cost, so it
+                      # bites hardest on the fewest machines — which is exactly the case a
+                      # capacity tier exists for.
+                      "head_gb": tier.get("head_gb")}
             # An operator PIN overrides the capacity ladder entirely. Which model the network
             # serves is a decision, not a consequence of how many machines happen to be awake --
             # and this is also the only way to move nodes onto a model REMOTELY. A volunteer's
@@ -354,9 +358,11 @@ async def health_loop():
                 pin = model_tiers.tier_for(pinned)
                 if pin:
                     target = {"model_id": pin["model_id"], "layers": pin["layers"],
-                              "gb_per_layer": pin.get("gb_per_layer")}
+                              "gb_per_layer": pin.get("gb_per_layer"),
+                              "head_gb": pin.get("head_gb")}
             serving = serving_model()
             serving["gb_per_layer"] = model_tiers.gb_per_layer_for(serving["model_id"])
+            serving["head_gb"] = model_tiers.head_gb_for(serving["model_id"])
             with _migration_lock:
                 # self-heal first: closes a coverage gap in the CURRENTLY serving model using
                 # idle surplus nodes, only while no real tier migration is in flight (it's a
@@ -1114,7 +1120,8 @@ def _balanced_plan():
                "ram_gb": n.get("ram_gb")}
               for n in nodes]
     sm = serving_model()
-    p = balancer.plan(bnodes, sm["layers"], model_tiers.gb_per_layer_for(sm["model_id"]))
+    p = balancer.plan(bnodes, sm["layers"], model_tiers.gb_per_layer_for(sm["model_id"]),
+                      model_tiers.head_gb_for(sm["model_id"]))
     # Replicas go to the thinnest stage. A capped-out machine must still be given work: idle
     # earns its operator nothing and adds nothing, and replicas are how extra machines turn into
     # throughput rather than a deeper pipeline ([P16]).
