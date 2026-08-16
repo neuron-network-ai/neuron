@@ -92,7 +92,11 @@ def main():
         return "NEW-SLICE"
 
     real_load, node_server.load_slice_model = node_server.load_slice_model, fake_load
+    # Disable the slice-range guard: these tests are about reload LIFETIME, not the guard.
+    # `_layer_set` is the one reload() actually calls ([P42]); `_layers_in_slice` is kept in
+    # step so the pair cannot drift into a patch that silently no longer patches anything.
     real_layers, node_server._layers_in_slice = node_server._layers_in_slice, lambda d: None
+    real_set, node_server._layer_set = node_server._layer_set, lambda d: None
     real_empty = node_server._empty_device_cache
     node_server._empty_device_cache = lambda: events.append("empty_cache")
     try:
@@ -100,6 +104,7 @@ def main():
     finally:
         node_server.load_slice_model = real_load
         node_server._layers_in_slice = real_layers
+        node_server._layer_set = real_set
         node_server._empty_device_cache = real_empty
 
     check("the old slice is released before the new one is loaded",
@@ -171,6 +176,7 @@ def main():
 
     node_server.load_slice_model = boom
     node_server._layers_in_slice = lambda d: None
+    node_server._layer_set = lambda d: None
     try:
         srv4.reload(tmp, 0, 9, 28)
         check("a failed load propagates rather than being swallowed", False)
@@ -179,6 +185,7 @@ def main():
     finally:
         node_server.load_slice_model = real_load
         node_server._layers_in_slice = real_layers
+        node_server._layer_set = real_set
 
     check("...and the reloading flag is cleared, so the node can be retried",
           not srv4._reloading.is_set())

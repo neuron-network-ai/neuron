@@ -37,11 +37,16 @@ def check(label, cond):
 
 
 def make_slice(tmp, name, lo, hi):
+    return make_slice_layers(tmp, name, range(lo, hi + 1))
+
+
+def make_slice_layers(tmp, name, indices):
+    """A slice holding an ARBITRARY set of layers, so a hole in the middle can be built."""
     d = os.path.join(tmp, name)
     os.makedirs(d, exist_ok=True)
     header = {f"model.layers.{i}.self_attn.q_proj.weight":
               {"dtype": "F32", "shape": [2, 2], "data_offsets": [0, 16]}
-              for i in range(lo, hi + 1)}
+              for i in indices}
     header["model.norm.weight"] = {"dtype": "F32", "shape": [2], "data_offsets": [0, 8]}
     blob = json.dumps(header).encode()
     with open(os.path.join(d, "model.safetensors"), "wb") as f:
@@ -109,6 +114,29 @@ def main():
             check("a PARTIAL overlap refuses too", False)
         except RuntimeError:
             check("a PARTIAL overlap refuses too", loaded == [])
+
+        # ---- [P42]: a HOLE IN THE MIDDLE, which the old bounds check waved through #
+        # A slice holding 0-9 and 19-27 has min 0 and max 27, so `held[0] <= start and
+        # end <= held[1]` passes for an assignment of 0-27 -- while layers 10-18 are absent.
+        # Same ending as the 2026-08-07 incident (uninitialized meta tensors mid-forward),
+        # reached by a path the extremes cannot see.
+        loaded.clear()
+        holed = make_slice_layers(tmp, "s-hole", list(range(0, 10)) + list(range(19, 28)))
+        check("the extremes alone would not catch it",
+              node_server._layers_in_slice(holed) == (0, 27))
+        try:
+            _Server().reload(holed, 0, 27, 28)
+            check("a slice with a GAP in the middle refuses to start", False)
+        except RuntimeError as e:
+            check("a slice with a GAP in the middle refuses to start", loaded == [])
+            check("...and the error names the missing layers", "10-18" in str(e))
+
+        # a range that avoids the hole is still fine
+        loaded.clear()
+        s = _Server()
+        s.reload(holed, 19, 27, 28)
+        check("...but an assignment inside the held layers still loads",
+              loaded == [holed] and (s.lo, s.hi) == (19, 27))
 
         # ---- an unreadable header must not block a working node ----------------- #
         loaded.clear()

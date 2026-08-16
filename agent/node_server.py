@@ -40,8 +40,8 @@ from slice_downloader import load_slice_model    # noqa: E402
 compute_lock = threading.Lock()
 
 
-def _layers_in_slice(slice_dir):
-    """(lo, hi) of the decoder layers actually present in a downloaded slice, or None.
+def _layer_set(slice_dir):
+    """The SET of decoder layer indices present in a downloaded slice, or None.
 
     Read straight from the safetensors header (8-byte little-endian length, then JSON) so the
     BYTES decide what this node can serve, not a config file or a coordinator's claim. Returns
@@ -49,6 +49,9 @@ def _layers_in_slice(slice_dir):
     read its own header has a bigger problem than a range check, and refusing to start on an
     unreadable header would take working nodes down for a check that is meant to catch a
     mismatch, not a corrupt file.
+
+    The SET, not the extremes: a slice holding 0-9 and 19-27 has min 0 and max 27, so a
+    bounds check passes an assignment of 0-27 while layers 10-18 are absent. See [P42].
     """
     import json
     try:
@@ -64,6 +67,13 @@ def _layers_in_slice(slice_dir):
         parts = k.split(".")
         if k.startswith("model.layers.") and len(parts) > 2 and parts[2].isdigit():
             idx.add(int(parts[2]))
+    return idx or None
+
+
+def _layers_in_slice(slice_dir):
+    """(lo, hi) of the decoder layers present, or None. For messages, not for the check --
+    the extremes cannot see a hole in the middle. `_layer_set` is what reload() guards on."""
+    idx = _layer_set(slice_dir)
     return (min(idx), max(idx)) if idx else None
 
 # Is this machine in the middle of serving somebody? Used by the auto-updater, which must never
@@ -197,12 +207,24 @@ class NodeServer:
         # a re-split, the disk held only 19-27 from an earlier assignment, and it started up,
         # announced "serving layers 0-27", passed its own ms/layer benchmark and reported
         # healthy. Two thirds of the model it claimed to serve was never downloaded.
-        held = _layers_in_slice(slice_dir)
-        if held and not (held[0] <= layer_start and layer_end <= held[1]):
-            raise RuntimeError(
-                f"refusing to serve layers {layer_start}-{layer_end}: this slice holds "
-                f"{held[0]}-{held[1]}. Serving the gap would run uninitialized weights and "
-                f"return plausible nonsense. Delete {slice_dir} to re-download the right range.")
+        # Checked against the SET of layers present, not its extremes. The 2026-08-07 case
+        # above is caught either way (min 19 > 0), but a slice holding 0-9 and 19-27 has
+        # min 0 and max 27, so a bounds check would wave through an assignment of 0-27 with
+        # layers 10-18 missing -- the same uninitialized-meta-tensor ending, reached by a
+        # path the old check could not see. [P42].
+        present = _layer_set(slice_dir)
+        if present is not None:
+            missing = sorted(set(range(layer_start, layer_end + 1)) - present)
+            if missing:
+                held = (min(present), max(present))
+                gap = (f"{missing[0]}-{missing[-1]}" if len(missing) > 1
+                       else str(missing[0]))
+                raise RuntimeError(
+                    f"refusing to serve layers {layer_start}-{layer_end}: this slice holds "
+                    f"{held[0]}-{held[1]} and is missing {gap} "
+                    f"({len(missing)} layer{'s' if len(missing) != 1 else ''}). Serving the "
+                    f"gap would run uninitialized weights and return plausible nonsense. "
+                    f"Delete {slice_dir} to re-download the right range.")
         # RELEASE THE OLD SLICE BEFORE LOADING THE NEW ONE.
         #
         # This used to be `model = load_slice_model(...)` with `self.model` still holding the
