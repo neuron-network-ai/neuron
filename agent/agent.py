@@ -232,6 +232,20 @@ DEFAULT_CONFIG = {
     # contributes very little on a personal PC, and the network is small enough that the
     # difference matters. Existing configs are untouched -- this is the FRESH-install default.
     "donation_mode": "balanced", "idle_threshold_seconds": 60,
+    # The MOST RAM this machine will contribute, in GB. None = all of it, minus the coordinator's
+    # OS reserve, which is what every node has done until now.
+    #
+    # `donation_mode` governs WHEN this node serves; this governs HOW MUCH of the machine it
+    # commits while it does. They were always two questions and only one of them could be
+    # answered: someone with a 64 GB workstation who is happy to lend 8 GB had to choose between
+    # donating the whole machine and not donating at all. That is a bad trade to put in front of
+    # the exact person most able to help.
+    #
+    # It is a DECLARATION that the coordinator then enforces, not a request. The agent reports
+    # the capped figure as `ram_gb`, so `balancer.max_layers_for` sizes the slice from it and the
+    # node is only ever assigned layers that fit inside the cap -- nothing needs to police it at
+    # runtime, because the work is never handed out in the first place.
+    "donate_ram_gb": None,
     # "auto" | "cpu" | "gpu". Which device this node computes on. Set at install time from
     # what the machine actually has, changeable from the tray. See _apply_device_preference():
     # it must be applied before common.py is imported, so it is read at module import, not in
@@ -354,6 +368,34 @@ def _version():
 # either side changes alone -- the only honest way to hold a duplicated constant together.
 WEIGHT_DTYPES = ("fp32", "fp16", "bf16")
 DEFAULT_WEIGHT_DTYPE = "fp32"
+
+
+def donated_ram_gb(cfg, total_bytes=None):
+    """How much RAM this node offers the network, in whole GB.
+
+    The machine's total, unless `donate_ram_gb` caps it lower. Reported AS `ram_gb`, deliberately:
+    every consumer downstream — `balancer.max_layers_for`, `model_tiers.network_capacity`,
+    `router`'s choice of driver, the dashboard — already asks that field "how big is this node",
+    and under a cap the honest answer to that question is the donated figure, not the hardware's.
+    Sizing from the cap is also what makes it self-enforcing: a node is never handed a slice
+    bigger than it agreed to hold, so there is nothing to police while it runs.
+
+    A cap ABOVE the machine's real memory is ignored rather than honoured. It would otherwise be
+    a way to be assigned a slice this node cannot hold, and registration takes no credential
+    under open join — the same reasoning as `balancer.sane_vram_gb`, one layer earlier.
+
+    Nonsense (zero, negative, unparseable) means "no cap stated" rather than "donate nothing":
+    a typo in a config file must not silently take a node off the network.
+    """
+    total = int((total_bytes if total_bytes is not None
+                 else psutil.virtual_memory().total) // 10**9)
+    try:
+        cap = float(cfg.get("donate_ram_gb"))
+    except (TypeError, ValueError):
+        return total
+    if not (cap > 0):
+        return total
+    return max(min(int(cap), total), 1)
 
 
 def weight_dtype():
@@ -660,7 +702,11 @@ class Agent:
             # a volunteer's machine) and consistent with the tier table, whose figures are also
             # decimal — but it is ~0.9 GB of real budget thrown away on a 12 GiB machine, which
             # is ~3 layers of Qwen3-4B at fp16. See [P43].
-            "ram_gb": int(psutil.virtual_memory().total // 10**9),
+            #
+            # CAPPED by `donate_ram_gb` when the owner set one: under a cap this field means
+            # "what this node offers the network", which is the question every consumer of it is
+            # actually asking, and sizing from it is what makes the cap self-enforcing.
+            "ram_gb": donated_ram_gb(self.cfg),
             # What this node will STORE weights at, which halves or doubles every footprint the
             # coordinator sizes it from ([P43]). `balancer.weight_bytes_for` has read this field
             # since the dtype correction shipped and nothing has ever sent it, so every node has
@@ -753,9 +799,15 @@ class Agent:
         standing = data.get("standing", "trusted")
         gpu_note = (f", GPU {body['gpu_name']} {body['gpu_vram_gb']} GB"
                     if body.get("has_gpu") else "")
-        log.info("registered as %s [%s], assigned layers %s (%d cores, %d GB%s, %s)",
+        # A cap has to be VISIBLE. Sizing from a donated figure means a capped node is assigned
+        # a smaller slice, and without this line the operator sees a big machine given very
+        # little work and reads it as the coordinator misjudging their hardware.
+        true_gb = int(psutil.virtual_memory().total // 10**9)
+        ram_note = (f"{body['ram_gb']} GB donated of {true_gb} GB"
+                    if body["ram_gb"] < true_gb else f"{body['ram_gb']} GB")
+        log.info("registered as %s [%s], assigned layers %s (%d cores, %s%s, %s)",
                  body["node_id"], standing, data["assigned_layers"],
-                 body["cores"], body["ram_gb"], gpu_note, ip)
+                 body["cores"], ram_note, gpu_note, ip)
         self.standing = standing
         # A probationary node's placement is the one that can still be wrong AND still be fixed
         # for free: wrong because it was chosen before the coordinator counted unverified nodes,

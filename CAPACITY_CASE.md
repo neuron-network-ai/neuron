@@ -1,9 +1,17 @@
 # The capacity case — running a model no single machine here can hold
 
-The claim NEURON exists to make, reduced to something runnable on two computers in one house:
-**Qwen3-4B across the 12 GB Pavilion and the 8 GB node, with the big 16-core Windows PC
-switched out of it.** Neither machine can hold the model. Together they can. That is a different product
-from "a 1.5B model, slower than your laptop", and it is the reason someone would join.
+The claim NEURON exists to make, reduced to the two computers that actually exist:
+**Qwen3-4B across the 12 GB Pavilion and the 64 GiB Windows PC capped at 8 GB donated.**
+Neither node can hold the model. Together they can.
+
+**Why a cap rather than a third machine.** `/node/list` has exactly two machines online - the
+16-core Windows PC (68 GB) and the 4-core Pavilion (12 GB). The OptiPlex is not a node and is
+not going to be one. With a 64 GiB machine in a two-node network nothing is a capacity case
+until it is nearly 50 GB, which here means a ~13B model at fp32: a 49 GB download onto a
+4-core laptop with the big machine at 100% of budget. So instead the Windows PC declares how
+much it lends (`donate_ram_gb: 8`) - a real feature, since someone with a 64 GB workstation
+happy to lend 8 GB should not have to choose between the whole machine and nothing - and the
+coordinator enforces it by never assigning a slice bigger than the cap.
 
 Everything below is arithmetic and placement that has been run and tested. **No forward pass of
 a 4B model has happened yet** — that is what this document is for.
@@ -48,9 +56,10 @@ batch 8.
 | node | layers | weights | budget |
 |---|---|---|---|
 | pavilion (driver) | 0–17 | 3.63 GB + 0.78 GB head = **4.41 GB** | 6.75 GB |
-| node-b (tail) | 18–35 | **3.63 GB** | 3.75 GB |
+| windows-pc, capped (tail) | 18–35 | **3.63 GB** | 3.75 GB |
 
-Neither machine can hold all 36 layers alone: the Pavilion tops out at 29, node-b at 18.
+Neither node can hold all 36 layers alone: the Pavilion tops out at 29, the capped PC
+at 18. The Pavilion drives, because a capped machine correctly stops being the biggest.
 
 ## Downloads
 
@@ -126,11 +135,18 @@ The agent logs its dtype at registration. The coordinator then sizes the node by
 it the node reports `fp32`, is budgeted at 4 bytes/param, and the model is refused — correctly,
 because at fp32 it genuinely does not fit.
 
-### 3. Take the big machine out of the roster
+### 3. Cap what the Windows PC donates
 
-With the 64 GiB Windows PC (`agent-optinovate-67e4eb`) present there is no capacity case, only
-a big node: it holds all 36 layers by itself even at fp32. Stop its agent, or the coordinator
-will place the model on it.
+Uncapped it holds all 36 layers by itself and there is no capacity case. Set in its
+`config.json`:
+
+```json
+"donate_ram_gb": 8
+```
+
+Restart its agent and check the log says `8 GB donated of 68 GB` - a cap that did not apply
+looks exactly like a coordinator misjudging the hardware. Also worth deleting the stale
+`agent-optinovate` row: an offline duplicate registration of the same PC under an older id.
 
 ### 4. Pin the model
 
