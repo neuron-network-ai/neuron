@@ -124,6 +124,122 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
 
 ## Problems & risks
 
+### [P44] 🔴 Auto-repair assigns the driver and the last node slices it never checks they can hold (2026-08-16)
+
+**`router.canonical_assignment` caps the memory of every stage except the two that most need
+it.** It is applied automatically — `main.py:302`, on any health sweep where the chain reads
+unroutable — and it writes real layer ranges through `models.update_layers`. Three holes, in
+one function:
+
+1. **The driver is never capped at all.** Stage 1 is emitted directly as
+   `{"layer_start": 0, "layer_end": s1 - 1}`, and the `caps` list it computes covers only
+   `rest`. The driver is also the one node holding the embedding and `lm_head` ([P43]), so the
+   machine carrying the largest fixed cost is the one whose capacity is never consulted.
+2. **The last stage's cap is deliberately bypassed** — `cnt = min(cnt, left) if i < n_stages - 1
+   else left`. The comment above it explains the middle-stage caps and says nothing about this;
+   the reasoning is visible in the code, and it is defensible on its own terms: leaving the tail
+   uncovered means not one request completes, so covering it beats refusing. But "assign it
+   anyway" and "assign it anyway *and say nothing*" are different choices, and only the second
+   one is implemented.
+3. **`gb_per_layer` arrives, `head_gb` does not.** Even the middle stages are sized without the
+   driver's head — harmless while the head sits on the uncapped driver, and wrong the moment
+   either of the above is fixed without the other.
+
+**Concretely, on the capacity case.** Two nodes, Qwen3-4B at 36 layers, `DRIVER_STAGE1_LAYERS`
+= 10. The driver takes 0–9; `rest` is one node, which is therefore the last stage, so it takes
+`left` = 26 layers. At fp16 storage that is 5.25 GB against an 8 GB machine's 3.75 GB budget —
+the node is OOM-killed and the chain breaks, having just been "repaired". `balancer.solve`
+proposes 18/18 for the same roster and `plan_migration` respects the caps; this function
+overrides both, because it runs last and writes directly.
+
+**Not only the experiment.** The same shape applies whenever a stage's fair share exceeds what
+the last machine can hold, which is every tier above the 1.5B floor. It has stayed quiet
+because the network serves a model small enough that no cap binds — the same reason [P26] was
+latent, and the same reason it stopped being latent the day a promotion landed.
+
+**Why 🔴 rather than 🟡.** Every other memory guard in the coordinator refuses a plan it cannot
+place: `capacity_shortfall` reports, `MigrationController` blocks, `plan_migration` fits. This
+one writes an assignment nothing downstream re-checks, on the automatic path, at the moment the
+network is already degraded.
+
+**What would close it, cheapest first:**
+
+1. **Cap the driver like everyone else** — compute `max_layers_for(driver, gpl, head_gb=...)`
+   and, if `s1` exceeds it, do not emit that node as the driver. The rule that picks the driver
+   is already "most RAM" (and `balancer.head_node_index` mirrors it), so the fix is a check, not
+   a new policy.
+2. **Return the overflow rather than hiding it.** The tail must still be covered; what must stop
+   is covering it silently. A `capacity_shortfall` key in the result lets `main.py` log *"chain
+   repaired, node-b is 8 layers over its budget"* instead of `routable=True`. A check that
+   reports instead of failing is not a check — but a repair that cannot report at all is worse.
+3. **Let `s1` follow the model.** `DRIVER_STAGE1_LAYERS` is a fixed 10 for a 28-layer model and
+   is env-overridable (`NEURON_S1`). On 36 layers across two machines the right stage 1 is 18,
+   which is what the balancer independently proposes. Until this is resolved, the capacity-case
+   experiment needs `NEURON_S1=18` set on the coordinator, and that is a workaround, not a fix.
+
+Related: [P43] (the head this function does not charge), [P26] (an even split that was a fine
+default and a bad promise), [P32] (why applying placement automatically is safe at all).
+
+### [P43] 🟡 A model too big for one machine could not be sized, because no node could say what it stores — partly fixed (2026-08-16)
+
+**The capacity case is the product.** "Run a model your machine cannot run" is a different
+claim from "run a 1.5B model, slower than your laptop", and it is the one that makes a
+distributed network worth joining. `Uraroga/spikingbrain-cpu-cluster` demonstrates it on
+2012-era hardware via selective safetensors loading, which `slice_downloader.py` has done since
+Session 8. So the download side was never the blocker. The coordinator's arithmetic was.
+
+**Measured first, because the target as stated does not fit.** Qwen3-4B-Instruct-2507 from its
+published header (`tools/measure_model.py`): 36 layers × 100,930,816 params, embedding
+388,956,160 and tied, Apache-2.0, ungated. **16.09 GB at fp32.** The two machines hold 20 GB
+between them *in total*; after the OS reserve and headroom the coordinator budgets 10.5 GB, and
+even at zero reserve it is 16.09 GB into 20 GB with nothing left for two OSes, two Python
+processes, the KV cache or the transient fp32 cast. It does not fit, and refusing it is correct.
+
+**At fp16 STORAGE it does, with room** — 8.04 GB, caps of 29 + 18 against 36 layers needed.
+That path is not new and not speculative: `common.WEIGHT_DTYPE` implements it, `cast_linears`
+keeps every GEMM in fp32 because these CPUs have no half-precision GEMM ([P2]), and
+`test_weight_dtype.py` has already measured it at 2 B/param resident, ~2.9× slower at batch 1
+falling to ~1.6× at batch 8, checksum drift under 1e-2. **So the capacity case is real at fp16
+and not at fp32, and the pitch should say fp16.**
+
+**Two sizing holes, both closed:**
+
+  * **The driver's head was never charged.** `model_tiers` said so in a comment and left the
+    column out because there was no measurement. Qwen3-4B's embedding is 1.56 GB at fp32 —
+    41% of an 8 GB machine's budget, spent invisibly. `head_gb` now exists and is charged to
+    exactly one node, on the same fp16 basis as `gb_per_layer` so the two cannot drift apart.
+  * **A node could not say what it stores at.** `balancer.weight_bytes_for` had read
+    `weight_dtype` since the dtype correction shipped, and its docstring claimed the field was
+    "accepted" — there was no `RegisterBody` field and no column, so it could never arrive and
+    every node was sized at the pessimistic 4 bytes/param whichever precision it ran. Safe, and
+    exactly what made this case impossible to express.
+
+**Found while testing:** `common.py` lowercased `NEURON_WEIGHT_DTYPE` without stripping, so a
+trailing space raised `KeyError: 'fp16 '` at import — before the node server's logging existed,
+so the operator got a traceback naming a dict literal — while `agent.weight_dtype()` stripped
+and reported `fp16`. The coordinator then sized that machine for half the footprint of a
+process that was not running.
+
+**Deliberately not done: `ram_free_gb`.** `max_layers_for` prefers it and a comment wished for
+it, but that branch skips the OS reserve entirely, so a node reporting a free figure is sized
+*more generously* than one reporting a total — and it is a snapshot taken during registration,
+with no age, that nothing re-reads. A machine that registers at 3am idle keeps a 3am-idle
+budget all day. That is [P34] a third time. It needs an age and a heartbeat re-read first.
+
+**Still open:**
+  1. **[P44] blocks the end-to-end run.** Auto-repair would hand the second node 26 of 36
+     layers regardless of the caps above. `NEURON_S1=18` works around it; the experiment has
+     not been run.
+  2. **Nothing has executed a forward pass of this model.** Every number here is arithmetic
+     over a published header plus a dtype measurement taken on the 1.5B. The download is
+     ~1.6 GB and ~4.4 GB to two machines that have never held a 4B slice.
+  3. **The 4b tier is `manual_only`** and reachable only by an operator pin, deliberately — at
+     min_nodes 2 the live 3-node network clears the promote margin, so shipping it on the
+     ladder would migrate production onto an experiment on a health sweep.
+
+Related: [P44] (the placement path that ignores all of this), [P2] (why compute stays fp32),
+[P26] and the 2026-08-07 promotion (aggregate RAM is not a per-node answer).
+
 ### [P42] 🟢 The slice range guard checked the ENDS of the range, so a hole in the middle still served — fixed (2026-08-16)
 
 **`node_server._layers_in_slice` returns `(min, max)` of the decoder layer indices present in

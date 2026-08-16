@@ -5475,6 +5475,103 @@ Not verified: end-to-end tok/s. `/infer` requires an OAuth-linked wallet and hol
 generation was run; everything above is the transport measured directly. The engine-side
 claim — that GEMM work is now the dominant cost — remains inferred, not observed.
 
+## Session 60 (2026-08-16) — the capacity case, and the precision nobody could declare
+
+The goal was a ~4B model in fp32 across the 12 GB Pavilion and the 8 GB node, excluding the
+68 GB machine: neither can hold it, together they can. The download side was never in doubt —
+`slice_downloader.py` has fetched per-tensor byte ranges since Session 8, which is exactly what
+Sergio's `spikingbrain-cpu-cluster` shows working on 2012-era hardware. The coordinator's
+arithmetic was the blocker, in two places, and the first thing measurement did was move the
+target.
+
+### fp32 does not fit, and that is arithmetic rather than conservatism
+
+`tools/measure_model.py` is new and reads a model's published safetensors header — ~40 KB, no
+auth — instead of deriving figures by hand in a comment, which is how every number in the tier
+table got there. Qwen3-4B-Instruct-2507: 36 layers × 100,930,816 params, embedding 388,956,160
+and tied, Apache-2.0, ungated. **16.09 GB at fp32.**
+
+The two machines have 20 GB between them. After the 3 GB OS reserve and the 25% headroom the
+coordinator budgets 10.5 GB, and even at zero reserve it is 16.09 GB into 20 GB with nothing
+left for two OSes, two Python processes, the KV cache or CastLinear's transient fp32 copy. The
+refusal is correct.
+
+**At fp16 storage it fits with room**: 8.04 GB, per-node caps of 29 + 18 against 36 layers
+needed. Not a new idea and not a guess — `common.WEIGHT_DTYPE` implements it, every GEMM still
+runs in fp32 because these CPUs have no half-precision GEMM ([P2]), and `test_weight_dtype.py`
+measured it two sessions' worth of work ago: 2 B/param resident, checksum drift under 1e-2,
+~2.9× slower at batch 1 falling to ~1.6× at batch 8. So the capacity claim is true, and the
+pitch should say fp16 rather than fp32. Neither machine can hold the model alone either way.
+
+### The head, and a field that was "accepted" nowhere
+
+Two holes, both in the sizing model, both worst in exactly the two-machine case:
+
+**The driver was never charged for the embedding and `lm_head`.** `model_tiers` said so in its
+own comment and left the column out for want of a measurement. It is a FIXED cost, so its share
+grows as the network shrinks — noise across ten nodes, 41% of an 8 GB machine's budget here.
+
+**A node had no way to say what precision it stores at.** `balancer.weight_bytes_for` has read
+`weight_dtype` since the dtype correction shipped and its docstring said the field was
+"accepted so the agent-side change is additive". It was accepted nowhere: no `RegisterBody`
+field, no column, so it could never reach `_node_dict`. Every node was sized at the pessimistic
+4 bytes/param whichever precision it actually ran — safe, and precisely what made this case
+impossible to express. A comment describing an integration that does not exist reads exactly
+like one describing an integration that does.
+
+Both closed. `head_gb` is charged to one node, on the same fp16 basis as `gb_per_layer` and
+through the same `effective_gb`, so the two figures cannot drift onto different bases — which
+is the fault one level up that the correction exists to fix.
+
+### Two things the tests found that the code did not
+
+`common.py` lowercased `NEURON_WEIGHT_DTYPE` without stripping it. A trailing space — a systemd
+unit, a `.bat`, a copied README line — raised `KeyError: 'fp16 '` at import, before the node
+server's logging existed, so an operator got a traceback naming a dict literal. Meanwhile
+`agent.weight_dtype()` stripped, reported `fp16`, and the coordinator sized that machine for
+half the footprint of a process that was not running. Found only because the agent cannot
+import `common` (torch at module scope, and the agent is the ARM-compatible half), so the
+mapping is written twice and the test resolves every value through both.
+
+Inserting the 4b tier between `1.5b` and `7b` silently redefined `TIERS[1]` and `TIERS[2]` under
+all 26 positional references in `test_model_tiers.py`. Three of them kept passing while
+asserting about the wrong tier — the failure the change should have surfaced, concealed by the
+same mechanism that caused it. Tiers are addressed by name now. A test that passes for the
+wrong reason is the same family as the flags in Session 57 and the `fetched_at` scrub in
+Session 58: a value read as evidence for something it does not attest.
+
+### What was deliberately not built
+
+**`ram_free_gb`.** `max_layers_for` prefers it and a comment wished for it, and the wish is a
+trap: that branch skips the OS reserve entirely, so a node reporting a free figure is sized
+*more generously* than one reporting a total, and the figure is a registration-time snapshot
+with no age that nothing re-reads. A machine that registers at 3am idle keeps a 3am-idle budget
+all day, with the layers it was handed on that basis still resident when its owner opens a
+browser. That is [P34] a third time. The reasoning now sits in the comment that would otherwise
+invite it.
+
+**A promotable 4b tier.** At `min_nodes` 2 the live 3-node network clears the 15% promote
+margin, and the 68 GB machine makes it placeable even at fp32 — so shipping the row plainly
+would have migrated production onto a 4B model on the next health sweep. That is the
+2026-08-07 auto-promotion arriving from a new direction. `manual_only` makes a tier invisible to
+the ladder in both directions: never promoted to, and never the answer a demotion falls back
+to, so a shrinking network cannot land on an experiment either.
+
+### It does not run yet, and the reason is a third function
+
+`router.canonical_assignment` caps every stage except the two that most need it — the driver's
+capacity is never consulted at all, and the LAST stage takes the whole tail with its cap
+deliberately bypassed. On this roster that means the driver takes layers 0–9 (a fixed
+`DRIVER_STAGE1_LAYERS`) and the 8 GB node takes the remaining 26, which is 5.25 GB against a
+3.75 GB budget. `balancer.solve` proposes 18/18 for the same two machines and `plan_migration`
+respects the caps; auto-repair runs last, writes directly, and overrides both. Filed as [P44],
+🔴 because it is the automatic path and nothing downstream re-checks what it wrote.
+
+So the honest state: the arithmetic is right, tested, and says yes at fp16. **No forward pass
+of a 4B model has been run.** Everything here is a published header plus a dtype measurement
+taken on the 1.5B. The experiment needs `NEURON_S1=18`, `NEURON_WEIGHT_DTYPE=fp16` on both
+nodes, and ~1.6 GB and ~4.4 GB downloaded to machines that have never held a 4B slice.
+
 ## Known limits / next steps
 - **The 3.2 / 4.6 / 6.2 tok/s scaling curve predates Ethernet** and was measured with
   54–109 ms of Wi-Fi power-save latency on every node_c hop (Session 59). The sub-linearity
@@ -5492,8 +5589,12 @@ claim — that GEMM work is now the dominant cost — remains inferred, not obse
     head on node_a). On this trio that's ~9/9/10; it will differ per hardware set.
   - **Offload the head** — the `lm_head` GEMM pins node_a. A dedicated head node, or
     sharding the vocab projection, would free the driver to carry more layers.
-  - **A model too big for one node** (the capacity case), and dynamic layer
-    assignment as nodes join/leave.
+  - **A model too big for one node** (the capacity case) — sized and tiered as of
+    Session 60, NOT yet run. Qwen3-4B is 16.09 GB at fp32 and does not fit across
+    the 12 GB + 8 GB pair; at fp16 storage it is 8.04 GB and does, 29 + 18 layer
+    slots against 36. Blocked on [P44] (auto-repair ignores the caps) and needs
+    `NEURON_S1=18` plus `NEURON_WEIGHT_DTYPE=fp16` on both nodes to try.
+  - **Dynamic layer assignment** as nodes join/leave.
   - **More concurrency** keeps lifting throughput until every node is ~100% (N 4→8
     took 5.86→6.16); a bigger connection backlog lets more clients queue.
 - CPU-only, fp32. bf16 is slower here (no CPU bf16 GEMM). True int4/int8 speedup =
