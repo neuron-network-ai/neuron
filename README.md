@@ -5,9 +5,9 @@ joins a network of ordinary computers that together run AI models too big for an
 
 ## Download
 
-**[⬇ NEURON-Setup-0.18.0.exe](https://github.com/neuron-network-ai/neuron/releases/download/v0.18.0/NEURON-Setup-0.18.0.exe)** (207 MB)
+**[⬇ NEURON-Setup-0.20.2.exe](https://github.com/neuron-network-ai/neuron/releases/download/v0.20.2/NEURON-Setup-0.20.2.exe)** (217 MB)
 
-SHA-256 `dd33d317f92adb2ae5da27f46ac02912ba2106a66c4f21104b27ebd7345fb1a8` — the same hash every
+SHA-256 `b9d486b1e92070d3667ab3f7837e4c973fd943fd7fbfac512942befebe5499d6` — the same hash every
 installed agent checks before it will run an update.
 
 Windows installer — no technical knowledge needed. Double-click, then open
@@ -140,7 +140,7 @@ registers itself, picks its own layer range, downloads only that slice, and is a
 within about a minute — no operator, no approval queue, no shared secret. NAT traversal is
 built in via the relay — no VPN, no port forwarding, no Tailscale. Just install and run.
 
-- Installer **0.18.0 released**, and **auto-update is live**: the app checks daily, verifies the
+- **Windows installer shipped**, and **auto-update is live**: the app checks daily, verifies the
   published SHA-256 before running anything, and never updates mid-request. Set
   `auto_update: false` in your config if you would rather update by hand.
 - **Earnings have an owner**: each node registers an Ethereum address it proves it controls.

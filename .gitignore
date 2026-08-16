@@ -73,6 +73,10 @@ distributed-ai-network-plan.html
 # Outreach targets and approach notes. Unlike the four above, this one was never committed on
 # any branch, so ignoring it is genuinely sufficient — there is no history to walk back.
 OUTREACH.md
+# Growth tooling spec (broadcast / opt-in list / scout). Same class as OUTREACH.md: audience
+# targeting, channel strategy and the legal reasoning behind the non-goals — none of it is the
+# public story, and it names the operator's jurisdiction. Never committed on any branch.
+GROWTH_PLAN.md
 
 # --- blockchain work-in-progress (NRN ERC-20, migration, deploy) ---
 # Nothing here is deployed and nothing here is public yet. Holds a deploy key path,

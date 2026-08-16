@@ -5297,7 +5297,113 @@ same as confirming the NRN it distributes is correct.
 **0.9 tok/s is one measurement of one prompt.** [P34]'s best-path estimate was 2.6; the gap is
 that stage 2 runs on 8 GB machines, one of which now self-measures 5308 ms/layer.
 
+## Session 58 (2026-08-16) — the growth tooling, and three deploys that reported success while changing nothing
+
+Built from a written spec (`GROWTH_PLAN.md`, gitignored) rather than from the code, which is
+worth recording because most of what the spec asserted about this repo turned out to be wrong.
+The tool lives in `~/neuron-growth`, outside this repository: its own venv, no torch, and it
+only ever issues unauthenticated `GET` at the coordinator. It is now a systemd unit on the
+Oracle VM beside the coordinator, public at **https://status.neuronnet.duckdns.org**.
+
+Three parts: a status page and Atom feed, an announcer that posts to NEURON's own Discord, and
+a scout that finds public threads where NEURON is arguably an answer and drafts a reply. **A
+human posts. Always.** No third-party platform is ever written to — `tests/test_guard_no_posting.py`
+walks the AST of every module and fails the build if a network write appears outside a two-file
+allowlist, if a submission endpoint URL appears in any string, or if `scout/sources/reddit.py`
+exists at all. Verified the only way that means anything: a Reddit auto-poster was planted and
+three separate tests fired on it.
+
+### What the coordinator actually exposes, having read it instead of guessing
+
+- **`GET /node/list` needs no credential.** It returns the roster to an authenticated operator
+  and strips `{node_token, tailscale_ip, port, hw_fingerprint, platform, gpu_name}` for anyone
+  else. So the growth tool holds no secret at all — not as an oversight, but because a tool that
+  cannot obtain the private fields cannot leak them. Its own privacy filter is the second line.
+- **There is no `label` column.** `node_id` *is* the public identity, and it is operator-chosen
+  free text, so the "hash anything that looks like an address" rule has to be applied to it. A
+  node registered as `192.168.1.55` renders as `node-de883800`.
+- **No public `os`.** `platform` is withheld from anonymous callers for the same correlation
+  reason as the addresses. The spec asked for it in the snapshot; reality won.
+- **`total_layers` follows the serving model**, so pinning it at 28 would go stale silently.
+- **The OpenAI-compatible `/v1` API is served by `ui/app.py` — the agent's UI on :8080 — not by
+  the coordinator.** `neuronnet.duckdns.org/v1/*` is a 404. Its bearer token is an NRN wallet id
+  with no secret beside it, verified only for existence and ban status. That means a wallet id
+  is a credential, not an identifier: anything holding one can spend that wallet on inference.
+  Worth deciding deliberately at 3 nodes rather than at 300.
+
+### A privacy filter that corrupted the thing it was protecting
+
+The scrubber rewrote any string matching a loose IPv6 pattern. An ISO timestamp's clock —
+`08:15:23` — matches `(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}` perfectly, so `fetched_at` came back
+as `node-680d4327` and the page rendered *Invalid Date*. Caught only because the value was
+printed during a live check. The lesson is not the regex: **a privacy filter that mangles
+ordinary fields is a filter someone switches off**, and that is when the real leak happens. It
+now uses a strict check — every candidate must survive `ipaddress` parsing — with the broader
+hostname heuristic reserved for node ids, where it belongs.
+
+### The announcer published something false about the founder's own machines
+
+First live run, straight to Discord: *"A node joined NEURON that the operator does not run."*
+The rule fired on any node whose standing was not `trusted`. But the founder's own machines
+report `verified` — they joined through open registration and were promoted by proof-of-compute
+rather than the register secret. Nothing in the public projection says who owns a node, by
+design, so **"a stranger joined" is not a claim this data can support at all.** Narrowed to
+`probationary` and reworded to state only what is observable: *a node joined through open
+registration*. Same family as the recurring fault in this log — a field read as evidence for
+something it does not actually attest.
+
+### Three deploys that said "done" and changed nothing
+
+`systemctl enable --now` does not restart a running unit. Two redeploys therefore copied new
+files onto the VM and left the previous build serving them. The consequence was not cosmetic:
+the fix that closes `/queue` to the internet was "deployed" twice while the old, open build kept
+running, and the scout queue stayed world-readable — the same application serves the public
+status page and the operator tools, and nothing had gated them apart.
+
+The deploy script made it worse by *printing* the gate's status codes and then saying `done`
+regardless, so a broken deploy was visually identical to a good one. It now `restart`s, and the
+gate is an assertion that exits non-zero with `DEPLOY FAILED`. A third run died before reaching
+the server entirely: an unquoted heredoc delimiter let the local shell try to expand the remote
+script's variables, and `set -u` killed it. **A check that reports instead of failing is not a
+check.** That is [P35]'s lesson arriving from a different direction.
+
+### Smaller things, each found only by running it
+
+- HN's Algolia treats a multi-word query as *optional* words: the unquoted search returned the
+  firehose, including a story about home batteries and one titled "Asus Bike Booster". Fixed
+  with quoted phrases and `advancedSyntax`.
+- GitHub search is 10 req/min unauthenticated. It 403'd after three queries and the code
+  reported that as **0 results** — "nobody is talking about this" and "I was blocked" are
+  different facts and only one of them is news. It now paces and says which happened.
+- The keyword `petals` matched a GitHub issue about *cherry-blossom petals* in a UI animation.
+  Ambiguous terms now need a companion word.
+- The README told the operator to create a `.env`, and nothing read it. Adding a reader then
+  broke four tests, because the suite silently inherited the developer's own `.env`.
+- The scout queue reported "LLM configured" from the base URL alone, while every call 401'd for
+  a missing token and fell back to templates. A banner that lies about draft quality is worse
+  than no banner.
+
+### Noted, not fixed — they are in this repo
+
+- The public coordinator reports `coordinator_version: 0.1.0` while this tree is at 0.20.2.
+  Either the VM runs an old build or that field is not wired to the real version. 0.20.2 exists
+  specifically so a rollback can be confirmed by reading it, which makes this worth checking.
+- Three different installer versions are advertised at once: README offers 0.18.0, the landing
+  page 0.19.0, the repo is 0.20.2. The download link is what turns a reader into a node, and it
+  currently points two releases back — with a pinned SHA-256 for that old build beneath it.
+
+### What it does not do
+
+It does not bring anyone. The status page and the Discord announcements only convert someone
+already looking; the scout is the sole part that reaches a stranger, and its last step is a
+human deciding the reply genuinely helps and pasting it. There is no lawful automation of that
+step, and the deferred work is listed in `neuron-growth/README.md` rather than here.
+
 ## Known limits / next steps
+- **Emission has never been observed, and it is distributing NRN now** — [P40]. Ranked
+  first here because it is the only unverified path whose output a volunteer will
+  actually check, and `total_earned` only grows, so an error compounds silently rather
+  than showing up as a spike. One hand-reconciled slot would close the worst of it.
 - **Throughput scales with nodes (single 3.2 → 2-node 4.6 → 3-node 6.2 tok/s), but
   sub-linearly** because the nodes are heterogeneous and node_a carries the fixed
   head/orchestration cost. Next wins:

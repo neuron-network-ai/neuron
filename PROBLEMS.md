@@ -124,6 +124,176 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
 
 ## Problems & risks
 
+### [P42] 🟢 The slice range guard checked the ENDS of the range, so a hole in the middle still served — fixed (2026-08-16)
+
+**`node_server._layers_in_slice` returns `(min, max)` of the decoder layer indices present in
+the safetensors header, and the guard asserts `held[0] <= layer_start and layer_end <=
+held[1]`. That is a bounds check, not a completeness check.** It catches the incident it was
+written for — 2026-08-07, assigned 0–27 while the disk held 19–27, where `min` is 19 and the
+comparison fails. It does **not** catch a slice holding 0–9 and 19–27 with 10–18 missing:
+`min` is 0, `max` is 27, the assignment of 0–27 passes, and the node announces it serves a
+range with a hole in it.
+
+That is the same ending as the 2026-08-07 incident the guard exists to prevent — uninitialized
+meta tensors in the forward pass — reached by a path the guard does not inspect. `strict=False`
+in `load_slice_model` means the missing layers never raise at load, and `common.py`'s device
+move deliberately leaves meta tensors alone (correct: most of the model legitimately IS meta on
+a sliced node). So nothing between download and serving looks at the interior of the range.
+
+**Why it matters beyond wrong output:** this is the mechanism behind [P37]. A node serving a
+gap raises on meta tensors mid-forward, `_handle` catches only three exception types, the
+thread dies and `conn.close()` slams the socket — which reaches the verifier as *"socket
+closed mid-message"*, indistinguishable from a crashed host, where [P35]'s
+`UNREACHABLE_STRIKES` attests it as a real failure. The node is then flagged for holding the
+wrong bytes, which is exactly how three honest machines lost their standing.
+
+**External evidence that the stricter check is cheap.**
+`Uraroga/spikingbrain-cpu-cluster` (`src/spikingbrain_cpu/selective_loader.py`) does this after
+materializing each layer:
+
+```python
+remaining_meta = [... if tensor.device.type == "meta"]
+if remaining_meta:
+    raise RuntimeError(f"unmaterialized meta tensors: {remaining_meta}")
+```
+
+He can assert it globally because his two ranks hold the whole model between them; we cannot,
+because a sliced node's other layers are legitimately meta. The scoped version is the fix.
+
+**Two levels, cheapest first:**
+
+1. **Assert the header contains every index in `[layer_start, layer_end]`**, not that the range
+   falls between the smallest and largest present. `_layers_in_slice` already builds the set
+   (`idx`) and then discards everything but its extremes — return the set and check membership.
+   Two lines, no new I/O, and it turns a hole into a startup error naming the missing layers.
+2. **After load, assert no parameter belonging to an assigned layer is still on the meta
+   device.** Catches a layer that is present in the header but incompletely assigned — a
+   truncated download, a tensor absent from the header it is mapped to. This is his check,
+   scoped to our range.
+
+Keep the existing "unreadable header → do not block" behaviour: refusing to start on a corrupt
+header would take working nodes down for a check meant to catch a mismatch.
+
+**Fixed (2026-08-16), level 1.** `_layers_in_slice` already built the set of present layers
+and then discarded everything but its extremes. Split into `_layer_set` (returns the set, or
+None when the header is unreadable) with `_layers_in_slice` kept as a thin wrapper for the
+error message. `reload()` now guards on set membership across the whole assigned range and
+names the missing layers: *"this slice holds 0-27 and is missing 10-18 (9 layers)"*.
+
+The "unreadable header → do not block" behaviour is unchanged — that is a deliberate choice
+about which failure to guard, not an oversight.
+
+`agent/test_slice_range_guard.py` gains the case the old check could not see: a slice holding
+0-9 and 19-27, assigned 0-27. It asserts explicitly that `_layers_in_slice` still reports
+`(0, 27)` — i.e. that the extremes alone would have waved it through — then that reload
+refuses and names `10-18`. 15 pass. `agent/test_reload_lifetime.py` also patched: it disabled
+the guard by monkeypatching `_layers_in_slice`, which after the split no longer patches what
+reload() calls; it now patches both, so the pair cannot drift into a no-op. 14 pass.
+
+**Level 2 remains open:** asserting after load that no parameter of an assigned layer is still
+on the meta device. That catches a layer present in the header but incompletely assigned — a
+truncated download, or a tensor mapped to a shard it is absent from. The header check cannot
+see that.
+
+Related: [P37] (the flagging that followed), [P36] (a slice that does not cover its range),
+[P35] (`UNREACHABLE_STRIKES` attesting an ambiguous socket close as a real failure).
+
+### [P41] 🟡 No CPU floor is checked anywhere, and torch's bundled MKL can fault on the old machines we recruit (2026-08-16)
+
+**The pitch is "ordinary computers" and "spare hardware". That is exactly the population
+with the oldest CPUs, and nothing in the agent, the installer or the docs checks what the
+machine supports.** `agent/requirements.txt` pins `torch==2.4.1` — the standard wheel, which
+bundles MKL on x86 — and there is no capability probe, no documented CPU floor, and no
+friendly failure.
+
+**External evidence, not ours.** `Uraroga/spikingbrain-cpu-cluster` documents this happening
+on hardware indistinguishable from a volunteer's: an Ivy Bridge i3-3240 (AVX/F16C, **no
+AVX2**) took an invalid-opcode trap in `libtorch_cpu.so`, exit 132. Symbolisation identified
+`mkl_vml_kernel_sExp_Z0HAynn+0xab`; disassembly showed an **EVEX/ZMM AVX-512 instruction** on
+a CPU that has no AVX-512. Critically, the environment knobs did not save them —
+`ATEN_CPU_CAPABILITY`, oneDNN/DNNL ISA settings and MKL ISA settings all failed to make that
+runtime stable. Their fix was a **custom PyTorch build** with `USE_MKL=0 USE_MKLDNN=0`,
+OpenBLAS, and `-march=ivybridge`.
+
+**Why this is worse for us than for them.** They are two engineers on their own machines who
+could read a kernel trap and rebuild PyTorch. Our failure lands on a stranger who
+double-clicked an installer: on Windows the symptom is `0xC000001D`
+(STATUS_ILLEGAL_INSTRUCTION), typically with no message at all — the app simply dies. That is
+the first-run experience for the exact person we spent a release making the installer for,
+and they have no way to know it is their CPU rather than our software.
+
+**Not yet verified for us**, and that matters: the report is Linux, a specific torch build and
+an embedded MKL VML path. Whether the Windows `torch==2.4.1` wheel dispatches the same way on
+a pre-AVX2 CPU has not been tested here, and we own no machine old enough to test it on. So
+this is a credible, documented risk rather than a reproduced defect.
+
+**Cheapest mitigation, and it does not require touching torch:** probe the CPU at first run
+(before the model loads) and fail with a sentence a person can act on — *"your processor
+lacks AVX2, which this build needs"* — instead of an illegal-instruction crash. Record the
+flags in the registration payload so the coordinator can see the real floor across the fleet.
+A documented minimum in `STRANGER_INSTALL.md` costs nothing and prevents the download.
+
+Note the constraint that makes the real fix expensive: `requirements.txt` says the torch pin
+is load-bearing because **nodes exchange pickled tensors over TCP**, so swapping to a
+differently-built torch is a wire-compatibility decision, not a packaging one. That argues for
+detect-and-explain now, and a considered answer later.
+
+### [P40] 🟡 Emission's LIVE ledger has never been reconciled against its own attendance rows (2026-08-16)
+
+**Corrected on filing day.** This was first written as "nobody has watched this code run",
+which overstated it. `coordinator/test_emission_slots.py` is 15 tests and covers the
+economics properly: supply is conserved and the pool pays for it, presence without
+proof-of-compute earns nothing, partial attendance is prorated, the daily cap bounds a
+scarcity spike, the multiplier is bounded and monotonic, and zero rows are reported rather
+than dropped. The *logic* is not the gap.
+
+**The gap is the live data.** Those tests run on a fresh temp DB with fabricated attendance.
+Nothing has ever compared what the production ledger *holds* against what the production
+attendance rows *say it should hold*. Emission has been settling on every health sweep and
+262.89 NRN has gone out, and the only evidence is negative: no `[emission] sweep failed` in
+the deploy logs. "No error appeared" is not "the distribution is correct" — the same
+reasoning 0.20.2 exists to disprove.
+
+Why this one outranks the other unverified items: it is the only unobserved path that
+produces a **number a person will care about and act on**. A wrong `ms_per_layer` embarrasses
+the dashboard; a wrong balance is the thing a volunteer checks to decide whether donating
+their machine was worth it — and 262.89 NRN has already been distributed against it. It is
+also cumulative: `total_earned` only ever grows, so an error does not show up as a spike, it
+compounds quietly and every later payout inherits it.
+
+The failure would also be silent by construction. Nothing reconciles what emission *should*
+have paid against what the ledger *says* it paid, so the first symptom is an operator
+disputing their balance — at which point there is no independent record to check them
+against.
+
+**What would close it** — and note none of these re-test the formula, they check the data:
+
+1. **Reconcile against the live rows.** `settle_attendance` stores the reward it paid, so the
+   check does not need to replay `plan_slot` or reconstruct the replica count at settle time:
+   sum the settled `attendance.reward` values and compare against the drop in
+   `GENESIS_BUCKETS_EMISSION_ID` and the corresponding rise in node `total_earned`. Those
+   three numbers must agree. That is a read-only query and it either passes or names the
+   slot where it stops.
+2. **Run it as a periodic assertion,** not once. The unit test proves the invariant holds
+   for a fabricated slot; running the same check against production every sweep proves it
+   holds for the real ones, and costs one query.
+3. ~~**Log what a sweep decided, not just that it ran.**~~ **Done (2026-08-16).**
+   `close_slots` only logged when `nodes_paid` was non-zero, so a sweep that settled ten
+   node-slots at **zero** and a sweep that did nothing produced identical silence — which is
+   half of why this question could not be answered from the logs. It now counts zero
+   settlements and logs on every sweep that had rows (*"settled 4 node-slot(s) at 0 across 1
+   slot(s), paid nothing"*), while a genuinely idle sweep still returns early and stays quiet.
+   `zero` added to the return dict; additive, and `main.py:265` ignores the return anyway.
+   15/15 emission tests still pass.
+
+   Items 1 and 2 remain: neither can be done from here, because the live DB is on the Oracle
+   VM and its deploy key carries a passphrase.
+
+Related: the payout-binding work in flight makes this more urgent, not less — binding a real
+wallet address to a balance is the point at which an unverified number stops being internal
+bookkeeping. Same family as [P32] and [P34]: a value that is trusted because nothing has
+contradicted it yet.
+
 ### [P37] 🟡 Proof-of-compute flagged three honest nodes for the coordinator's own bookkeeping, and the flag had no exit — mostly fixed (2026-08-10)
 
 **The network was down to one point of failure and every signal said the nodes were cheating.**
@@ -1613,6 +1783,40 @@ and the earlier entry asserted it without the log.
     This is a possible production-engine pivot from the hand-rolled fp32 PyTorch split
     (relates to [P8]); big change, big payoff — evaluate deliberately, not now.
   - cheaper interim: weight-only int8, or quantize MLP-only and keep attention/head in fp.
+- **External evidence for the method (2026-08-16).** `Uraroga/spikingbrain-cpu-cluster`
+  published `GOAL13B_INT8_BENCH_REPORT.md`, a controlled benchmark on one real
+  `mlp.gate_proj` matrix (67.9M codes) that isolates *where the error comes from* — which is
+  the question this entry has been open on:
+  - **Saturation is the corruption, and it is now quantified.** With the checkpoint's own
+    stored group scales, **1.039% of rounded weight codes fell outside `[-128,127]`** (actual
+    range `[-173,173]`). Naive saturation of just those (his path B1) gave worst relative L2
+    **3.25e-3**; reconstructing them exactly (B2) gave **5.06e-7** — roughly 6400× better,
+    and B2's residual error was accumulation order, not the weights. So "cast to int8"
+    silently changes ~1 weight in 100, with no exception and no obvious symptom. Compounded
+    across every Linear and 28 layers, that fits our observed failure — the model *refusing*
+    to answer rather than degrading — better than precision loss does.
+  - **The method: keep an INT8 base and correct the outliers exactly** — group-128 FP32
+    scales, plus sparse residuals (row pointers + K indices + INT16 residuals) for the
+    out-of-range codes. Cost of exactness was ~4.4 MB on a 67.9 MB base, about **6.5%
+    storage overhead**. That is cheap enough to be the default rather than an optimisation.
+  - **His 22.49× does NOT transfer, and his own control proves why.** His baseline rebuilds
+    the whole FP32 fake-quantized matrix on every forward; his path C (cache those weights,
+    change nothing else) is **bit-identical** to the baseline and already worth 2.87–3.56×.
+    We run a plain fp32 Linear and have no such waste to reclaim, so **our 3.46× remains the
+    honest number** for an fp32→int8 swap. Do not let the headline reset the estimate.
+  - **Caveat on transfer:** his checkpoint is W8ASpike and *already carries* group scales —
+    his problem is faithfully reproducing an existing quantization. Ours is *choosing* one on
+    a normally-trained fp32 checkpoint. The transferable parts are the group-wise (not
+    per-tensor) scale, and handling outliers explicitly instead of saturating them.
+- **We are ahead of him on the half that bit us hardest, and he has flagged it as his next
+  unknown.** His report notes his 32 real inputs came from one prompt and one layer, so
+  *"other layers/prompts may contain activation outliers"*. We measured exactly that at the
+  junction: **absmax 6620, std 42, worst channel ≈750× the median** — see [P20], where an
+  absmax quantizer scaled to that one channel collapsed everything else, fp8 e4m3 could not
+  represent 6620 at all and went NaN, and Petals' own blockwise-int8 scheme diverged on 1 of
+  3 prompts. Our fix was QuaRot's Hadamard rotation at the **transport layer**: orthogonal,
+  so it spreads the outlier without changing the vector, and needs no weight surgery and no
+  calibration. Worth sending him: it is the answer to the risk he has already named.
 - **Status:** speed is proven reachable; the *method* is the open work. Schedule a
   dedicated "quality-preserving quantization" session (candidate: alongside/after S14),
   NOT a rushed integration now. No real users yet (per ROADMAP's One Rule).
@@ -2019,6 +2223,48 @@ works. New `agent/test_install_macos.py` (13/13, mocks `launchctl`/file paths �
 available to test against). This is still the OPTIONAL auto-start helper, not the base
 `INSTALL.md` flow (`python agent/agent.py` run directly) — the base flow already worked on
 macOS without this.
+
+---
+
+### [P39] 🟡 Node earnings accrue to an account nobody can sign in as — partly fixed (2026-08-16)
+
+The founder asked where the 252 NRN that has left `__emission_pool__` actually is, and the
+answer exposed a seam nobody had looked at. `node-c-pavilion` holds **213.4954 NRN** — 85% of
+everything the network has ever paid out — in a ledger row created by `register_node`'s
+`INSERT OR IGNORE INTO ledger (node_id)`. No email, no login, no owner. Its entire credential is
+the `node_token` in one `config.json` on one laptop, and there is no recovery path: no endpoint
+moves a node's balance to the wallet a person actually signs into, and `models.transfer` — the
+primitive that could — is exposed nowhere.
+
+Two consequences, both live before this was written:
+1. **Lose the token, lose the money.** Nothing else on the network knows the account exists.
+2. **It would not survive the chain migration.** `blockchain/migrate_ledger.py` marks an account
+   with no bound payout address `unmapped` and skips it. Pavilion has never bound one.
+
+And the obvious fix had a trap inside it: sweeping a node into a wallet made the NRN spendable
+in the chat UI and simultaneously *unmappable*, because payout binding existed only at
+`/node/{id}/payout-*`. Spend it now and keep it later were mutually exclusive, and nothing said
+so. Both halves shipped together for that reason:
+  * `coordinator/claim_node_earnings.py` — sweeps a node account into a wallet. Dry run by
+    default, invariant-checked before and after, appends to `claim_log.json` because the ledger
+    has no transactions table. Most of its 29 tests are refusals: `transfer()` ends in
+    `INSERT OR IGNORE`, so paying a typo'd wallet id does not error, it silently creates the
+    account and reports success — money moved somewhere nobody can ever authenticate as, which
+    is strictly worse than leaving it where it was.
+  * `GET/POST /wallet/{id}/payout-challenge|payout-address` — the wallet half of payout binding
+    (21 tests). `binding_message` gained a `label`, so the prompt reads `wallet:` and a
+    signature made for a node cannot bind a wallet of the same id. Node text is byte-identical.
+
+**Still open, and it is the real fix:** this is a sweep, not an owner link. Pavilion earns
+~2–3 NRN/hour and keeps crediting an ownerless account, so somebody has to remember to run a
+script. An owner recorded at registration would make that unnecessary. Also unfixed: a leaked
+`wallet_id` is enough to bind a FIRST payout address (rebinding needs the incumbent key) —
+the same honest limit `payout.py` already documents for `node_token`, and a UI-proxied binding
+behind `X-Wallet-Link-Secret` is the shape that closes it.
+
+Related display bug, not yet fixed: `main.py`'s node dashboard computes `spent = total_earned -
+balance`, so a swept node reports its earnings as **spent on inference**, which is not what
+happened.
 
 ---
 
