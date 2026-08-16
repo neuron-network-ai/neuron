@@ -146,13 +146,26 @@ def close_slots(total_layers, now=None, log=print):
             if reward <= 0:
                 settled_zero += 1             # claimed the hour, paid nothing -- counted so the
                 continue                      # log can tell this apart from "nothing to do"
-            if not models.transfer(config.GENESIS_BUCKETS_EMISSION_ID, entry["node_id"], reward):
+            # [P39] phase 3: pay the person, not the machine. A node account's only
+            # credential is the node_token in one config.json, so crediting it means the
+            # money is lost with the file and skipped as `unmapped` by migrate_ledger. When
+            # an owner has been recorded (which requires a verified signature, see phase 1),
+            # the reward goes straight to the wallet they sign into and no sweep is ever
+            # needed. Falls back to the node account when no owner is known, so nodes that
+            # predate this keep earning exactly as before.
+            #
+            # The attendance row is still claimed against the NODE -- that is which machine
+            # was present, and settling it elsewhere would let one owner's two nodes settle
+            # each other's hours.
+            payee = models.get_node_owner(entry["node_id"]) or entry["node_id"]
+            entry["payee"] = payee
+            if not models.transfer(config.GENESIS_BUCKETS_EMISSION_ID, payee, reward):
                 # The pool is empty. The row stays settled at 0 rather than being retried
                 # forever, and this is said loudly: emission ending is a tokenomics event, not
                 # a transient error.
                 models.settle_attendance(entry["node_id"], slot, 0.0, now=now)
                 log(f"[emission] POOL EXHAUSTED — cannot pay {reward:.6f} NRN to "
-                    f"'{entry['node_id']}' for slot {int(slot)}. Availability rewards have "
+                    f"'{payee}' for slot {int(slot)}. Availability rewards have "
                     f"stopped; per-request earnings are unaffected.")
                 continue
             spent_today += reward

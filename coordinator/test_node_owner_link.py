@@ -140,6 +140,50 @@ def main():
     check("...and leaves the owner unset rather than guessing",
           models.get_node_owner("node-legacy") is None)
 
+    print("\n-- emission pays the owner, not the machine  (phase 3)")
+    # Driving a real payable slot needs a heartbeat, an attendance row and a proof-of-compute
+    # pass inside it -- all covered by test_emission_slots. What is NEW here is one line: who
+    # the reward is transferred TO. So the surrounding machinery is stubbed and only that is
+    # exercised, which is also the only part that can regress independently.
+    from coordinator import emission
+
+    slot = models.slot_start_for(1_800_000_000.0)
+    real_unpaid, real_plan = models.unpaid_attendance, emission.plan_slot
+    real_settle, real_transfer = models.settle_attendance, models.transfer
+    paid_to = []
+
+    def stub_for(node_id):
+        models.unpaid_attendance = lambda before: [{"node_id": node_id, "slot_start": slot}]
+        emission.plan_slot = lambda rows, total, now=None: [
+            {"node_id": node_id, "slot_start": slot, "reward": 1.0, "replicas": 1,
+             "multiplier": 1.0, "attended_frac": 1.0, "reason": None}]
+        models.settle_attendance = lambda *a, **kw: True
+        models.transfer = lambda src, dst, amt: (paid_to.append(dst), True)[1]
+
+    try:
+        models.register_node("node-unowned", "127.0.0.1", 51072, 20, 27, 4, 8.0, "tok-unowned")
+
+        stub_for(NODE)
+        emission.close_slots(config.TOTAL_LAYERS, now=slot + config.SLOT_SECONDS * 1.5,
+                             log=lambda *_: None)
+        check("an owned node's reward goes to the owner's wallet", paid_to == [wallet],
+              f"paid to {paid_to}")
+
+        paid_to.clear()
+        stub_for("node-unowned")
+        emission.close_slots(config.TOTAL_LAYERS, now=slot + config.SLOT_SECONDS * 1.5,
+                             log=lambda *_: None)
+        check("a node with no owner still earns into its own account",
+              paid_to == ["node-unowned"], f"paid to {paid_to}")
+    finally:
+        models.unpaid_attendance, emission.plan_slot = real_unpaid, real_plan
+        models.settle_attendance, models.transfer = real_settle, real_transfer
+
+    check("the attendance row is still claimed against the NODE",
+          "settle_attendance(entry[\"node_id\"]" in
+          open("coordinator/emission.py", encoding="utf-8").read(),
+          "settling elsewhere would let one owner's two nodes settle each other's hours")
+
     print(f"\n{ok} passed, {fail} failed")
     return 1 if fail else 0
 

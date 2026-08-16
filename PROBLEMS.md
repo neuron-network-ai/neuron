@@ -2274,19 +2274,30 @@ An invented `owner_wallet_id` is refused rather than recorded: `set_payout_addre
 nobody can authenticate as — the same trap `claim_node_earnings.py` spends most of its tests
 refusing, one layer earlier. An older agent that sends no owner still binds normally.
 
-**Still open — phases 2 to 4:**
-  2. **Prompt for it at sign-in.** Nothing collects the owner yet; the column is filled only
-     if a caller supplies it. The agent serves the OAuth page on `localhost:8080` and knows
-     both its own `node_id` and the wallet just signed into, so that is the moment to ask.
-     `tools/sign_payout.html` already does the MetaMask half (`eth_requestAccounts`,
-     `personal_sign`) and is ~30 lines to lift. Must be skippable — a volunteer without
-     MetaMask has to be able to run a node. Doing it there is also the UI-proxied binding
-     behind `X-Wallet-Link-Secret` that closes the leaked-`wallet_id` weakness below.
-  3. **Pay the owner directly.** `emission.py` credits `entry["node_id"]`; crediting the owner
-     wallet when one is set (falling back to the node account when it is not) removes the
-     sweep permanently for future earnings. One call site.
-  4. **Sweep the history once.** `claim_node_earnings.py` already does it — run it for
-     Pavilion's 213 NRN after its owner is recorded, not before.
+**Phase 2 done (2026-08-16): the Chat UI asks.** `local_chat.start()` passes the node identity
+into the UI's environment; `ui/app.py` gains `/node/owner`, `/node/payout/challenge` and
+`/node/payout/bind`, mirroring the wallet routes. The `node_token` is used server-side only and
+never reaches the browser, and `owner_wallet_id` is injected from the SESSION — `NodeBindBody`
+has no such field, so a page cannot nominate somebody else's wallet as the owner of this
+machine's earnings. The chat page shows a panel only when this machine serves a node AND has no
+owner recorded: a driver-only machine sees nothing and nobody is asked twice. A panel, not a
+gate — a volunteer without a browser wallet must still be able to run a node. 16 tests.
+
+**Phase 3 done (2026-08-16): emission pays the person, not the machine.** `close_slots` now
+transfers to `get_node_owner(node_id) or node_id`, so a node with a recorded owner credits the
+wallet directly and needs no sweep, while nodes that predate this keep earning exactly as
+before. The attendance row is still claimed against the NODE — that is which machine was
+present, and settling it against the owner would let one person's two nodes settle each
+other's hours.
+
+**Still open — phase 4, and it needs the live DB:**
+  4. **Sweep the history once.** `claim_node_earnings.py` already does it. Order matters:
+     deploy the coordinator, let the operator record an owner through the UI, and only then
+     sweep — running it first moves the balance to an account with no proven owner, which is
+     the thing this whole entry exists to stop. Pavilion's ~213 NRN is the case.
+
+Note for packaging: the desktop build serves its own copy of the UI, so the phase 2 panel does
+not appear in an installed 0.20.2 until the app is rebuilt.
 
 Also still unfixed: a leaked `wallet_id` is enough to bind a FIRST payout address (rebinding
 needs the incumbent key) — the same honest limit `payout.py` documents for `node_token`.
