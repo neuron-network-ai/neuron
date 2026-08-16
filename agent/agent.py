@@ -328,6 +328,31 @@ def _version():
         return "unknown"
 
 
+# The dtypes `common.WEIGHT_DTYPE` can be. Duplicated from there ON PURPOSE: this process is
+# the lightweight, ARM-compatible half and must not import torch, which `common` does at module
+# scope. `agent/test_weight_dtype_report.py` asserts the two agree for every value and fails if
+# either side changes alone -- the only honest way to hold a duplicated constant together.
+WEIGHT_DTYPES = ("fp32", "fp16", "bf16")
+DEFAULT_WEIGHT_DTYPE = "fp32"
+
+
+def weight_dtype():
+    """What this node will STORE weights at, as `common.py` will resolve it.
+
+    Storage, not compute: `cast_linears` keeps every GEMM in fp32 whatever this says, because
+    these CPUs have no half-precision GEMM ([P2]). So this halves a node's resident bytes
+    without halving its arithmetic — which is what decides whether a model too big for one
+    machine fits across two.
+
+    An unrecognised value resolves to the default here rather than raising, because `common`
+    would raise on it in the node_server process and the coordinator must still be told
+    something true about THIS process. Reporting the default matches what the operator will
+    actually get once they fix the typo, and reporting nothing would size the node identically.
+    """
+    v = os.environ.get("NEURON_WEIGHT_DTYPE", DEFAULT_WEIGHT_DTYPE).strip().lower()
+    return v if v in WEIGHT_DTYPES else DEFAULT_WEIGHT_DTYPE
+
+
 def detect_tailscale_ip():
     """Best-effort Tailscale IPv4 (100.64.0.0/10). Falls back to a 100.x interface addr."""
     for cmd in (["tailscale", "ip", "-4"],
@@ -604,6 +629,17 @@ class Agent:
             "declared_slots": self.cfg.get("declared_slots"),
             "cores": os.cpu_count(),
             "ram_gb": int(psutil.virtual_memory().total // 10**9),
+            # What this node will STORE weights at, which halves or doubles every footprint the
+            # coordinator sizes it from ([P43]). `balancer.weight_bytes_for` has read this field
+            # since the dtype correction shipped and nothing has ever sent it, so every node has
+            # been sized at the pessimistic 4 bytes/param regardless of what it runs.
+            #
+            # Read from the environment rather than from `common.WEIGHT_DTYPE`, because THIS
+            # process must not import torch -- agent.py is the lightweight, ARM-compatible half
+            # and `common` imports torch at module scope. That duplicates the default, which is
+            # a drift risk, so `test_weight_dtype_report.py` asserts the two agree for every
+            # supported value and fails if either side changes alone.
+            "weight_dtype": weight_dtype(),
             # With cores/ram_gb this is the coarse hardware signature the coordinator groups
             # on to spot one machine registering many node ids. It is a signal an operator
             # reviews, never a block, and it says nothing a `User-Agent` header would not.

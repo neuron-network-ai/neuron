@@ -206,6 +206,15 @@ def init_db():
             c.execute("ALTER TABLE nodes ADD COLUMN gpu_name TEXT")
         if "owner_wallet_id" not in cols:                        # [P39] owner link
             c.execute("ALTER TABLE nodes ADD COLUMN owner_wallet_id TEXT")
+        # What this node STORES weights at ([P43]). `balancer.weight_bytes_for` has read this
+        # since the dtype correction shipped and no node could ever set it -- there was no field
+        # and no column -- so every node was sized at the pessimistic 4 bytes/param whether or
+        # not it ran fp16. That is safe and it is also what makes the capacity case impossible:
+        # a 4B model fits across a 12 GB and an 8 GB machine at fp16 storage and does not at
+        # fp32, and until now a node had no way to say which it was doing.
+        # NULL = an agent too old to report, which sizes pessimistically -- never optimistically.
+        if "weight_dtype" not in cols:
+            c.execute("ALTER TABLE nodes ADD COLUMN weight_dtype TEXT")
         # What the node CLAIMED at its last registration, kept separate from the range it is
         # ASSIGNED. They diverge exactly when a node is re-asserting a stale config after the
         # operator (or a migration) moved it -- the mechanism behind [P32]. NULL on rows that
@@ -465,7 +474,8 @@ def hardware_fingerprint(cores, ram_gb, platform):
 def register_node(node_id, tailscale_ip, port, layer_start, layer_end, cores,
                   ram_gb, token, ms_per_layer=None, head_ms=None, trusted=False,
                   platform=None, has_gpu=False, gpu_vram_gb=None, gpu_name=None,
-                  agent_version=None, auto_update=None, update_check=None):
+                  agent_version=None, auto_update=None, update_check=None,
+                  weight_dtype=None):
     now = time.time()
     # GPU fields are deliberately NOT folded into hardware_fingerprint. Changing the
     # fingerprint format would give every existing node a new signature, so nothing would
@@ -479,8 +489,9 @@ def register_node(node_id, tailscale_ip, port, layer_start, layer_end, cores,
                                   platform, hw_fingerprint, has_gpu, gpu_vram_gb, gpu_name,
                                   reported_layer_start, reported_layer_end, ms_per_layer_at,
                                   agent_version, auto_update, update_check, update_checked_at,
+                                  weight_dtype,
                                   status, last_seen, registered_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'online', ?, ?)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'online', ?, ?)
                ON CONFLICT(node_id) DO UPDATE SET
                    tailscale_ip=excluded.tailscale_ip, port=excluded.port,
                    -- layer_start/layer_end are DELIBERATELY NOT UPDATED HERE. The coordinator
@@ -541,6 +552,13 @@ def register_node(node_id, tailscale_ip, port, layer_start, layer_end, cores,
                    update_check=COALESCE(excluded.update_check, nodes.update_check),
                    update_checked_at=CASE WHEN excluded.update_check IS NOT NULL
                        THEN excluded.update_checked_at ELSE nodes.update_checked_at END,
+                   -- Followed, NOT COALESCEd, for the reason the GPU fields are: an operator
+                   -- who unsets NEURON_WEIGHT_DTYPE goes back to storing 4 bytes/param, and a
+                   -- remembered `fp16` would then size the slice from memory the node no
+                   -- longer saves. An older build that reports nothing therefore erases it,
+                   -- which lands on the PESSIMISTIC figure -- the direction that costs
+                   -- throughput rather than a volunteer's machine.
+                   weight_dtype=excluded.weight_dtype,
                    trusted=excluded.trusted,
                    node_token=excluded.node_token, status='online', last_seen=excluded.last_seen""",
             (node_id, tailscale_ip, port, layer_start, layer_end, cores, ram_gb,
@@ -552,6 +570,7 @@ def register_node(node_id, tailscale_ip, port, layer_start, layer_end, cores,
              (None if auto_update is None else (1 if auto_update else 0)),
              update_check,
              (now if update_check is not None else None),
+             weight_dtype,
              now, now),
         )
         c.execute("INSERT OR IGNORE INTO ledger (node_id) VALUES (?)", (node_id,))

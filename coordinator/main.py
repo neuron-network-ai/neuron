@@ -71,6 +71,12 @@ class RegisterBody(BaseModel):
                                         # a coordinator/node divergence is detectable at all --
                                         # without it, both 28-layer tiers validate identically
                                         # and a mismatch shows up only as a dropped socket.
+    weight_dtype: str | None = None     # what this node STORES weights at ("fp32"/"fp16"/
+                                        # "bf16"). The SECOND field in this body that becomes a
+                                        # memory budget, and the more dangerous of the two: it
+                                        # divides, so a believed "int8" would quadruple the
+                                        # layers assigned. Clamped by balancer.sane_weight_dtype
+                                        # below to dtypes common.WEIGHT_DTYPE can really be.
     declared_slots: str | None = None   # UTC hours this machine is usually available, e.g.
                                         # "1,2,3,4,5". A DECLARATION, never a promise: nothing
                                         # is penalised for missing one, because a phone's
@@ -535,6 +541,11 @@ def register(body: RegisterBody, x_register_secret: str = Header(default=None),
     # VRAM figure costs nothing if it is dropped -- the node is then sized from its system RAM,
     # like every node is today.
     vram = balancer.sane_vram_gb(body.gpu_vram_gb) if body.has_gpu else None
+    # Same treatment, same reason, and it matters more: VRAM is currently sized from at all
+    # only when GPU_EXECUTION is on (it is off), while this divides every footprint on every
+    # node right now. A dtype the runtime cannot store at is dropped to None -> the node is
+    # sized at the pessimistic default, exactly as an older agent is.
+    wdtype = balancer.sane_weight_dtype(body.weight_dtype)
     fingerprint = models.register_node(
         body.node_id, tailscale_ip, port, body.layer_start,
         body.layer_end, body.cores, body.ram_gb, token,
@@ -542,7 +553,7 @@ def register(body: RegisterBody, x_register_secret: str = Header(default=None),
         platform=body.platform, has_gpu=body.has_gpu, gpu_vram_gb=vram,
         gpu_name=body.gpu_name,
         agent_version=body.agent_version, auto_update=body.auto_update,
-        update_check=body.update_check)
+        update_check=body.update_check, weight_dtype=wdtype)
     if body.declared_slots is not None:
         models.set_declared_slots(body.node_id, body.declared_slots)
     if body.model_id:

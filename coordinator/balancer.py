@@ -57,16 +57,34 @@ _DTYPE_BYTES = {"fp32": 4.0, "float32": 4.0, "fp16": 2.0, "float16": 2.0,
                 "bf16": 2.0, "bfloat16": 2.0, "int8": 1.0, "fp8": 1.0}
 
 
+# Storage dtypes the RUNTIME can actually be in. `common.WEIGHT_DTYPE` maps exactly these three
+# and nothing else, so a node claiming int8 or fp8 storage is claiming something no build of
+# this software can do — and the claim would QUARTER the divisor and quadruple the layers it is
+# handed. Believing it is the `gpu_vram_gb` mistake in a new field: under open join, registration
+# needs no credential, and this is now the second reported value that turns straight into a
+# memory budget. `sane_weight_dtype` is the `sane_vram_gb` of this field, and for the same reason.
+BELIEVABLE_WEIGHT_DTYPES = {"fp32", "float32", "fp16", "float16", "bf16", "bfloat16"}
+
+
+def sane_weight_dtype(value):
+    """A storage dtype worth sizing from, normalised — or None, meaning "size this node the
+    pessimistic way instead", which is the honest answer to a claim we cannot believe.
+
+    Never a refusal: a cosmetic field must not cost a volunteer their registration ([P24]).
+    """
+    v = str(value or "").strip().lower()
+    return v if v in BELIEVABLE_WEIGHT_DTYPES and v in _DTYPE_BYTES else None
+
+
 def weight_bytes_for(node=None):
     """Bytes per parameter this node stores weights at.
 
-    Reads `weight_dtype` when a node reports one (agents do not yet; the field is accepted so
-    the agent-side change is additive and needs no coordinator release). Anything unknown or
-    absent falls back to ASSUMED_WEIGHT_BYTES — never to the optimistic figure, because a
+    Reads `weight_dtype`, which agents report from 0.20.3. Anything unknown, absent or not
+    believable falls back to ASSUMED_WEIGHT_BYTES — never to the optimistic figure, because a
     wrong guess in that direction is an OOM on somebody's personal machine.
     """
     if node:
-        b = _DTYPE_BYTES.get(str(node.get("weight_dtype") or "").strip().lower())
+        b = _DTYPE_BYTES.get(sane_weight_dtype(node.get("weight_dtype")))
         if b:
             return b
     return ASSUMED_WEIGHT_BYTES
@@ -123,9 +141,21 @@ GPU_EXECUTION = False
 # How much of a node's TOTAL RAM is assumed to be already spoken for — the OS plus whatever the
 # volunteer is actually doing with their own machine.
 #
-# Only used when a node reports total RAM and no free figure, which today is EVERY node:
-# `agent.py` sends `ram_gb` (psutil *total*) at registration and the coordinator has no column
-# for a free one. Until this fallback existed `max_layers_for` returned None for every real node,
+# Only used when a node reports total RAM and no free figure, which is still EVERY node:
+# `agent.py` sends `ram_gb` (psutil *total*) and the coordinator has no column for a free one.
+#
+# **That is a decision, not an omission — do not "finish the job" by adding one.** The
+# `ram_free_gb` branch below skips this reserve entirely (`usable = float(free)`), so a node
+# reporting a free figure is sized MORE generously than one reporting a total: a 12 GB Linux box
+# freshly booted reports ~11 GB free and gets an 8.25 GB budget against this path's 6.75 GB.
+# That figure is a SNAPSHOT taken during registration, it carries no age, and nothing re-reads
+# it — so a machine that registered at 3am idle keeps a 3am-idle budget all day, and the layers
+# it was handed on that basis are still resident when its owner opens a browser. A number that
+# was true when captured and false when applied is [P34], and this would be the third instance.
+# Reporting it needs an age and a re-read (heartbeat, not registration) before it is safe, and
+# the pessimistic path costs throughput rather than somebody's machine.
+#
+# Until this fallback existed `max_layers_for` returned None for every real node,
 # so the hard memory cap below was live in the unit tests and DORMANT IN PRODUCTION — which is
 # how the 2026-08-07 auto-promotion to Qwen2.5-7B handed 9–10 layers (~4.5 GB of weights) to
 # machines with 8 GB of total RAM.

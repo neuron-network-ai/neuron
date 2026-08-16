@@ -58,8 +58,20 @@ DTYPE = torch.float32
 # forward time (see CastLinear). The cast is transient — one weight matrix at a time, and
 # amortised across a whole batch — so peak memory stays near the fp16 figure while every
 # GEMM still runs in fp32, which is the only dtype these CPUs are fast at.
-WEIGHT_DTYPE = {"fp32": torch.float32, "fp16": torch.float16,
-                "bf16": torch.bfloat16}[os.environ.get("NEURON_WEIGHT_DTYPE", "fp32").lower()]
+_WEIGHT_DTYPES = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
+# .strip() as well as .lower(), and a sentence instead of a KeyError. Without the strip, a
+# trailing space -- trivially acquired in a systemd unit file, a .bat or a copied README line --
+# made this raise `KeyError: 'fp16 '` at IMPORT, so the node server died before its logging was
+# up and the operator got a traceback naming a dict literal. Worse, `agent.weight_dtype()`
+# strips, so the coordinator was told `fp16` and sized the machine for half its real footprint
+# while the process that would have stored those weights was not running at all.
+_requested = os.environ.get("NEURON_WEIGHT_DTYPE", "fp32").strip().lower()
+if _requested not in _WEIGHT_DTYPES:
+    raise SystemExit(
+        f"NEURON_WEIGHT_DTYPE={_requested!r} is not a storage dtype this build supports. "
+        f"Use one of: {', '.join(sorted(_WEIGHT_DTYPES))}. (fp16/bf16 halve resident RAM; "
+        f"every GEMM still runs in fp32 regardless -- see CastLinear.)")
+WEIGHT_DTYPE = _WEIGHT_DTYPES[_requested]
 
 # Socket timeouts for the pipeline's raw TCP hops. COLD_CONNECT_TIMEOUT_S covers connect
 # + the config handshake, which blocks behind the peer's one-time model-shard load
