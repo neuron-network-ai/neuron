@@ -65,11 +65,16 @@ optional once `AGENT_VERSION` is 0.20.3.
 1. Upload `dist/installer/NEURON-Setup-0.20.3.exe` to the GitHub release `v0.20.3`. Do this
    **first** — the hash is what nodes act on, and a hash pointing at a 404 makes every node
    retry hourly.
-2. Hash it and set `NEURON_AGENT_SHA256` in the coordinator's systemd unit:
+2. Set `NEURON_AGENT_SHA256` in the coordinator's systemd unit. Built 2026-08-17,
+   216.9 MB:
 
-   ```bash
-   sha256sum dist/installer/NEURON-Setup-0.20.3.exe
    ```
+   01867f43c7866bc491f1cef5fb20fb34fc5ea95dd777c41d8b3170f6c03581f9
+   ```
+
+   Re-hash rather than trusting this line if the exe is ever rebuilt — a PyInstaller build is
+   not byte-reproducible, so a second build of the same source has a different hash and every
+   node would refuse it.
 
 3. Deploy the coordinator (`bash coordinator/deploy.sh`) and restart the unit.
 
