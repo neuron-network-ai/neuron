@@ -75,11 +75,15 @@ The message explaining why to sign in was gated on being signed in. There is now
 strip above the composer driven by `unclaimed`. **It does not reach the live UI until the app is
 rebuilt** — the agent serves its own packaged copy.
 
-**The `/next` swap would currently be a REGRESSION.** Checked directly: the React app has no
-low-balance strip, no wallet-ID panel, no degraded banner, no token cap and no
-local-vs-network header. The blocker was never the 59 assertions — it is feature parity, and the
-tests were only a proxy for it. Also: the claim panel is on `/` already, so the note saying it
-lives only on `/next` was wrong.
+**The `/next` swap is a THREE-ITEM job, not a rewrite.** An audit that grepped for chat.html's
+identifiers rather than for behaviours badly overstated the gap; corrected in [P48]. React
+already has the wallet-id reveal, the node-owner claim, payout binding, insufficient_funds,
+reroute, partial-answer survival, `localCapable`, low balance (as `≈ N network answers left`)
+and a better token cap — plus personas, per-thread settings and speech, which chat.html lacks.
+What is missing: **it will send into a chain that cannot answer** (`canSend` has no health
+term, while chat.html blocks on `!healthy && !localCapable`) — that is the one that can hurt
+somebody — plus the degraded banner's uncovered-layer detail and the new update notice. Also:
+the claim panel is on `/` already, so the note saying it lives only on `/next` was wrong.
 
 ## Do these first
 

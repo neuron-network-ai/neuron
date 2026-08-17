@@ -220,9 +220,14 @@ class Verifier:
         worst case is that an hour we really did audit is recorded as one we did not, which errs
         toward paying a node that earned it rather than toward accusing one that did not.
         """
+        # Short timeout on purpose. This runs only AFTER a successful roster read, so the
+        # coordinator is known reachable and a slow answer means something transient rather than
+        # an outage; and it is bookkeeping, so waiting on it steals time from the challenge that
+        # is the actual work. At 15s it added a minute to `test_flag_recovery` alone, which is
+        # the same cost a real verifier would pay on every cycle through a flaky connection.
         try:
             r = requests.post(f"{self.base}/verifier/heartbeat", headers=self._headers(),
-                              timeout=15)
+                              timeout=5)
             r.raise_for_status()
         except requests.RequestException as e:
             log.warning("could not record the verifier heartbeat (%s) — this slot may be "

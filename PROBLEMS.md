@@ -189,6 +189,31 @@ would do it deliberately.
 So this route swap is not "the wallet UI is on the wrong URL". It is the reason a volunteer's
 earnings live on a machine instead of in an account.
 
+**What the swap actually costs, audited properly (2026-08-18).** A first pass over this claimed
+the React app was missing five things and that swapping would regress every user. That was
+wrong — it grepped for chat.html's *identifiers* rather than for the behaviours, so anything
+React spells differently read as absent. Checked again against the source, React **has** the
+wallet-id reveal, the node-owner claim, payout binding, `insufficient_funds`, reroute-is-not-an-
+error, partial-answer survival, the local-vs-network header (`localCapable`), and low balance —
+as `≈ N network answers left · contribute this machine to earn more`, in the sidebar rather than
+as a strip. It has a token cap and a **better** one (`maxTokens` per thread, adjustable, not a
+constant). It also has personas, per-thread settings and speech input, none of which chat.html
+has.
+
+Three real gaps, and only the first can hurt somebody:
+
+  1. **It will send into a chain that cannot answer.** `canSend` in `ChatInput.tsx` is
+     `(text || attachments) && !isGenerating` — no health term at all, while chat.html has
+     `setBlocked` driven by `!n.healthy && !localCapable`. So on a degraded network React lets
+     you type, send, and collect a failure, where the old page says up front that it cannot go.
+     That is the one item that must land before the swap.
+  2. No degraded banner naming the uncovered layers (React shows a health dot only).
+  3. No update notice — added to chat.html on 2026-08-18, not yet in React.
+
+So this is a **three-item** job, not a rewrite, and the 59 assertions were never the blocker:
+they read chat.html's HTML strings, so they were a proxy for parity and a bad one. Port the
+behaviours that matter, close (1) especially, and swap.
+
 That makes the `/next` → `/` swap a **shipping** problem rather than the tidy-up it has been
 filed as. It is blocked on porting 59 source-text assertions in `ui/test_chat_ui.py` — tests
 that assert on chat.html's HTML strings, which is exactly why they cannot follow the behaviour
