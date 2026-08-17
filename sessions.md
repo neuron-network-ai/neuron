@@ -5627,6 +5627,70 @@ taken on the 1.5B. What remains is a deploy, `NEURON_WEIGHT_DTYPE=fp16` on both 
 OptiPlex out of the roster, a model pin, and 4.41 GB and 3.63 GB downloaded to machines that
 have never held a 4B slice. `CAPACITY_CASE.md` is the runbook.
 
+## Session 61 (2026-08-17) — a donation cap, and the claim panel nobody had clicked
+
+Short session, two things, both of them consequences of reading what is actually there rather
+than what the plan assumed.
+
+### The capacity case died and came back as a feature
+
+`/node/list`, read instead of assumed: **two machines online.** The 16-core Windows PC (68 GB)
+and the 4-core Pavilion (12 GB). There is no 8 GB node. The OptiPlex is not registered and is
+not going to be — it holds household DNS and ~60 containers. Session 40-41 found exactly this
+and it is still true.
+
+So "run a 4B model across the 12 GB Pavilion and the 8 GB node" could not be run at all:
+exclude the big machine and one node is left, and `MIN_PIPELINE_STAGES` is 2. Worse, with a
+64 GiB machine in a two-node network **nothing is a capacity case until it is nearly 50 GB** —
+the band is 48.8-55.5 GB, a ~13B model at fp32, meaning a 49 GB download onto a 4-core laptop
+with the big machine at 100% of its budget.
+
+The way out was not a bigger model, it was a smaller donation. `donation_mode` has always
+governed WHEN a node serves; nothing governed HOW MUCH of the machine it commits. Someone with
+a 64 GB workstation happy to lend 8 GB had to choose between the whole machine and nothing,
+which is the worst trade to put in front of the person most able to help. `donate_ram_gb` is
+that setting, and the capacity case falls out of it: the Windows PC capped at 8 GB is an 8 GB
+node, and Qwen3-4B at fp16 places 18/18 across it and the Pavilion with neither able to hold 36
+layers alone.
+
+It is a DECLARATION the coordinator enforces, not a runtime limiter — the agent reports the
+capped figure as `ram_gb`, `max_layers_for` sizes from it, and the node is never handed a slice
+bigger than the cap, so there is nothing to police while it runs. Four lines of agent and no
+coordinator change at all: the sizing path was already asking the right question and was only
+ever being answered with the hardware's number.
+
+### 68 GB is not a machine anyone owns
+
+The founder read the roster back and stopped on it. `agent.py` sends
+`psutil.virtual_memory().total // 10**9` — decimal GB — while RAM is installed in binary GiB,
+so a 64 GiB machine reports 68.7 truncated to 68. Not bad data, a unit. The truncation always
+rounds down, so every node is credited slightly less than it has: the Pavilion is 12.88 GB and
+gets 12. About 3 layers of Qwen3-4B at fp16, discarded, in the one number every OOM decision
+rests on. [P43] item 4.
+
+Also corrected: this log said the 68 GB machine was the OptiPlex. Session 40-41's own roster
+says otherwise — 16 cores is the Windows PC, the OptiPlex is 6.
+
+### The claim panel, finally clicked
+
+[P39] phase 2 shipped a claim panel in chat.html. The React rewrite at `/next` had none, so
+swapping the routes would have silently dropped it — invisibly, since it only appears for a
+contributor who has not claimed yet.
+
+Ported as behaviour, not DOM. The load-bearing choice: `claimNodeEarnings` takes its provider
+as an argument instead of reading `window.ethereum`. The old tests stubbed `window.ethereum`
+wholesale and asserted on chat.html's source strings, so connect → challenge → sign → bind had
+**never executed anywhere**. Driven in a browser with a wallet that signs and one that refuses:
+declining reports "nothing changed", leaves the button live, and posts nothing; signing posts
+only the bind, with a body of exactly `{address, nonce, signature}` — checked live, because
+"the page cannot name somebody else as the owner" is the property the phase exists for.
+
+`npm run dev` served a signed-out machine with no node, so neither the wallet rows nor this
+panel could be looked at without an agent, a coordinator and an OAuth round trip. That is a
+large part of why it had never been clicked, and a dev-only mock middleware now fixes it.
+
+Not done: a real MetaMask signature, and the desktop rebuild.
+
 ## Known limits / next steps
 - **The 3.2 / 4.6 / 6.2 tok/s scaling curve predates Ethernet** and was measured with
   54–109 ms of Wi-Fi power-save latency on every node_c hop (Session 59). The sub-linearity

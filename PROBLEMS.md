@@ -2529,6 +2529,40 @@ machine's earnings. The chat page shows a panel only when this machine serves a 
 owner recorded: a driver-only machine sees nothing and nobody is asked twice. A panel, not a
 gate — a volunteer without a browser wallet must still be able to run a node. 16 tests.
 
+**Phase 2 completed in the React app (2026-08-17), and clicked for the first time.** `/` serves
+chat.html and `/next` serves the rewrite; the rewrite had no claim panel, so swapping the routes
+would have silently dropped this — invisibly, because the panel only ever appears for a
+contributor who has not claimed yet. Ported as BEHAVIOUR rather than DOM:
+`ui/web/src/services/nodeOwner.ts` holds the rules, `components/NodeOwnerPanel.tsx` renders
+them, wired into the Sidebar under the wallet block. Same reason `services/neuron.ts` exists —
+the old page's guarantees were asserted by grepping chat.html's source text, which a compiled
+bundle makes impossible.
+
+`claimNodeEarnings` takes its EIP-1193 provider as an ARGUMENT rather than reading
+`window.ethereum`, and that one choice is what made the path testable: the old tests stubbed
+`window.ethereum` wholesale and then asserted on source strings, so connect → challenge → sign
+→ bind had never once executed anywhere. Driven through the real component in a browser with
+two wallets:
+  * **declined** (`code 4001`) — *"You declined the signature. Nothing changed — you can do this
+    any time."*, button present and NOT disabled, and **nothing POSTed**;
+  * **signed** — signs the exact challenge text for the address the server returned, POSTs only
+    `/node/payout/bind`, panel shows the bound address and the button is gone.
+
+The POST body is exactly `{address, nonce, signature}` — asserted in vitest and re-checked live
+in the browser, because "the page cannot name somebody else as owner" is the property this whole
+phase exists for. 20 tests in `nodeOwner.test.ts`; `ui/test_node_owner_ui.py`'s 16 server-side
+tests untouched.
+
+`vite.config.ts` gained a DEV-ONLY mock middleware (`apply: 'serve'`, never in a build). Without
+it `npm run dev` serves a signed-out machine with no node, so the wallet rows and this panel
+could not be looked at without running an agent, a coordinator and an OAuth round trip — a large
+part of why this had never been clicked.
+
+**Still open on phase 2:** a real MetaMask signature (the in-app browser has no extension, so the
+provider was a stub — the sequence, wording, state transitions and the no-wallet-id property are
+verified, MetaMask's own popup behaviour is not), and the desktop rebuild, since an installed
+0.20.2 serves its own copy of the UI.
+
 **Phase 3 done (2026-08-16): emission pays the person, not the machine.** `close_slots` now
 transfers to `get_node_owner(node_id) or node_id`, so a node with a recorded owner credits the
 wallet directly and needs no sweep, while nodes that predate this keep earning exactly as
