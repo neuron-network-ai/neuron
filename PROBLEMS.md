@@ -976,7 +976,45 @@ reset every pre-column node to the default prior, network-wide.
 This is [P37]'s lesson — *a stale diagnostic field read as a live one* — recurring in the
 surface a person actually looks at, which is the one place it turns into a wrong decision.
 
-### [P32] 🔴 A pinned layer range does not survive the node re-registering — the mechanism behind [P27] recurring (2026-08-09)
+### [P32] 🟢 A pinned layer range does not survive the node re-registering — fixed (2026-08-09), confirmed live (2026-08-17)
+
+**FIXED. Confirmed against the code, the tests and the live network on 2026-08-17** — the entry
+below is the original diagnosis, kept because the reasoning in it is still the reasoning that
+matters. It stayed marked 🔴 long after the fix shipped, which is its own small lesson: a status
+field nobody re-reads is a stale diagnostic, and this log has an entry about exactly that
+([P34], [P37]).
+
+**Option B was taken: the coordinator owns placement — a node PROPOSES, the coordinator
+DISPOSES.** Verified point by point against the loop described below:
+
+  * **Step 4 is gone.** `models.py` no longer carries `layer_start=excluded.layer_start`. The
+    only surviving assignment from that field is `reported_layer_start=excluded.layer_start` —
+    the claim is RECORDED, not applied. That is the single line this whole entry was about.
+  * **Step 2 is unchanged, and that is fine.** `ensure_placement` still returns early when the
+    config holds a range, so a node still re-asserts its own opinion on every registration. It
+    simply no longer wins, which is the correct place to have cut the loop: it needs no
+    cooperation from a machine nobody can reach.
+  * **The node now moves the other way.** `agent.py:1133` logs *"layer range updated by the
+    coordinator"* and persists the assignment — and if `--layers` disagrees it says so out loud
+    rather than silently ignoring the operator, which is [P31]'s lesson applied here.
+  * **9/9 in `coordinator/test_placement_ownership.py`**, including
+    `test_the_live_sequence_no_longer_reverts` and
+    `test_reregistration_does_not_move_an_assigned_node`.
+
+**The live proof, which is better than any of the above.** Both nodes restarted onto 0.20.3 on
+2026-08-17 holding a stale `0-27` in their configs — the exact state that killed the network on
+2026-08-09. `/node/list` showed `placement_drift: true` with `reported 0-27` against
+`assigned [0,9]` and `[10,27]`: **the claim was recorded and the assignment held.** The Pavilion
+then adopted its assigned range (`0-27 -> 10-27`), and both nodes now report ranges matching
+what they are assigned, with drift back to false. The chain stayed `[[0,9],[10,27]]`, routable,
+throughout.
+
+Related and still true: `placement_drift` exists because of this, and is a diagnostic rather
+than a fault — a node serving the assigned range while its local config disagrees is working
+correctly, which is precisely what the field is for.
+
+---
+
 
 **`neuron fix` writes to the coordinator. The node's own `config.json` is what actually decides.**
 So the pin holds only until that node next re-registers, and then it silently reverts.
