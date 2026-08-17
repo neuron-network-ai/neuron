@@ -49,12 +49,15 @@ LEDGER = [
     ("node-b-optiplex",             0.187746, "node"),   # the OptiPlex under an earlier id
     ("node-c-pavilion",             0.187746, "node"),   # the Pavilion under an earlier id
     ("unknown-node-xyz",            0.5,      "node"),   # matches no rule -- must be reported
-    ("w_spent_out",                 0.0,      "wallet"),  # prune target, already empty
+    ("node_a-cli-spent-out",        0.0,      "wallet"),  # prune target, already empty
 ]
 PRUNED = ["attacker-demo-1", "attacker-demo-2", "probe-only", "live-verify-wallet",
           "node_a-cli-aaaaaaaaaaaa", "node_a-cli-bbbbbbbbbbbb",
-          "w_0000000000000000000000000000dead", "w_0000000000000000000000000000beef",
           "stranger-test-win", "agent-optinovate"]
+# The two `w_` wallets are the whole point of [P23]: `wallet_for_oauth` mints EVERY real user
+# wallet in that format, so they now stand for a person who signed in, not a dev account. They
+# must fall through to `unclassified` and survive -- an execute that empties them is the bug.
+OAUTH_SHAPED = ["w_0000000000000000000000000000dead", "w_0000000000000000000000000000beef"]
 KEPT = ["node_a", "node_b", "node_c", "__coordinator__",
         "node-b-optiplex", "node-c-pavilion"]
 
@@ -128,13 +131,21 @@ def main():
           {"__emission_pool__", "__founder__", "__ecosystem__", "__liquidity__"}
           <= {k["account_id"] for k in log["kept"]})
     check("accounts matching no rule are reported, not swept",
-          sorted(u["account_id"] for u in log["unclassified"]) == ["unknown-node-xyz"])
+          sorted(u["account_id"] for u in log["unclassified"])
+          == sorted(["unknown-node-xyz"] + OAUTH_SHAPED))
     check("an already-empty prune target is not a transfer",
-          "w_spent_out" not in {t["account_id"] for t in log["transfers"]}
+          "node_a-cli-spent-out" not in {t["account_id"] for t in log["transfers"]}
           and log["totals"]["already_empty"] == 1)
-    check("prefix rules match both families",
-          {"node_a-cli-aaaaaaaaaaaa", "w_0000000000000000000000000000dead"}
-          <= {t["account_id"] for t in log["transfers"]})
+    check("the dev-CLI prefix still matches",
+          "node_a-cli-aaaaaaaaaaaa" in {t["account_id"] for t in log["transfers"]})
+    # [P23]. `w_` was a prune prefix, and it is the format of EVERY wallet a real sign-in mints.
+    # A stranger's 25 NRN welcome grant went to __ecosystem__ filed as a test account.
+    check("an OAuth-shaped wallet is NOT pruned by prefix any more",
+          not ({"w_0000000000000000000000000000dead", "w_0000000000000000000000000000beef"}
+               & {t["account_id"] for t in log["transfers"]}))
+    check("...it is reported as unclassified instead, which --execute refuses to sweep",
+          {"w_0000000000000000000000000000dead", "w_0000000000000000000000000000beef"}
+          <= {u["account_id"] for u in log["unclassified"]})
     check("node_a is NOT caught by the node_a-cli- prefix",
           "node_a" not in {t["account_id"] for t in log["transfers"]})
 
@@ -144,6 +155,10 @@ def main():
     check("execute exits 0", code == 0)
     check("every test identity is now zero", all(b[a] == 0 for a in PRUNED),
           str({a: b[a] for a in PRUNED if b[a] != 0}))
+    check("a real person's wallet still holds its balance after --execute",
+          (b["w_0000000000000000000000000000dead"],
+           b["w_0000000000000000000000000000beef"]) == (24.295, 25.0),
+          "this is the assertion [P23] exists for -- 25 NRN of somebody's welcome grant")
     check("the dev trio is untouched",
           (b["node_a"], b["node_b"], b["node_c"]) == (9.011876, 6.082124, 8.107126))
     check("the same machines under their older ids are untouched",

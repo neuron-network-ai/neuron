@@ -1778,7 +1778,37 @@ and the earlier entry asserted it without the log.
   Windows blocking is real and separate (code-signing, ROADMAP S16), but it does not explain a
   404 -- a blocked binary does not make HTTP requests.
 
-### [P23] 🔴 `prune_test_accounts.py` will sweep the first stranger's wallet — BLOCKS S12
+### [P23] 🟢 `prune_test_accounts.py` will sweep the first stranger's wallet — fixed (2026-08-17)
+
+**Fixed by deleting the `w_` prefix rule**, which is the first of the two options below. Real
+wallets now fall through to `unclassified`, which `--execute` already refuses to sweep, and a
+genuine dev wallet is named with `--prune-also` — so the failure direction is "a dev wallet
+survives until somebody names it" rather than "a person's balance disappears".
+
+**It had stopped being forward-looking.** The entry was written when the only `w_` wallets were
+the founder's. Two external users exist now with real spend, so the next `--execute` would have
+taken their balances and filed them as test accounts in the audit log.
+
+The prefix table now carries the rule that lets it stay safe: a prefix may only remain if it
+CANNOT match an account a real person could be issued. `node_a-cli-` qualifies (a development
+CLI mints it, nothing user-facing does); `w_` never could, because `wallet_for_oauth()` mints
+every user wallet in exactly that format and there is no other.
+
+`test_prune_test_accounts.py` updated in the same change, as the entry required: the two `w_`
+fixtures move from PRUNED to unclassified and are asserted to STILL HOLD THEIR BALANCE after
+`--execute`, the already-empty prune target is now a `node_a-cli-` account, and a new check
+asserts an OAuth-shaped wallet is not pruned by prefix. 42 pass.
+
+Checked against the real ids rather than fixtures: `w_d35c84ddd33ea857d74c29db22cd76a9` and
+`w_ef7ca467…` both classify `unclassified` now.
+
+**Still optional and still the founder's call:** restoring the 49.3 NRN swept from those two
+wallets in Sessions 33–35. Recoverable from `backups-offbox/neuron-20260802-115534.db`. Moving
+balances on a live ledger is a decision, not a repair to apply silently.
+
+The original entry follows.
+
+### [P23-orig] 🔴 The rule as first written (2026-08-09)
 
 - **Symptom:** the founder's two OAuth wallets show `balance: 0.0` on the live coordinator while
   `total_earned` survives intact (25.0 and 25.962). Not a bug and not a database loss — they

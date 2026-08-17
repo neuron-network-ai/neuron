@@ -72,9 +72,22 @@ PRUNE_NAMES = {
     "stranger-test-win": "rehearsal of the stranger join path -- never an outside person",
     "agent-optinovate": "dev install of the packaged agent",
 }
+# WHAT A PREFIX IS ALLOWED TO MEAN.
+#
+# `("w_", "faucet-funded test wallet")` used to be here, and it was correct when written: the
+# only `w_` wallets in existence were the founder's own dev accounts. `wallet_for_oauth()` mints
+# EVERY user wallet as `"w_" + secrets.token_hex(16)` and there is no other format — so the rule
+# that meant "dev wallet" then means "every real person who has ever signed in" now. Two of them
+# exist today with real spend, and a stranger's 25 NRN welcome grant would have gone to
+# `__ecosystem__` filed as a test account, silently, in the audit log ([P23]).
+#
+# A prefix may only stay here if it CANNOT match an account a real person could be issued.
+# `node_a-cli-` qualifies: it is minted by a development CLI path and nothing user-facing
+# produces it. Real wallets now fall through to `unclassified`, which this script already
+# refuses to execute on — so the failure direction is "a dev wallet survives and someone names
+# it with --prune-also", not "a person's balance disappears".
 PRUNE_PREFIXES = (
     ("node_a-cli-", "CLI test wallet from wallet-settlement development"),
-    ("w_", "faucet-funded test wallet (OAuth wallet development)"),
 )
 
 
