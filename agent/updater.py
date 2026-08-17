@@ -40,7 +40,8 @@ import time
 
 import requests
 
-LOCAL_VERSION = "0.20.2"          # bump together with packaging/neuron.iss
+LOCAL_VERSION = "0.20.3"          # bump together with packaging/neuron.iss AND
+                                  # coordinator/config.AGENT_VERSION -- test_version_lockstep.py
 CHECK_SECONDS = 24 * 3600
 DOWNLOAD_TIMEOUT = 600
 HERE = os.path.dirname(os.path.abspath(__file__))

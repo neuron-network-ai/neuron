@@ -8,6 +8,51 @@ This project is early alpha. NRN has no cash value, and the network is a handful
 
 ## Unreleased
 
+## v0.20.3
+
+The release that makes a model too big for one machine actually placeable, and the one that
+finally had somebody click the claim button.
+
+- **A volunteer can cap how much of their machine they lend** — `donate_ram_gb` in the agent
+  config. `donation_mode` has always governed WHEN a node serves; nothing governed HOW MUCH of
+  the machine it commits, so someone with a 64 GB workstation happy to lend 8 GB had to choose
+  between the whole thing and nothing. It is a declaration the coordinator enforces rather than
+  a runtime limiter: the agent reports the capped figure as `ram_gb`, the sizing path uses it,
+  and the node is never handed a slice bigger than the cap.
+- **The driver is charged for the weights it actually holds.** Every node was sized by
+  `gb_per_layer * layers`; the first one also holds the embedding and `lm_head` and nobody
+  counted them. A fixed cost, so it hurts most on the fewest machines — 41% of an 8 GB node's
+  budget on Qwen3-4B.
+- **A node reports the precision it stores weights at.** `weight_dtype` was read by the
+  balancer and could never arrive — no field, no column — so every node was sized at 4
+  bytes/param whether or not it ran fp16. This is what decides whether a 4B model fits across
+  two machines.
+- **Stage-1 width follows placement instead of an environment variable on two machines.**
+  `NEURON_S1` had to be identical in the coordinator and in every driver, both reading it at
+  import, so changing it meant a coordinated restart across machines nobody can reach. The
+  coordinator owns it now and publishes it; the driver derives its width from the shard it
+  downloaded. Stage 1 is therefore per-MODEL, which is what a 36-layer model over two machines
+  needs.
+- **Auto-repair checks the driver, and stops covering the tail silently.** It capped every
+  stage except the two that most need it. The tail is still assigned when it does not fit — a
+  gap means not one request completes — but the repair log now names the node and how far over.
+- **An old CPU is told why it cannot run this**, instead of dying at `0xC000001D` with no
+  message. Refuses only a positive determination of x86-without-AVX2, names an override, and
+  says plainly that the risk is documented rather than reproduced.
+- **`NEURON_WEIGHT_DTYPE` with a trailing space** raised `KeyError` at import, before the node
+  server's logging existed, while the agent reported the stripped value to the coordinator — so
+  the machine was sized for half the footprint of a process that was not running.
+- **The node-earnings claim panel exists in the React UI** and has been exercised end to end
+  for the first time: declining a signature reports that nothing changed and leaves the button
+  usable, and the bind request carries no wallet id. `/next` had no panel at all, so swapping
+  the routes would have silently dropped the feature.
+- **`tools/measure_model.py`** reads a model's published safetensors header and emits a tier
+  row, replacing hand arithmetic in a comment. **`tools/capacity_dryrun.py`** says what the
+  coordinator will decide before it is deployed, through the coordinator's own functions.
+- Version now checked in lockstep across `updater.LOCAL_VERSION`, `config.AGENT_VERSION` and
+  `neuron.iss` — the coupling this file's own header describes, previously enforced by a
+  comment addressed to a human.
+
 - **Every node on every tier was cleared to hold twice what it can.** The tier table's
   per-layer figure is computed at fp16, and its comment justified that with a claim about the
   runtime that the runtime contradicts: weights are stored at **fp32** by default. So an 8 GB
