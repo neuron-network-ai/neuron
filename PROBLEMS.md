@@ -1540,7 +1540,45 @@ too long.
 `agent/agent.py`. **Tests:** `coordinator/test_placement.py`, `coordinator/test_migration.py`,
 `agent/test_replacement.py`.
 
-### [P24] 🟡 Strangers register fine, then sit PROBATIONARY forever — BLOCKS S12
+### [P24] 🟢 Strangers register fine, then sit PROBATIONARY forever — no longer blocks S12 (2026-08-17)
+
+**The condition in the title cannot persist any more, and the one thing still open is not
+fixable by anyone here.** Re-checked 2026-08-17.
+
+*Forever* was the load-bearing word: a stranger stayed probationary until the founder's laptop
+was awake to run a verifier, and that verifier had been dead for two days without anything
+noticing. Two independent routes to `verified` exist now — the operator's own proof-of-compute
+run, and **a quorum of DISTINCT already-verified peers** — and `models.py` says why: *"a
+stranger who joins at 3am is promoted by the network itself rather than waiting for the
+founder's laptop to be switched on."* Every node runs `peer_verify_loop` on a 60-second poll.
+`coordinator/test_peer_verify.py` 14/14.
+
+The rest of the entry's fixes verified present and passing: `test_startup_is_never_silent.py`
+19/19, `test_probation_is_visible.py` 14/14, `_save()` atomic via `os.replace()` with a `.prev`
+fallback, the doctor's verifier-liveness and probationary checks, and the keepalive task.
+
+**Why it no longer blocks S12.** The entry's own instruction was *"do not put 0.18 in front of
+another stranger — cut 0.19 first."* The current release is **0.20.3**, five versions on, and
+every diagnosability fix listed above is in it. A stranger installing today cannot land in the
+state this entry describes, and if they hit something new they get a log — which is the whole
+of what was missing.
+
+**Genuinely still open, and unresolvable from here:** the specific v0.18.0 crash on the
+2026-08-07 machine was never *identified*, only made diagnosable, and identifying it needs that
+machine. Nobody has it. That is an acceptable place to stop — the version cannot be installed
+from anything the project now advertises, and the failure class it belonged to is closed.
+
+**Worth stating rather than assuming: peer verification has never actually fired.** Every live
+node reads `peer_passes: 0` and was promoted by `challenges_passed` — the founder's own
+verifier. So the mechanism that removes the human is built, tested and deployed, and *unproven
+in production*, which is the same shape as the relay being built and bypassed for a week before
+2026-08-01. It needs two verified peers and a genuine newcomer to exercise it, and the first
+stranger is exactly that occasion. Watch `peer_passes` when one arrives; if it stays 0, this
+entry is not as closed as it looks.
+
+The history follows.
+
+### [P24-hist] 🟡 The investigation that got here (2026-08-05)
 
 **ROOT CAUSE FOUND 2026-08-07, and it was never the installer.** The coordinator's journal has
 the registration failure in full:
