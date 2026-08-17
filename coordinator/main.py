@@ -837,6 +837,22 @@ def peer_attest(node_id: str, body: AttestBody, x_node_token: str = Header(defau
         raise HTTPException(status_code=404, detail=f"unknown node '{node_id}'")
     models.record_peer_attestation(me["node_id"], node_id, body.passed,
                                    getattr(body, "max_err", None))
+    # [P47] cause 3: this used to record the vote and stop there, so the quorum path was worth
+    # nothing in NRN. A peer's passing challenge is the same evidence as the trusted verifier's
+    # -- a real computation, checked against a known answer, at a known instant -- and it is the
+    # only evidence that exists at all once the network is too large for one operator's PC to
+    # sweep. Leaving it unpaid meant peer verification could fire for the first time and still
+    # not earn anyone an hour.
+    #
+    # One passing vote unlocks the slot, deliberately, and it is not the same bar as PROMOTION:
+    # promotion needs PEER_VERIFY_QUORUM distinct passes because it grants routing and earnings
+    # in perpetuity, while this pays one hour to a node that was already present and correctly
+    # placed. Requiring quorum here would make availability emission hostage to how many peers
+    # happen to be awake, which is the [P47] mistake again one level up. The attester must
+    # itself be eligible (checked above), cannot vote for itself, and one machine gets one vote
+    # per target (the peer_attestations PRIMARY KEY), so a sybil cannot mint hours for a crowd.
+    if body.passed:
+        models.mark_slot_poc(node_id)
     passes, fails = models.peer_verdicts(node_id)
     n = models.get_node(node_id)
     print(f"[peer-verify] {me['node_id']} says {node_id} "
@@ -870,6 +886,29 @@ def attest(node_id: str, body: AttestBody, _=Depends(require_register_secret)):
             "flagged": n["flagged"], "standing": n["standing"], "eligible": n["eligible"],
             "challenges_passed": n["challenges_passed"],
             "challenges_failed": n["challenges_failed"]}
+
+
+@app.post("/verifier/heartbeat")
+def verifier_heartbeat(_=Depends(require_register_secret)):
+    """A verifier reports that it is awake and sweeping ([P47] cause 2).
+
+    The coordinator has never known whether it was auditing the network. It learned that a node
+    passed, and it learned nothing at all from silence — which looks identical whether every node
+    is healthy or the verifier's PC went to sleep. It went to sleep a lot: 207 of the 390 hours
+    in `verify_service.log`, and emission charged the volunteers for every one of them.
+
+    Register-secret authenticated, the same gate as `/node/{id}/attest`, so this is the operator
+    speaking about the operator's own infrastructure. That is what makes an unaudited slot safe
+    to pay for: a node cannot write one of these rows, cannot stop one being written, and cannot
+    observe whether one exists, so "the network was not watching" is not a state any node can
+    engineer itself into.
+
+    Sent every cycle rather than only when something happens, for the same reason the alive line
+    exists: a verifier that is up and finds nothing to do must not be indistinguishable from one
+    that is not up.
+    """
+    models.record_verifier_heartbeat()
+    return {"ok": True, "slot_start": models.slot_start_for(time.time())}
 
 
 @app.post("/node/{node_id}/reputation-reset")

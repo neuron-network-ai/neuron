@@ -121,6 +121,7 @@ DEFAULTS = {
     "daily_cap": float(os.environ.get("NEURON_EMISSION_DAILY_CAP", "5000.0")),
     "min_attendance_frac": float(os.environ.get("NEURON_SLOT_MIN_ATTENDANCE", "0.5")),
     "total_layers": int(os.environ.get("NEURON_TOTAL_LAYERS", "28")),
+    "max_unaudited_slots": int(os.environ.get("NEURON_EMISSION_MAX_UNAUDITED_SLOTS", "6")),
 }
 
 # Below this a difference is float residue, not NRN. Leg A↔B needs more than this because the
@@ -142,10 +143,16 @@ def read_all(con):
     ledger = [dict(r) for r in con.execute(
         "SELECT node_id, balance, total_earned, account_type FROM ledger")] \
         if "ledger" in have else []
-    attendance = [dict(r) for r in con.execute(
-        "SELECT node_id, slot_start, seconds_online, block_start, block_end, poc_ok, "
-        "reward, paid_at FROM attendance ORDER BY slot_start, node_id")] \
-        if "attendance" in have else []
+    # `poc_excused` arrived by ALTER TABLE ([P47] cause 2), so a snapshot can legitimately have
+    # the table without the column. Defaulted to 0 rather than skipped: every row settled before
+    # it existed was priced on a proof-of-compute, which is exactly what 0 means.
+    attendance = []
+    if "attendance" in have:
+        acols = {r["name"] for r in con.execute("PRAGMA table_info(attendance)")}
+        excused = "poc_excused" if "poc_excused" in acols else "0 AS poc_excused"
+        attendance = [dict(r) for r in con.execute(
+            "SELECT node_id, slot_start, seconds_online, block_start, block_end, poc_ok, "
+            f"{excused}, reward, paid_at FROM attendance ORDER BY slot_start, node_id")]
     settings = {r["key"]: r["value"] for r in con.execute("SELECT key, value FROM settings")} \
         if "settings" in have else {}
     # owner_wallet_id arrived by ALTER TABLE ([P39]); a snapshot older than that has the table
@@ -158,8 +165,13 @@ def read_all(con):
                 "SELECT node_id, owner_wallet_id FROM nodes")}
         else:
             owners = {r["node_id"]: None for r in con.execute("SELECT node_id FROM nodes")}
+    # Computed here because this is where the connection lives, and it is the only new fact the
+    # checks below need that is not already on a row. Empty for any snapshot with no audit_slots
+    # table, which reads as "every slot was audited" -- i.e. exactly the pre-[P47] behaviour, so
+    # an older database reconciles the way it always did.
+    runs = unaudited_runs(con, DEFAULTS) if "audit_slots" in have else {}
     return {"have": have, "ledger": ledger, "attendance": attendance,
-            "settings": settings, "owners": owners}
+            "settings": settings, "owners": owners, "unaudited_runs": runs}
 
 
 def dsum(values):
@@ -178,7 +190,46 @@ def scarcity_multiplier(replicas, params):
                         params["target_replicas"] / float(replicas)))
 
 
-def qualifies(row, total_layers, params):
+def unaudited_runs(conn, params):
+    """{slot_start: consecutive unaudited slots ending there} for every slot with attendance.
+
+    Read from `audit_slots`, which is append-only history: a heartbeat can only ever be recorded
+    for the slot it arrives in, so a CLOSED slot's audit record is as frozen as the attendance
+    row itself. That is what makes this safe to consult from a leg whose soundness rests on
+    replaying frozen inputs ([P40]).
+
+    It refines the REASON a row earned nothing; it never decides whether one was owed. The
+    payment justification stays `poc_excused`, written into the row by settlement. Reporting
+    "no proof-of-compute" for an hour when the truth is "nobody was watching for two days" is
+    [P47]'s own conflation reappearing in the reporting layer, which is the one place it would
+    be least visible.
+    """
+    slot_seconds = float(params["slot_seconds"])
+    limit = int(params.get("max_unaudited_slots", 6)) + 1
+    try:
+        audited = {round(float(r[0]), 6) for r in
+                   conn.execute("SELECT slot_start FROM audit_slots")}
+    except sqlite3.OperationalError:
+        return {}                       # a snapshot predating the table -- nothing to say
+    if not audited:
+        return {}
+    epoch = min(audited)
+    slots = [float(r[0]) for r in
+             conn.execute("SELECT DISTINCT slot_start FROM attendance ORDER BY slot_start")]
+    out = {}
+    for s in slots:
+        if s < epoch:
+            out[s] = 0                  # before the mechanism existed -- not an outage
+            continue
+        run, cur = 0, s
+        while run < limit and cur >= epoch and round(cur, 6) not in audited:
+            run += 1
+            cur -= slot_seconds
+        out[s] = run
+    return out
+
+
+def qualifies(row, total_layers, params, unaudited_run=0):
     """(ok, reason, code) — the three gates emission.plan_slot applies, against the row's own
     frozen values. Sound to replay because `touch_node` and `mark_slot_poc` both carry
     `WHERE paid_at IS NULL`, so settlement freezes the inputs alongside the output.
@@ -191,7 +242,27 @@ def qualifies(row, total_layers, params):
     if frac < params["min_attendance_frac"]:
         return False, "attended %.0f%% of the slot, floor is %.0f%%" % (
             frac * 100, params["min_attendance_frac"] * 100), "below-attendance-floor"
-    if not row.get("poc_ok"):
+    # `poc_excused` ([P47] cause 2): the slot was one the coordinator never audited, and the row
+    # was paid on presence-plus-placement because the reason there is no proof is OURS, not the
+    # node's. Read from the ROW rather than re-derived from `audit_slots`, which keeps this leg
+    # working the way every other one does — from values settlement froze — and means the
+    # reconciliation of a historical payment can never be changed by a later heartbeat.
+    #
+    # Without this the reconciler would report every excused hour as a reward paid to a row that
+    # does not qualify, i.e. [P40]'s standing assertion would start alarming on [P47]'s fix. The
+    # zero-reason counts keep it separate from a genuine miss, because "we did not look" and
+    # "the node did not answer" are the whole distinction [P47] exists to draw.
+    # Falls THROUGH to the block check rather than returning, mirroring plan_slot's order. An
+    # excused hour skips only the proof-of-compute gate; being present during an outage says
+    # nothing about whether the node held a block of the model actually being served, and an
+    # early return here paid a node for holding layers 27-32 of a 28-layer model.
+    if not row.get("poc_ok") and not row.get("poc_excused"):
+        if unaudited_run:
+            return (False,
+                    "the network was not audited for %d consecutive slots, beyond the %d this "
+                    "pays through — nobody checked, so nobody can say" % (
+                        unaudited_run, int(params.get("max_unaudited_slots", 6))),
+                    "network-not-audited")
         return (False, "no proof-of-compute challenge passed inside the slot",
                 "no-proof-of-compute")
     lo, hi = row.get("block_start"), row.get("block_end")
@@ -200,13 +271,14 @@ def qualifies(row, total_layers, params):
     return True, None, None
 
 
-def replay_slot(rows, total_layers, params):
+def replay_slot(rows, total_layers, params, unaudited_run=0):
     """Re-price one slot from its own rows. Same shape as emission.plan_slot's output, and
-    test_reconcile_emission asserts the two agree on randomised input."""
+    test_reconcile_emission asserts the two agree on randomised input — including across the
+    unaudited threshold, which is where two independently-written copies would drift first."""
     slot_seconds = float(params["slot_seconds"])
     marks = []
     for r in rows:
-        ok, reason, _code = qualifies(r, total_layers, params)
+        ok, reason, _code = qualifies(r, total_layers, params, unaudited_run)
         marks.append((r, ok, reason, (r.get("seconds_online") or 0.0) / slot_seconds))
 
     depth = {}
@@ -356,7 +428,7 @@ def _span(seen):
     return f"{seen['n']} ({fmt(seen['first'])} .. {fmt(seen['last'])} UTC)"
 
 
-def check_rows(attendance, params, total_layers):
+def check_rows(attendance, params, total_layers, runs=None):
     """Per-row checks that a sum cannot see. `over_ceiling` is the useful one: frac ≤ 1 and the
     multiplier ≤ scarcity_max, so no honest row can exceed base × cap however scarce the slot."""
     ceiling = params["base_nrn_per_hour"] * params["scarcity_max"]
@@ -372,7 +444,8 @@ def check_rows(attendance, params, total_layers):
         reward = float(r["reward"])
         if reward > ceiling + DUST:
             over_ceiling.append({"row": r, "ceiling": ceiling})
-        ok, reason, code = qualifies(r, total_layers, params)
+        ok, reason, code = qualifies(r, total_layers, params,
+                                     (runs or {}).get(float(r["slot_start"]), 0))
         if reward > 0 and not ok:
             paid_unqualified.append({"row": r, "reason": reason})
         elif reward <= 0 and ok:
@@ -444,7 +517,7 @@ def reconcile(data, params, seed=None, now=None, replay=False, total_layers=None
     a = leg_a(attendance)
     b = leg_b(ledger, a["settled_sum"], seed=seed, node_total_earned=node_te)
     c = leg_c(attendance, ledger, data["owners"])
-    rows = check_rows(attendance, params, total_layers)
+    rows = check_rows(attendance, params, total_layers, data.get("unaudited_runs"))
     cap = check_daily_cap(attendance, params)
     backlog = check_sweep_backlog(attendance, params, now)
     supply = check_supply(ledger)
@@ -598,7 +671,7 @@ def reconcile(data, params, seed=None, now=None, replay=False, total_layers=None
     # --- optional full replay ----------------------------------------------- #
     rep = None
     if replay:
-        rep = run_replay(attendance, total_layers, params)
+        rep = run_replay(attendance, total_layers, params, data.get("unaudited_runs"))
         if rep["mismatches"]:
             add("error", "replay-mismatch",
                 f"{len(rep['mismatches'])} settled row(s) do not match the reward re-priced "
@@ -627,8 +700,9 @@ def reconcile(data, params, seed=None, now=None, replay=False, total_layers=None
             "replay": rep, "ok": ok}
 
 
-def run_replay(attendance, total_layers, params):
+def run_replay(attendance, total_layers, params, runs=None):
     """Re-price every settled slot from its own rows and diff against what was recorded."""
+    runs = runs or {}
     by_slot = {}
     for r in attendance:
         if r["paid_at"] is not None:
@@ -637,7 +711,8 @@ def run_replay(attendance, total_layers, params):
     mismatches, cap_explained, layer_sensitive, compared = [], [], [], 0
     for slot in sorted(by_slot):
         rows = by_slot[slot]
-        priced = {e["node_id"]: e for e in replay_slot(rows, total_layers, params)}
+        priced = {e["node_id"]: e for e in
+                  replay_slot(rows, total_layers, params, runs.get(slot, 0))}
         for r in rows:
             if r["reward"] is None:
                 continue

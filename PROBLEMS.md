@@ -176,7 +176,174 @@ mistake wearing different clothes.**
 Related: [P46] (a build that was self-consistent in the repo and broken once installed),
 [P39] (the claim panel, on the same unswapped route).
 
-### [P47] 🟡 The driver could not earn availability emission at all — cause 1 fixed, and the skip rested on a hypothesis that was false (2026-08-17)
+### [P49] 🟢 The 28.6 is explained: a node holding the whole model answered a different question, and said so in an ack nobody read — fixed (2026-08-17)
+
+**Found by watching the fix from Session 62 run live, which is the only way it could have been
+found.** The verifier was restarted, the driver was challenged for the first time in six days,
+and it **failed** — `max_err 28.5958`, every two minutes, deterministically. That is the figure
+from 2026-08-11 that [P47] recorded as *"never explained, only hypothesised about"*. It was
+live, it was reproducible on demand, and the hypothesis [P47] offered for it (a pre-0.20 agent
+whose ack omitted `s1`) was wrong: this agent is 0.20.4.
+
+**The mechanism, from the node's own ack.** Speaking the protocol to `agent-optinovate-6ff49d`
+directly, with a probe config for layers 0-9:
+
+```
+sent {"type": "config", "s1": 0, "s2": 10}
+ACK  {"ok": true, "layers": 28, "s2": 10, "holds": [0, 27]}
+```
+
+Two facts in one line. **It holds 0-27** — the whole model, on a 64 GB machine that loaded all
+of it — while the coordinator assigns it 0-9. And the ack carries **no `s1`**, which identifies
+the branch that answered: `node_server` selects its role with
+`is_true_last = (self.hi == self.n - 1)`, and a node holding through the final layer is "true
+last" for *every* question, including a verifier's probe about layers 0-9. So it ran
+`last_stage(model, s2=10)` — `layers[10:]` plus the final norm — and returned it confidently.
+The verifier compared that against `layers[0:10]`. **The right answer to a question nobody
+asked**, which is why the error was large, stable, and identical across two agent versions and
+six days apart.
+
+**And the range check could not see it, for a reason worth keeping.** `challenge_middle_node`
+compares the ack's `s1`/`s2`: `s1` is absent, which it correctly reads as *silence, not
+disagreement* (that rule exists because omitting a field is what an older agent does, and
+treating silence as a mismatch is what broke verification on 2026-08-11); and `s2` is the
+caller's own value echoed back, which can never disagree. Both checks pass. Meanwhile `holds`
+— the one field that was neither silent nor self-referential — was on the wire and thrown away.
+
+**That is [P37] verbatim, one function over.** Its finding was *"the ack that explained it was
+on the wire from the beginning and `challenge_node` threw it away"*, and the fix was to read
+`holds` on the last-stage path. `challenge_middle_node`, four lines further down the same file,
+never got it. A fix applied to the path where the bug was found and not to its sibling is how
+the same defect gets discovered twice.
+
+**Fixed on both sides, and they are independent on purpose.**
+
+1. **`challenge_middle_node` checks `holds` first.** Works against **today's** agents with no
+   release, which matters because the machine concerned is behind a NAT in a house. The driver
+   now produces `RangeMismatch` — *"the node is fine, the placement is stale"* — so it is
+   attested in neither direction and takes no strike ([P37] rule 4), instead of a wrong answer
+   that reads as a bad machine.
+2. **`node_server` no longer mistakes a probe for pipeline traffic** — `is_true_last and "s1"
+   not in msg`. `s1` is the discriminator because the two callers genuinely differ rather than
+   by convention: a middle relay hands its next hop `{"s2", "n", "wire"}` and never an `s1`
+   (there is nothing for it to mean — the last stage's start is implied by `s2`), while
+   `challenge_middle_node` always sends one. A full-model node now answers the probe from its
+   own range, and the disagreement surfaces as a refusal rather than as arithmetic.
+
+**Serving was never affected, which is why this stayed invisible.** Real pipeline traffic
+arrives with `host_b` and takes the middle role, which uses the caller's `s1`/`s2` — so this
+node has been computing layers 0-9 correctly for every actual request. Only verification was
+broken. A node can therefore serve perfectly and be unable to prove it, and under [P47] that
+means it serves perfectly and is never paid.
+
+`test_stage1_challenge.py`: 10 checks. The full-model case is built on the 0-9 slice and then
+moved to `hi == n-1`, because [P42]'s reload guard rightly refuses to construct a 0-27 server
+over a 0-9 slice; role selection reads `self.hi` and `self.n` and nothing else, so the state is
+reproduced exactly where it matters and the forward pass is never reached. **The two fixes are
+pinned separately** — the `holds` check alone makes the RangeMismatch assertion pass, so it
+cannot stand as evidence for the node-side fix; the ack's `s1` is what tells the branches apart.
+Both tripwires verified to fire, then restored.
+
+**Still open, and it is the cause rather than the symptom:** this node registers as 0-9 and
+serves 0-27, and nothing in the coordinator can see that. `placement_drift` compares the
+assignment against `reported_layer_*`, which is what the node CLAIMED at registration — both
+0-9 — so the field reads false while the disagreement is real. The node's actual range is only
+ever visible in a challenge ack. [P37] deliberately did NOT feed an observed range back into
+placement ([P32]'s ownership inversion), and that is still right; but a coordinator that can
+never learn a node is serving a different range than it was given has no way to raise the alarm
+either. Worth deciding what it should do with `holds` besides refuse.
+
+Related: [P37] (the same ack, the same lesson, the sibling function), [P47] (the emission this
+was silently costing), [P42] (the reload guard that made the test harder and was right to).
+
+### [P47] 🟡 The driver could not earn availability emission at all — cause 1's skip removed but the driver still fails, cause 2 fixed, cause 3 fixed (2026-08-17)
+
+**Cause 2 fixed: emission pays for PROVEN work, not for OBSERVED work.** The rule was *"a
+proof-of-compute challenge passed inside this slot"*. That is the right shape and it was
+measuring the wrong thing: whether a challenge lands inside a given hour is decided by the
+verifier's rotation and by whether the operator's PC is awake, and a node can influence neither.
+
+**Measured, from `verify_service.log`, and it is not a corner case.** The verifier was **not
+running for 207 of the 390 hours of its own history — 53%**. In the exact window [P47] measured,
+of 174 hourly slots it was down for 46 and unable to read the roster for 11. **57 of
+`node-c-pavilion`'s 64 unpaid hours are hours in which the coordinator could not have challenged
+anybody.** That machine has passed 4,523 challenges. It was billed for our downtime.
+
+So the rule is now: **a slot pays when the node's proof is current, or when the reason it is not
+is provably ours.** Three mechanisms, each bounded so that no path to payment exists which a
+node can create, detect, or exploit — rule 2 of `emission.py` (presence alone must never pay) is
+unchanged and was the constraint the design was built around.
+
+  1. **A pass carries** (`EMISSION_POC_VALID_SLOTS`, 2). A challenge that passed at 13:58 has
+     not stopped being true at 14:00. Written onto the attendance row by `touch_node` rather
+     than read at settlement, so the row still freezes its own inputs — which is what
+     `--replay` rests on ([P40]). Cannot pay for presence: `last_poc_at` is only ever written by
+     an affirmative pass, so every covered hour still has a real challenge behind it.
+  2. **An unaudited slot is the coordinator's failure, not the node's.** `verify_service` now
+     posts `/verifier/heartbeat` every cycle, register-secret authenticated, and `audit_slots`
+     records it. A node cannot write one of those rows, cannot suppress one, and cannot observe
+     whether one exists — which is precisely what makes an unaudited hour safe to pay for.
+     **The epoch is the load-bearing part:** absence of a row is the signal, and every slot in
+     history has no row, so without `audit_epoch()` the deploy itself would read as a
+     network-wide blackout and pay every present node for the whole of the past. That is paying
+     for presence, arriving through the door built to protect volunteers. Pinned by test, and
+     the tripwire was checked twice — the first attempt did not fire, because the epoch turned
+     out to be guarded in two places.
+  3. **The excuse runs out** (`EMISSION_MAX_UNAUDITED_SLOTS`, 6). Bounded by COUNT, not
+     discounted by RATE: a discount would be a penalty for our own downtime, which is the thing
+     being fixed, while "we could not check" stops being an excuse once nobody has verified the
+     network since yesterday. Past the bound the payout log says so.
+
+Excused rows count toward replica depth, deliberately — if they did not, our outage would read
+as network-wide scarcity and pay a **premium** at exactly the moment the coordinator knows
+least, turning downtime into a payout event. The attendance floor and the
+held-a-block-of-the-serving-model gate both still apply, so an excuse only ever upgrades a node
+that was demonstrably there and correctly placed.
+
+**Deliberately NOT excused, and this is where the farming risk actually is.** `ChallengeRefused`
+(paused, mid-reload) is **self-declared** — a node says "I am paused" and would be paid for
+saying it — and a paused node is not serving, so paying it is paying for presence. `RangeMismatch`
+is genuinely our fault and it is tempting, but a node reports its own `holds`, so excusing it
+would let a machine become permanently unauditable-and-paid by misreporting one field. Both stay
+unpaid until there is coordinator-side corroboration to hang them on; the reason is now recorded
+either way, which is the half that costs nothing.
+
+`reconcile_emission.py` had to learn this or [P40]'s standing assertion would have started
+alarming on [P47]'s fix — every excused hour would read as a reward paid to a row that does not
+qualify. It reads `poc_excused` from the row (frozen, like every other input) for the payment
+decision, and `audit_slots` for the *wording* of a zero, because reporting "no proof-of-compute"
+when the truth is "nobody was watching for two days" is this entry's own conflation reappearing
+in the reporting layer. The equivalence test that keeps the duplicated pricing honest now
+randomises across the unaudited threshold — and immediately caught a real bug: the excused
+short-circuit skipped the block-of-serving-model gate, paying a node for holding layers 27-32 of
+a 28-layer model.
+
+**Cause 3 fixed: a peer's pass now unlocks the hour.** `/node/{id}/peer-attest` recorded the
+vote and never called `mark_slot_poc`, so peer verification could fire for the first time and
+still earn nobody anything. One passing vote unlocks the slot, which is deliberately **not** the
+promotion bar: promotion needs `PEER_VERIFY_QUORUM` distinct passes because it grants routing
+and earnings in perpetuity, while this pays one hour to a node already present and correctly
+placed. Requiring quorum here would make emission hostage to how many peers happen to be awake —
+this entry's mistake one level up. Pinned at the call site in `test_peer_verify.py`, because the
+function was always correct and a missing call site is the entire bug ([P37]); tripwire fired.
+
+**Cause 1: the skip is gone, and the driver still cannot earn — see [P49].** Session 62 removed
+`verify_service`'s stage-1 skip on the correct grounds that its stated premise was false, and
+that change is now deployed. Underneath it was a second, real reason: the driver holds the whole
+model, so its probe fell into the last-stage branch and answered about layers 10-27. It has been
+failing every challenge since the restart at `max_err 28.6`. **So `STAGE1_FAILURES_ARE_SCORED`
+must stay `False`** — the evidence it was waiting for arrived and pointed the other way. Flipping
+it would have flagged the driver, and a flagged driver is not a degraded network, it is no
+network at all. **The flag's asymmetry did exactly the job it was written for.**
+
+The driver's lost hours are still lost, and [P49]'s fixes are what make the next ones earnable.
+
+`coordinator/test_emission_unaudited.py`: 19. `test_reconcile_emission.py`: 40.
+`test_peer_verify.py`: 16. `test_stage1_challenge.py`: 10.
+
+The original filing follows.
+
+### [P47-s62] 🟡 As it stood after Session 62 (2026-08-17)
 
 **Fixed: the driver is challenged now, so it can earn.** The skip's premise was measured and it
 does not hold. `verify_service` claimed the middle probe "computes layers without the embedding

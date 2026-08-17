@@ -69,6 +69,22 @@ def main():
     except HTTPException as e:
         check("a node cannot verify itself", e.status_code == 400)
 
+    # --- a peer's PASS unlocks the hour, not just the vote ([P47] cause 3) -------- #
+    # This endpoint recorded the verdict and stopped there, so the quorum path was worth nothing
+    # in NRN: peer verification could fire for the first time and still not earn anyone an hour.
+    # Pinned HERE, at the call site, and not on models.mark_slot_poc — the function was always
+    # correct and always called from /attest; a missing call site is the entire bug ([P37]).
+    def _poc(nid):
+        with models._db() as cur:
+            r = cur.execute("SELECT poc_ok FROM attendance WHERE node_id=? "
+                            "ORDER BY slot_start DESC LIMIT 1", (nid,)).fetchone()
+        return None if r is None else r["poc_ok"]
+
+    coord.peer_attest("newcomer", coord.AttestBody(passed=False, max_err=9.9), x_node_token=b)
+    check("a FAILING peer vote unlocks nothing", _poc("newcomer") in (None, 0))
+    coord.peer_attest("newcomer", body, x_node_token=a)
+    check("a passing peer vote unlocks the slot's availability emission", _poc("newcomer") == 1)
+
     # --- one verifier is not a quorum, and cannot become one by repeating --------- #
     coord.peer_attest("newcomer", body, x_node_token=a)
     check("one vote does not promote", models.get_node("newcomer")["standing"] == "probationary")

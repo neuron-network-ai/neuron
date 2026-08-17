@@ -53,6 +53,11 @@ class _Recorder:
         v.challenge = self._challenge
         v.attest = self._attest
         v.nodes = self._nodes
+        # This harness cuts the network off entirely, and the heartbeat ([P47] cause 2) is the
+        # one call in a sweep that talks to the coordinator about something other than a node.
+        # Stubbed rather than allowed to fail: what is under test here is which attestations a
+        # drifted node produces, and a real POST would add a DNS timeout to every case.
+        v.heartbeat = lambda: None
         self.v = v
 
     def _nodes(self):

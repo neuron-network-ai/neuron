@@ -175,15 +175,26 @@ def test_replay_agrees_with_plan_slot_on_randomised_slots():
     replay leg is testing the copy, not the coordinator."""
     rnd = random.Random(20260817)
     for trial in range(200):
+        # `unaudited_run` is a property of the SLOT, so every row in a trial shares it ([P47]
+        # cause 2). The two sides reach the same verdict by different routes on purpose:
+        # plan_slot decides at settle time from the live audit record, while the reconciler reads
+        # the `poc_excused` settlement froze onto the row. Randomising the run across the
+        # threshold is what pins them together -- without it the copies could drift over the
+        # whole of the new behaviour and this test would still read green.
+        run = rnd.choice([0, 0, 1, 2, config.EMISSION_MAX_UNAUDITED_SLOTS,
+                          config.EMISSION_MAX_UNAUDITED_SLOTS + 1])
+        excusable = 0 < run <= config.EMISSION_MAX_UNAUDITED_SLOTS
         rows = []
         for i in range(rnd.randint(1, 6)):
             lo = rnd.choice([0, 10, 19, 27])
+            poc = rnd.choice([0, 1])
             rows.append({"node_id": f"n{i}", "slot_start": SLOT0,
                          "seconds_online": SLOT * rnd.choice([0.0, 0.2, 0.5, 0.75, 1.0, 1.4]),
                          "block_start": lo, "block_end": rnd.choice([lo, lo + 8, N + 4]),
-                         "poc_ok": rnd.choice([0, 1])})
-        mine = R.replay_slot([dict(r) for r in rows], N, PARAMS)
-        theirs = emission.plan_slot([dict(r) for r in rows], N)
+                         "poc_ok": poc,
+                         "poc_excused": 1 if (excusable and not poc) else 0})
+        mine = R.replay_slot([dict(r) for r in rows], N, PARAMS, run)
+        theirs = emission.plan_slot([dict(r) for r in rows], N, unaudited_run=run)
         assert [e["reward"] for e in mine] == [e["reward"] for e in theirs], \
             f"trial {trial}: rewards differ\n{mine}\n{theirs}"
         assert [e["replicas"] for e in mine] == [e["replicas"] for e in theirs]

@@ -165,6 +165,30 @@ CREATE TABLE IF NOT EXISTS attendance (
     paid_at        REAL,
     PRIMARY KEY (node_id, slot_start)
 );
+
+-- Did anyone AUDIT the network during this slot? ([P47] cause 2)
+--
+-- Emission pays only where a proof-of-compute stands behind the hour, and that is right. What
+-- was wrong is that a slot nobody checked was priced identically to a slot the node failed: the
+-- verifier is one process on the operator's PC, it was not running for 53% of its own history,
+-- and every honest node earned nothing for every hour it slept. `node-c-pavilion` has passed
+-- 4,523 challenges and lost 57 hours to our downtime.
+--
+-- One row per slot in which the coordinator heard from a verifier at all. Written by the
+-- register-secret-authenticated heartbeat, so it is the coordinator's own record of its own
+-- diligence: a node cannot create a row, cannot suppress one, and cannot tell whether one
+-- exists. That is what makes it safe to pay against -- see config.EMISSION_MAX_UNAUDITED_SLOTS.
+--
+-- ABSENCE of a row is the signal, so the epoch matters: every slot before the first heartbeat
+-- ever recorded also has no row, and those are slots from before this mechanism existed rather
+-- than slots we failed to audit. `audit_epoch()` is what stops the deploy itself looking like a
+-- network-wide outage and paying for presence across the whole of history.
+CREATE TABLE IF NOT EXISTS audit_slots (
+    slot_start REAL PRIMARY KEY,
+    heartbeats INTEGER NOT NULL DEFAULT 0,
+    first_at   REAL NOT NULL,
+    last_at    REAL NOT NULL
+);
 """
 
 
@@ -206,6 +230,12 @@ def init_db():
             c.execute("ALTER TABLE nodes ADD COLUMN gpu_name TEXT")
         if "owner_wallet_id" not in cols:                        # [P39] owner link
             c.execute("ALTER TABLE nodes ADD COLUMN owner_wallet_id TEXT")
+        # When this node last PROVED it was computing ([P47] cause 2). Distinct from
+        # `challenges_passed`, which is a lifetime tally and says nothing about recency, and from
+        # `last_seen`, which is presence and must never pay on its own. This is the one field
+        # that lets a pass count as evidence slightly beyond the minute it landed in.
+        if "last_poc_at" not in cols:
+            c.execute("ALTER TABLE nodes ADD COLUMN last_poc_at REAL")
         # What this node STORES weights at ([P43]). `balancer.weight_bytes_for` has read this
         # since the dtype correction shipped and no node could ever set it -- there was no field
         # and no column -- so every node was sized at the pessimistic 4 bytes/param whether or
@@ -269,6 +299,19 @@ def init_db():
             c.execute("UPDATE nodes SET trusted=1")
         # S18b ([P12]): record the routed chain + a per-request completion token so /complete
         # can be authenticated and settled from the coordinator's own plan, not caller input.
+        # [P47] cause 2. `poc_at` is WHEN the challenge that proved this slot passed -- carried
+        # on the row rather than looked up, because settlement freezing its own inputs is what
+        # makes `reconcile_emission.py --replay` sound ([P40]), and a value re-read at replay
+        # time would break that. `poc_excused` is the same discipline for the other half: the
+        # slot was unaudited and the row was paid anyway, written into the row so the reason a
+        # payment happened survives with the payment instead of having to be re-derived.
+        # Existing rows default to 0/NULL, which reads as "proved the ordinary way, or not at
+        # all" -- true of every row settled before this shipped.
+        acols = {r["name"] for r in c.execute("PRAGMA table_info(attendance)").fetchall()}
+        if "poc_at" not in acols:
+            c.execute("ALTER TABLE attendance ADD COLUMN poc_at REAL")
+        if "poc_excused" not in acols:
+            c.execute("ALTER TABLE attendance ADD COLUMN poc_excused INTEGER NOT NULL DEFAULT 0")
         rcols = {r["name"] for r in c.execute("PRAGMA table_info(requests)").fetchall()}
         for col in ("plan_node_ids", "complete_token", "wallet_id"):
             if col not in rcols:
@@ -659,8 +702,8 @@ def touch_node(node_id):
     """
     now = time.time()
     with _db() as c:
-        row = c.execute("SELECT last_seen, layer_start, layer_end FROM nodes WHERE node_id=?",
-                        (node_id,)).fetchone()
+        row = c.execute("SELECT last_seen, layer_start, layer_end, last_poc_at FROM nodes "
+                        "WHERE node_id=?", (node_id,)).fetchone()
         if row is None:
             return False
         c.execute("UPDATE nodes SET last_seen=?, status='online' WHERE node_id=?",
@@ -682,20 +725,100 @@ def touch_node(node_id):
                       "block_start=?, block_end=? "
                       "WHERE node_id=? AND slot_start=? AND paid_at IS NULL",
                       (delta, row["layer_start"], row["layer_end"], node_id, slot))
+            # A PASS CARRIES ([P47] cause 2). A challenge that passed at 13:58 has not stopped
+            # being true at 14:00, and whether one lands inside any given hour is decided by the
+            # verifier's rotation -- one node per 60-second cycle -- which is our scheduling, not
+            # the node's behaviour. Written here rather than read at settlement so the row still
+            # freezes its own inputs, which is what `reconcile_emission.py --replay` rests on.
+            #
+            # This cannot pay for presence: `last_poc_at` is only ever written by an affirmative
+            # pass, so every hour it covers still has a real challenge behind it, just now a
+            # recent one rather than a same-hour one.
+            valid_for = config.EMISSION_POC_VALID_SLOTS * float(config.SLOT_SECONDS)
+            last_poc = row["last_poc_at"]
+            if last_poc is not None and now - last_poc <= valid_for:
+                c.execute("UPDATE attendance SET poc_ok=1, poc_at=COALESCE(poc_at, ?) "
+                          "WHERE node_id=? AND slot_start=? AND paid_at IS NULL",
+                          (last_poc, node_id, slot))
         return True
 
 
 def mark_slot_poc(node_id, ts=None):
     """Record that this node passed a proof-of-compute challenge inside the slot containing
     `ts`. Called from the attest path -- emission requires it, so a node that only heartbeats
-    earns nothing however long it stays up."""
+    earns nothing however long it stays up.
+
+    Also stamps `nodes.last_poc_at`, which is what lets the pass carry into the next slot or two
+    ([P47] cause 2). The two writes are one transaction on purpose: the row and the node must
+    never disagree about whether this node has proved anything.
+    """
     ts = time.time() if ts is None else ts
     slot = slot_start_for(ts)
     with _db() as c:
         c.execute("INSERT OR IGNORE INTO attendance (node_id, slot_start) VALUES (?,?)",
                   (node_id, slot))
-        c.execute("UPDATE attendance SET poc_ok=1 "
-                  "WHERE node_id=? AND slot_start=? AND paid_at IS NULL", (node_id, slot))
+        c.execute("UPDATE attendance SET poc_ok=1, poc_at=COALESCE(poc_at, ?) "
+                  "WHERE node_id=? AND slot_start=? AND paid_at IS NULL", (ts, node_id, slot))
+        # Only ever forward. Attestations can arrive out of order (a retry, two verifiers), and
+        # a late one carrying an older instant must not make this node's proof look staler than
+        # it is.
+        c.execute("UPDATE nodes SET last_poc_at=? "
+                  "WHERE node_id=? AND (last_poc_at IS NULL OR last_poc_at < ?)",
+                  (ts, node_id, ts))
+
+
+def record_verifier_heartbeat(ts=None):
+    """A verifier is awake and sweeping. One row per slot; the count is the evidence.
+
+    This is the coordinator recording its OWN diligence, which is the whole point: emission may
+    pay for an hour nobody checked only because the absence of these rows is a fact about us
+    that no node can create, suppress, or even observe. Authenticated by the register secret at
+    the endpoint, so a node cannot write one.
+    """
+    ts = time.time() if ts is None else ts
+    slot = slot_start_for(ts)
+    with _db() as c:
+        c.execute("INSERT OR IGNORE INTO audit_slots (slot_start, heartbeats, first_at, last_at) "
+                  "VALUES (?,0,?,?)", (slot, ts, ts))
+        c.execute("UPDATE audit_slots SET heartbeats=heartbeats+1, last_at=MAX(last_at, ?) "
+                  "WHERE slot_start=?", (ts, slot))
+
+
+def audit_epoch():
+    """The first slot for which any verifier heartbeat was ever recorded, or None.
+
+    Absence of an `audit_slots` row means "nobody audited this slot" -- but every slot in history
+    predates this table, and those are not outages, they are slots from before the coordinator
+    could tell. Without this, deploying the feature would look like a network-wide blackout and
+    pay every present node for the whole of history, which is paying for presence: the one thing
+    emission exists to refuse.
+    """
+    with _db() as c:
+        row = c.execute("SELECT MIN(slot_start) AS s FROM audit_slots").fetchone()
+    return None if row is None or row["s"] is None else float(row["s"])
+
+
+def unaudited_run(slot_start, limit):
+    """How many consecutive slots ending at (and including) `slot_start` had no verifier contact.
+
+    Counts backwards and stops at `limit`, so the answer is cheap and bounded; callers only ever
+    compare it against a threshold, and "at least `limit`" is as much as any of them needs.
+    Returns 0 for a slot that WAS audited.
+    """
+    slot_seconds = float(config.SLOT_SECONDS)
+    epoch = audit_epoch()
+    if epoch is None or slot_start < epoch:
+        return 0                      # before the mechanism existed -- not an outage
+    with _db() as c:
+        run = 0
+        s = float(slot_start)
+        while run < limit and s >= epoch:
+            hit = c.execute("SELECT 1 FROM audit_slots WHERE slot_start=?", (s,)).fetchone()
+            if hit is not None:
+                break
+            run += 1
+            s -= slot_seconds
+    return run
 
 
 def unpaid_attendance(before_slot):
@@ -708,14 +831,21 @@ def unpaid_attendance(before_slot):
     return [dict(r) for r in rows]
 
 
-def settle_attendance(node_id, slot_start, reward, now=None):
+def settle_attendance(node_id, slot_start, reward, now=None, poc_excused=False):
     """Stamp a slot as paid. Returns False if it was already settled, so a replayed sweep is a
-    no-op rather than a second payment -- the guard is the WHERE clause, not a prior read."""
+    no-op rather than a second payment -- the guard is the WHERE clause, not a prior read.
+
+    `poc_excused` records that this hour was paid without a proof-of-compute because the
+    coordinator did not audit the slot ([P47] cause 2). Written in the SAME statement as the
+    claim, so a row can never be found paid without also carrying the reason it was paid --
+    which is the property that keeps `--replay` honest and lets an operator be told the truth
+    about their own hour.
+    """
     now = time.time() if now is None else now
     with _db() as c:
-        cur = c.execute("UPDATE attendance SET reward=?, paid_at=? "
+        cur = c.execute("UPDATE attendance SET reward=?, paid_at=?, poc_excused=? "
                         "WHERE node_id=? AND slot_start=? AND paid_at IS NULL",
-                        (reward, now, node_id, slot_start))
+                        (reward, now, 1 if poc_excused else 0, node_id, slot_start))
         return cur.rowcount > 0
 
 

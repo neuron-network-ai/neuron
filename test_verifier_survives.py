@@ -259,7 +259,16 @@ def main():
                          "tailscale_ip": "10.0.0.1", "port": 50999,
                          "layer_start": 0, "layer_end": 9}]}
 
+    beats = []
+
     def fake_post(url, **kw):
+        # Routed on URL because a sweep now makes two KINDS of POST: the attestation, and the
+        # verifier heartbeat that tells the coordinator this slot was audited at all ([P47]
+        # cause 2). `posted` stays attestations-only, so every assertion below still counts what
+        # it says it counts rather than silently gaining a heartbeat per sweep.
+        if url.endswith("/verifier/heartbeat"):
+            beats.append(url)
+            return FakeResponse({"ok": True})
         posted.append((url, kw.get("json")))
         return FakeResponse({"node_id": "driver-x", "passed": kw["json"]["passed"],
                              "reputation": "3/3", "flagged": False, "standing": "verified",
@@ -271,6 +280,7 @@ def main():
         _stub(v2, True)
         _run_sweep(v2, stage1, lambda url, **kw: FakeResponse(stage1))
         check("a stage-1 node is challenged rather than skipped", len(posted) == 1, str(posted))
+        check("the sweep tells the coordinator it audited this slot", len(beats) == 1, str(beats))
         check("...and its PASS is recorded, which is what pays it",
               posted and posted[0][1]["passed"] is True, str(posted))
         check("...announced once, not every cycle",

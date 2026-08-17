@@ -59,28 +59,55 @@ def _block_is_needed(row, total_layers):
     return 0 <= lo <= hi < total_layers
 
 
-def plan_slot(rows, total_layers, now=None):
+def plan_slot(rows, total_layers, now=None, unaudited_run=0):
     """Price one closed slot. Pure — no DB, no clock, no payment — so the arithmetic can be
     tested directly and the sweep below stays a thin shell around it.
 
-    Returns [{node_id, slot_start, reward, replicas, multiplier, attended_frac, reason}], one
-    entry per attendance row, including the ones that earn nothing. Carrying the zeroes (with a
-    `reason`) is deliberate: "you were up all night and earned nothing" is exactly the question
-    an operator will ask, and a payout log that silently omits the misses cannot answer it.
+    Returns [{node_id, slot_start, reward, replicas, multiplier, attended_frac, reason,
+    poc_excused}], one entry per attendance row, including the ones that earn nothing. Carrying
+    the zeroes (with a `reason`) is deliberate: "you were up all night and earned nothing" is
+    exactly the question an operator will ask, and a payout log that silently omits the misses
+    cannot answer it.
+
+    `unaudited_run` is how many consecutive slots ending at this one the coordinator heard
+    nothing from any verifier — 0 whenever the slot was audited, and 0 for every slot predating
+    the mechanism. It is what separates "this node failed" from "we did not look" ([P47] cause
+    2): the first is a fact about the node, the second is a fact about us, and only the first
+    should cost a volunteer their hour.
     """
     slot_seconds = float(config.SLOT_SECONDS)
+    # An hour nobody audited is excused only while the outage is short enough that presence plus
+    # a recent history of passing still means something. Past the bound we genuinely do not know
+    # what these machines were doing, and saying so is worth more than paying on a guess.
+    excusable = 0 < unaudited_run <= config.EMISSION_MAX_UNAUDITED_SLOTS
     qualified = []
     for r in rows:
         frac = (r.get("seconds_online") or 0.0) / slot_seconds
+        r["_excused"] = False
         if frac < config.SLOT_MIN_ATTENDANCE_FRAC:
             r["_reason"] = "attended %.0f%% of the slot, floor is %.0f%%" % (
                 frac * 100, config.SLOT_MIN_ATTENDANCE_FRAC * 100)
-        elif not r.get("poc_ok"):
-            r["_reason"] = "no proof-of-compute challenge passed inside the slot"
+        elif not r.get("poc_ok") and not excusable:
+            # Two different events, and until [P47] they were the same zero. The wording says
+            # which, because "no challenge passed" reads as an accusation when the reason is
+            # that the verifier was asleep.
+            r["_reason"] = (
+                "no proof-of-compute challenge passed inside the slot"
+                if unaudited_run == 0 else
+                "the network was not audited for %d consecutive slots, beyond the %d this "
+                "pays through — nobody checked, so nobody can say" % (
+                    unaudited_run, config.EMISSION_MAX_UNAUDITED_SLOTS))
         elif not _block_is_needed(r, total_layers):
             r["_reason"] = "held no block of the serving model"
         else:
             r["_reason"] = None
+            # Excused only if it was NOT proved the ordinary way. A node challenged inside an
+            # otherwise-unaudited slot earns on its own proof and is not marked excused, so the
+            # flag counts what it claims to count.
+            r["_excused"] = excusable and not r.get("poc_ok")
+            # Excused rows count toward replica depth. If they did not, the coordinator's own
+            # outage would read as a network-wide scarcity spike and pay MORE per node at exactly
+            # the moment it knows least -- turning our downtime into a payout event.
             qualified.append(r)
         r["_frac"] = frac
 
@@ -99,14 +126,21 @@ def plan_slot(rows, total_layers, now=None):
         if r["_reason"] is not None:
             out.append({"node_id": r["node_id"], "slot_start": r["slot_start"], "reward": 0.0,
                         "replicas": replicas, "multiplier": 0.0,
-                        "attended_frac": round(r["_frac"], 4), "reason": r["_reason"]})
+                        "attended_frac": round(r["_frac"], 4), "reason": r["_reason"],
+                        "poc_excused": False})
             continue
         mult = scarcity_multiplier(replicas)
         reward = config.EMISSION_BASE_NRN_PER_HOUR * min(r["_frac"], 1.0) * mult
+        # An excused hour pays the FULL rate, not a discounted one. A discount would be a
+        # penalty for our own downtime, which is the thing being corrected; the honest lever is
+        # how MANY such hours are covered (EMISSION_MAX_UNAUDITED_SLOTS), not what they are
+        # worth. A node that did exactly what was asked should not be paid less because the
+        # auditor's PC went to sleep.
         out.append({"node_id": r["node_id"], "slot_start": r["slot_start"],
                     "reward": round(reward, 6), "replicas": replicas,
                     "multiplier": round(mult, 4),
-                    "attended_frac": round(r["_frac"], 4), "reason": None})
+                    "attended_frac": round(r["_frac"], 4), "reason": None,
+                    "poc_excused": bool(r["_excused"])})
     return out
 
 
@@ -131,9 +165,14 @@ def close_slots(total_layers, now=None, log=print):
     total_paid, nodes_paid, capped = 0.0, 0, False
     settled_zero = 0
     unpaid = 0                # claimed, priced above zero, and the pool could not pay it
+    excused = 0               # paid for an hour the coordinator never audited
 
     for slot in sorted(by_slot):
-        for entry in plan_slot(by_slot[slot], total_layers, now=now):
+        # Did WE do our job during this slot? Read per slot rather than once, because a sweep
+        # that has been down for a while settles a backlog spanning both audited and unaudited
+        # hours, and pricing them alike is the conflation this exists to end.
+        run = models.unaudited_run(slot, config.EMISSION_MAX_UNAUDITED_SLOTS + 1)
+        for entry in plan_slot(by_slot[slot], total_layers, now=now, unaudited_run=run):
             reward = entry["reward"]
             # The daily cap is checked per payment, not per sweep: the multiplier rises with
             # scarcity, and a mass outage is simultaneously the scarcest and the most expensive
@@ -142,8 +181,11 @@ def close_slots(total_layers, now=None, log=print):
                 reward, capped = 0.0, True
                 entry["reason"] = "daily emission cap reached"
                 entry["reward"] = 0.0
-            if not models.settle_attendance(entry["node_id"], slot, reward, now=now):
+            if not models.settle_attendance(entry["node_id"], slot, reward, now=now,
+                                            poc_excused=entry.get("poc_excused", False)):
                 continue                      # already settled by another pass -- never pay twice
+            if reward > 0 and entry.get("poc_excused"):
+                excused += 1
             if reward <= 0:
                 settled_zero += 1             # claimed the hour, paid nothing -- counted so the
                 continue                      # log can tell this apart from "nothing to do"
@@ -190,6 +232,11 @@ def close_slots(total_layers, now=None, log=print):
     # `unpaid` is counted apart from `settled_zero`: a row that earned nothing and a row the
     # pool could not pay are the same zero in the ledger and completely different events.
     tail += f", {unpaid} unpayable (pool exhausted)" if unpaid else ""
+    # Say it out loud. An excused hour is the network paying for its own blind spot, and that is
+    # exactly the kind of spending that must never become invisible -- if this line is showing up
+    # every sweep, the fix is to keep the verifier up, not to keep paying around it.
+    tail += (f", {excused} paid unaudited (the verifier was down, not the node)"
+             if excused else "")
     if nodes_paid:
         log(f"[emission] paid {total_paid:.4f} NRN to {nodes_paid} node-slot(s) across "
             f"{len(by_slot)} slot(s)"
@@ -198,7 +245,7 @@ def close_slots(total_layers, now=None, log=print):
         log(f"[emission] settled {settled_zero} node-slot(s) at 0 across "
             f"{len(by_slot)} slot(s), paid nothing" + tail)
     return {"slots": len(by_slot), "paid": round(total_paid, 6), "nodes": nodes_paid,
-            "zero": settled_zero, "unpaid": unpaid, "capped": capped}
+            "zero": settled_zero, "unpaid": unpaid, "excused": excused, "capped": capped}
 
 
 def coverage_report(nodes, total_layers, now=None):

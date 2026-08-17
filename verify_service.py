@@ -204,6 +204,30 @@ class Verifier:
         except (requests.RequestException, KeyError, ValueError, TypeError):
             return 28
 
+    def heartbeat(self):
+        """Tell the coordinator this verifier is awake ([P47] cause 2).
+
+        Emission pays only where a proof-of-compute stands behind the hour, and this service IS
+        that proof for the whole network. It runs on one PC, and that PC sleeps: 207 of the 390
+        hours in this log, during which every honest node earned nothing — `node-c-pavilion` has
+        passed 4,523 challenges and lost 57 hours to it. The coordinator could not tell the
+        difference between a quiet healthy network and a verifier that had stopped, because
+        silence is what both look like from there.
+
+        So say so, every cycle, whether or not there was anything to verify. A failure here is
+        deliberately NOT fatal and deliberately quiet at WARNING: the heartbeat is bookkeeping
+        about our own diligence, and losing it must never stop the actual verification — the
+        worst case is that an hour we really did audit is recorded as one we did not, which errs
+        toward paying a node that earned it rather than toward accusing one that did not.
+        """
+        try:
+            r = requests.post(f"{self.base}/verifier/heartbeat", headers=self._headers(),
+                              timeout=15)
+            r.raise_for_status()
+        except requests.RequestException as e:
+            log.warning("could not record the verifier heartbeat (%s) — this slot may be "
+                        "settled as unaudited even though it was verified", e)
+
     def attest(self, node_id, passed, max_err):
         r = requests.post(f"{self.base}/node/{node_id}/attest",
                           json={"passed": passed, "max_err": max_err},
@@ -252,6 +276,14 @@ class Verifier:
             log.error("coordinator did not return node addresses — the register secret is "
                       "wrong, so nothing can be verified")
             return 0
+
+        # Recorded HERE, and not at the top of the sweep, because this is the first point at
+        # which this cycle could actually have verified something: the roster read succeeded and
+        # the secret is good. Both branches above return early, and both are cycles in which no
+        # node could be challenged however awake this process is — so they are honestly unaudited
+        # and must not claim otherwise. That is also why an unreachable coordinator shows up as
+        # an unaudited slot: it is one.
+        self.heartbeat()
 
         total = self.total_layers()
         pending = [n for n in nodes

@@ -248,6 +248,40 @@ EMISSION_DAILY_CAP_NRN = float(os.environ.get("NEURON_EMISSION_DAILY_CAP", "5000
 # Prevents a node that appears for one heartbeat from being paid as though it held the hour.
 SLOT_MIN_ATTENDANCE_FRAC = float(os.environ.get("NEURON_SLOT_MIN_ATTENDANCE", "0.5"))
 
+# --- What emission pays FOR when the network did not check ([P47] cause 2) -------------------
+# Emission pays for PROVEN work, not for OBSERVED work. Those were the same thing while the
+# rule was "a challenge passed inside this slot", and the difference is entirely in the
+# coordinator's hands rather than the node's: a node cannot make the verifier's rotation reach
+# it, cannot keep the operator's PC awake, and cannot keep our DNS resolving.
+#
+# Measured, and it is not a corner case: `verify_service.log` shows the verifier was not running
+# for 207 of the 390 hours of its own history (53%), and in the window [P47] measured, 57 of
+# `node-c-pavilion`'s 64 unpaid hours are hours in which the verifier was either down (46) or
+# unable to read the roster (11). That machine has passed 4,523 challenges. It earned nothing
+# for those hours because WE were not watching.
+#
+# Rule 2 of emission.py is unchanged and non-negotiable: presence alone must never pay. Both
+# constants below are bounded precisely so that no path to payment exists that a node can create,
+# detect or exploit.
+
+# How long a passing challenge stays EVIDENCE, in slots. A pass at 13:58 does not stop being
+# true at 14:00. Covers rotation latency (one node per 60s cycle, so a 60-node roster is checked
+# once an hour at best) and short verifier restarts, and it is node-independent: nothing a node
+# does changes when it is challenged. Deliberately small -- this is the age of the evidence, and
+# a proof two hours old is the most that can honestly be called current.
+EMISSION_POC_VALID_SLOTS = int(os.environ.get("NEURON_EMISSION_POC_VALID_SLOTS", "2"))
+
+# How many CONSECUTIVE unaudited slots the network will still pay for before it stops. An
+# unaudited slot is one in which the coordinator heard nothing from any verifier at all -- our
+# outage, recorded on our side, unforgeable by a node. Paying it is the network covering its own
+# downtime rather than billing volunteers for it.
+#
+# Bounded rather than discounted, deliberately. Discounting an excused hour would be a penalty
+# for our own failure, which is the thing being fixed; but "we could not check" stops being an
+# excuse at some point and becomes "nobody has verified this network since yesterday". At that
+# point the honest answer is that we do not know, and the payout log saying so is the signal.
+EMISSION_MAX_UNAUDITED_SLOTS = int(os.environ.get("NEURON_EMISSION_MAX_UNAUDITED_SLOTS", "6"))
+
 # Genesis buckets — ledger rows, NOT config values that can silently drift the supply.
 # sum() of the 4 allocation buckets is exactly 1,000,000,000; __escrow__ is bookkeeping-only
 # (seeded at 0, holds in-flight payments, never counted as anyone's allocation).
