@@ -719,6 +719,26 @@ def settle_attendance(node_id, slot_start, reward, now=None):
         return cur.rowcount > 0
 
 
+def void_settlement(node_id, slot_start):
+    """Correct an ALREADY-settled row down to a reward of zero. Exactly one thing produces one:
+    `close_slots` claims the row before it moves the money (deliberately -- see its docstring),
+    so a transfer that then fails leaves an hour marked paid at a price nobody paid.
+
+    Deliberately NOT a `force` flag on `settle_attendance`. That function's entire guard is
+    `paid_at IS NULL`, and a flag that switches the guard off is a flag that can pay twice.
+    This can only move a reward DOWN, on a row that is already final, so it cannot become a
+    second payment. `paid_at` is left alone: the hour really was claimed, at that instant, and
+    the row must stay claimed or the next sweep retries a payment the pool cannot make.
+
+    Returns False if there was no settled row to correct.
+    """
+    with _db() as c:
+        cur = c.execute("UPDATE attendance SET reward=0 "
+                        "WHERE node_id=? AND slot_start=? AND paid_at IS NOT NULL",
+                        (node_id, slot_start))
+        return cur.rowcount > 0
+
+
 def emitted_since(ts):
     """Total NRN paid out as availability emission since `ts` -- what the daily cap is read
     against. Summed from the settled rows themselves rather than a counter, so it stays true

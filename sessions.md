@@ -5731,15 +5731,181 @@ not recur.
 The Windows PC is still on 0.20.2 and is the frozen build with `auto_update` on, so it should
 install 0.20.3 by itself. Nothing has ever exercised that path against a real release.
 
+## Session 62 (2026-08-17) — the emission reconciliation, and the walk-back that could never fire
+
+One thing: [P40]. 262.89 NRN distributed, never once checked against the rows that authorised
+it. `coordinator/reconcile_emission.py` is that check — read-only, exits 1 on a discrepancy.
+
+### Writing it found the bug before it was pointed at anything
+
+`close_slots` claims the attendance row before it moves the money. That ordering is deliberate
+and right: claim-then-pay can at worst pay nothing for a claimed slot, pay-then-claim can pay
+twice. The walk-back for that "at worst" was `settle_attendance(entry, slot, 0.0)` — and it
+**could never have fired even once**, because that UPDATE carries `WHERE paid_at IS NULL` and
+the successful claim four lines above has just falsified it. A payment the pool could not make
+left the row saying it had been paid in full, forever, and `emitted_since` — which is what the
+daily cap is read against — counted NRN that never moved.
+
+The comment above the line said *"the row stays settled at 0"*. It stayed settled at the full
+reward. Nobody had reached the branch, because the pool holds ~600M against 262 spent.
+
+`models.void_settlement` is the fix, and it is its own function rather than a `force` flag on
+`settle_attendance` on purpose: that function's entire guard is the `paid_at IS NULL` a flag
+would switch off, and the guard is what makes a replayed sweep a no-op instead of a second
+payment. Voiding can only ever move a reward DOWN on a row that is already final.
+
+Found by writing the reconciliation and asking what would make its two legs disagree. That is
+the argument for the whole exercise: the check paid for itself before it ran.
+
+### Two of the three numbers were weaker than the plan assumed
+
+[P40] said sum the settled rewards, compare against the pool's drop and the rise in
+`total_earned`, and the three must agree. Reading the code first ([P43]'s lesson, again):
+
+- **The pool's seed is not stored anywhere.** `genesis.seed_genesis` computes
+  `600,000,000 − already_minted` and keeps only the result as a balance, so "the drop" is not
+  computable from the live database at all. `genesis.py` now records it — which helps every
+  future database and not this one. For the live one the repository already held the answer:
+  `backups-offbox/neuron-20260802-115534.db` has no `attendance` table, so it predates every
+  emission payment, so its pool balance **599999971.999972** *is* the seed. A test asserts both
+  halves of that against the file. It also implies `already_minted = 28.000028` at genesis
+  against 28.678027 of node earnings five days later — consistent, and the first independent
+  corroboration that figure has had.
+- **`total_earned` cannot be decomposed.** No transactions table, and it mixes emission,
+  per-request earnings, the faucet and operator sweeps — and `claim_node_earnings.py` credits
+  the destination without decrementing the source, so summing it across the ledger
+  double-counts every swept NRN, the 251 included. Leg C is a per-payee floor, not an equality,
+  and it says so. Two attribution hazards are reported rather than guessed: [P39] phase 3 pays
+  `get_node_owner(node) or node` **decided at settle time**, and nothing records when a link
+  was made; and `delete_node` removes a node's row while leaving its attendance and ledger, so
+  attendance can outlive the machine it belonged to.
+
+Where a leg is inferred, the script says INFERRED. Without a seed, leg B equals leg A by
+construction, and reporting that as agreement would be the check lying about its own strength.
+
+### The parts that matter more than the sums
+
+A settled row is frozen — `touch_node` and `mark_slot_poc` both carry `WHERE paid_at IS NULL` —
+so `--replay` can re-price every slot from its own rows and diff. Asserted directly rather than
+assumed, with a test that heartbeats a settled row and checks nothing moved. The one input
+settlement does *not* freeze is `total_layers`, so rows whose verdict depends on the serving
+model are named instead of silently priced against today's.
+
+Plus the checks a sum cannot see: rewards above the `base × scarcity_max` ceiling, rows paid
+against their own failed qualification gates, a payee with no ledger row, and closed slots
+nobody settled — which is invisible in the logs, since an idle sweep returns early and stays
+quiet.
+
+The A↔B tolerance scales with the arithmetic done. One ULP of a 6e8 float is ~1.2e-7, so a few
+hundred payments can honestly disagree by ~3e-5; a fixed 1e-6 epsilon would have reported a
+discrepancy on the first clean run and cost an afternoon.
+
+### Tested against the real code, not around it
+
+37 tests. The load-bearing one builds a 201-row, three-day, three-node ledger by driving
+`models` and `close_slots` exactly as production does, then reconciles the resulting file: 585
+NRN, all three legs agreeing, replay clean. Every discrepancy the script claims to detect is
+then written into a hand-built database and fired — a detector nobody has seen fire is not a
+detector, which is [P40]'s own thesis applied to [P40]'s own fix. The pricing copy the script
+carries (so it runs against a snapshot without importing the live config) is pinned equal to
+`emission.plan_slot` over 200 randomised slots.
+
+### Then it was run, and 330.43 NRN checks out
+
+The founder ran it on the VM. `/home/ubuntu/neuron/coordinator/neuron.db`, 318 attendance rows,
+316 settled, 118 paying, 2 unsettled — the slot that had just closed.
+
+    A  recorded   330.427894 NRN
+    B  left pool  330.4278938 NRN
+    C  arrived    321.741023 + 8.686871 orphaned = 330.427894 NRN
+
+The A↔B gap is 1.4e-5, against a tolerance of the same order — float residue from ~118
+decrements of a 6e8 balance. Deriving that tolerance from the arithmetic actually performed
+rather than fixing it at 1e-6 is what stopped the first honest run reporting a discrepancy.
+
+**All 316 settled rows re-priced correctly under `--replay`.** Not just that the totals add up:
+each individual payment, re-derived from its own frozen inputs including the replica depth
+within its slot, matched what was paid. No mispricing anywhere in the history.
+
+And the seed stopped being an inference. 599,999,971.999972 from the 2026-08-02 backup minus
+the settled rewards lands on the live pool balance to five decimals. If that backup had not
+predated emission, leg B would have been wrong by the difference. Production confirmed a file
+date.
+
+Two things fell out that are not accounting errors:
+
+- **8.686871 NRN paid to a machine that no longer exists.** `agent-bhpc012104-82cbee`, one of
+  [P37]'s three, was deleted — and `delete_node` removes only the `nodes` row, leaving the
+  attendance and the ledger. The reconciler declined to attribute it rather than guessing,
+  which is that branch firing on real data for the first time.
+
+  I first wrote this up as stranded NRN. It isn't: the second run printed the ledger row, which
+  reads `balance 0.000000, total_earned 8.787881`, and since `total_earned` never decrements
+  that pairing means the balance was moved out — sweepable because `claim_node_earnings.py`
+  reads the ledger rather than `nodes`. The finding said *"payee unknowable"*, which is a claim
+  about attribution, and I read it as a claim about the money. Corrected in [P39] item 5, where
+  the real residue is the mechanism: it worked out only because that node was the founder's.
+- **199 of 318 settled node-hours paid nothing, and the output could not say why.** Every one
+  failed a gate rather than being zeroed by the cap (`zeroed-though-qualified` never fired), so
+  it is emission working. Added `why-hours-earned-nothing`. The reason strings interpolate a
+  percentage and so cannot be counted; `qualifies` now returns a stable code alongside the
+  wording the equivalence test pins against `plan_slot`.
+
+The breakdown was 168 no-proof-of-compute to 31 below-attendance-floor, and `node-c-pavilion`
+carries 64 of the former with **zero** of the latter — reliably online, reliably unpaid. That
+should be impossible: `verify_service` re-checks one node per 60-second cycle, oldest first, so
+on a two-node roster every machine is challenged 15–30 times an hour. It fits [P37] instead —
+flagged nodes were excluded from both verifier lists, so they could never be re-challenged and
+therefore could never earn — fixed 2026-08-10.
+
+Which makes the question *when*, and a count cannot answer it. Each code now carries the window
+its hours fall in.
+
+### The dates said "now", and the cause is structural — [P47]
+
+`agent-optinovate-6ff49d`: 81 missed hours running to **2026-08-17 13:00**, the most recent
+closed slot. Not [P37], not a verifier outage. `verify_service.py:305` skips stage-1 nodes
+outright, because `make_middle_challenge` computes layers on a raw hidden state while a
+first-stage node embeds token ids first — so the driver would answer "wrong" every time. That
+skip is right, and it is logged loudly.
+
+What nobody joined up: emission pays only on a passing challenge (`mark_slot_poc`), so a node
+that is never challenged can never earn an availability hour. **The driver has been unable to
+earn emission for its entire existence** — ~243 NRN at the current multiplier, against 333 NRN
+distributed in total. And [P43] already established the driver carries the largest fixed cost on
+the network. The machine asked to give the most is the one the reward cannot reach.
+
+Second cause, which likely explains the Pavilion's 64: every branch where the verifier
+deliberately declines to conclude anything — `RangeMismatch` (*"THE NODE IS FINE; THE PLACEMENT
+IS STALE"*), `ChallengeRefused` (*"healthy, nothing recorded"*), pre-strike unreachability —
+leaves `poc_ok` at 0, and emission cannot tell that from a failure. Those branches were written
+to protect a node's reputation after [P37]. None of them protects its earnings.
+
+Third: `/node/{id}/peer-attest` never calls `mark_slot_poc`, so peer verification firing for the
+first time would not fix the driver either.
+
+None of this was visible until the zeros were counted per node and dated. The reconciliation was
+built to check arithmetic and found a product bug instead.
+
+Also caught while adding it: `d.setdefault(k, {})[c] = d[k].get(c, 0) + 1` evaluates its
+right-hand side first, so the lookup runs before the key exists. Python's assignment order,
+and it only shows on the first row for each node.
+
+39 tests now.
+
 ## Known limits / next steps
 - **The 3.2 / 4.6 / 6.2 tok/s scaling curve predates Ethernet** and was measured with
   54–109 ms of Wi-Fi power-save latency on every node_c hop (Session 59). The sub-linearity
   attributed to heterogeneity and node_a's head cost may be substantially that instead.
   Re-run before optimising against it.
-- **Emission has never been observed, and it is distributing NRN now** — [P40]. Ranked
-  first here because it is the only unverified path whose output a volunteer will
-  actually check, and `total_earned` only grows, so an error compounds silently rather
-  than showing up as a spike. One hand-reconciled slot would close the worst of it.
+- ~~**Emission has never been observed, and it is distributing NRN now**~~ — [P40]
+  **reconciled on the live ledger 2026-08-17**: 330.427894 NRN, three legs agreeing, all
+  316 settled rows re-pricing correctly. Re-run it after any change to emission or the
+  ledger; it takes seconds and exits non-zero on a discrepancy:
+
+      python3 /tmp/reconcile_emission.py --db /home/ubuntu/neuron/coordinator/neuron.db --seed-from-backup --replay
+
+  What remains is [P40] item 2 — running it as a standing assertion rather than by hand.
 - **Throughput scales with nodes (single 3.2 → 2-node 4.6 → 3-node 6.2 tok/s), but
   sub-linearly** because the nodes are heterogeneous and node_a carries the fixed
   head/orchestration cost. Next wins:

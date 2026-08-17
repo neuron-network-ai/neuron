@@ -10,6 +10,7 @@ served, and it fails in different ways. These tests pin the three that matter:
 
 Run:  python -m coordinator.test_emission_slots     (from repo root)
 """
+import contextlib
 import os
 import tempfile
 
@@ -40,6 +41,25 @@ def _supply():
 def _pool():
     row = models.get_ledger(config.GENESIS_BUCKETS_EMISSION_ID)
     return round(row["balance"], 6)
+
+
+@contextlib.contextmanager
+def _drained_pool():
+    """Run the body with __emission_pool__ empty and the 1,000,000,000 supply still intact --
+    the balance is parked in another bucket, not deleted, or the invariant would break for the
+    fixture's reasons rather than the test's. Restored on the way out so the suite's later
+    tests see the pool they expect."""
+    pool_id, park_id = config.GENESIS_BUCKETS_EMISSION_ID, config.GENESIS_BUCKETS_FOUNDER_ID
+    held = models.get_ledger(pool_id)["balance"]
+    with models._db() as c:
+        c.execute("UPDATE ledger SET balance=balance+? WHERE node_id=?", (held, park_id))
+        c.execute("UPDATE ledger SET balance=0 WHERE node_id=?", (pool_id,))
+    try:
+        yield
+    finally:
+        with models._db() as c:
+            c.execute("UPDATE ledger SET balance=balance-? WHERE node_id=?", (held, park_id))
+            c.execute("UPDATE ledger SET balance=? WHERE node_id=?", (held, pool_id))
 
 
 def _attend(node_id, lo, hi, frac=1.0, poc=True, slot=SLOT0):
@@ -161,6 +181,53 @@ def test_a_replayed_sweep_pays_nothing_extra():
     assert first["paid"] > 0
     assert second["paid"] == 0.0 and second["nodes"] == 0
     assert _pool() == pool_after_first
+
+
+def test_an_unpayable_slot_records_the_zero_it_actually_paid():
+    """An exhausted pool must leave the attendance row saying what happened.
+
+    `close_slots` claims the row before it moves the money — deliberately, since claim-then-pay
+    can at worst pay nothing for a claimed slot, while pay-then-claim can pay twice. The
+    walk-back for that "at worst" was `settle_attendance(..., 0.0)`, which could never fire:
+    that UPDATE carries `WHERE paid_at IS NULL`, and the claim four lines earlier has just
+    falsified it. So the row kept its full reward while the pool paid nothing — and
+    `emitted_since`, which is what the daily cap is read against, counted it as spent.
+
+    Found by writing `reconcile_emission.py` and asking what would make its two legs disagree.
+    """
+    _clear()
+    _attend("broke", 0, 9)
+    with _drained_pool():
+        logs = []
+        res = emission.close_slots(N, now=SLOT0 + SLOT * 1.5, log=logs.append)
+
+        with models._db() as c:
+            row = dict(c.execute("SELECT reward, paid_at FROM attendance "
+                                 "WHERE node_id='broke'").fetchone())
+        assert row["paid_at"] is not None, "the hour stays claimed, or the next sweep retries it"
+        assert row["reward"] == 0, f"nothing was paid, so the row must say 0 — got {row['reward']}"
+        assert models.emitted_since(0.0) == 0.0, "the daily cap must not count unpaid NRN"
+        assert res["unpaid"] == 1 and res["paid"] == 0.0
+        assert any("POOL EXHAUSTED" in m for m in logs)
+        assert _supply() == round(config.GENESIS_TOTAL_SUPPLY, 6)
+    _clear()
+
+
+def test_void_settlement_cannot_be_used_to_pay_twice():
+    """It only ever moves a reward DOWN, on a row that is already final — which is why the
+    walk-back is its own function rather than a `force` flag on settle_attendance."""
+    _clear()
+    _attend("n0", 0, 9)
+    emission.close_slots(N, now=SLOT0 + SLOT * 1.5, log=lambda *_: None)
+    pool_after = _pool()
+    assert models.void_settlement("n0", SLOT0) is True
+    assert models.void_settlement("n0", SLOT0) is True, "idempotent — already zero"
+    assert _pool() == pool_after, "voiding a row must not move any NRN"
+    # And a second sweep still refuses to pay the voided hour again.
+    again = emission.close_slots(N, now=SLOT0 + SLOT * 1.5, log=lambda *_: None)
+    assert again["paid"] == 0.0 and _pool() == pool_after
+    assert models.void_settlement("n0", SLOT0 + SLOT * 99) is False, "no such settled row"
+    _clear()
 
 
 def test_an_open_slot_is_never_settled():

@@ -130,6 +130,7 @@ def close_slots(total_layers, now=None, log=print):
     spent_today = models.emitted_since(now - 86400.0)
     total_paid, nodes_paid, capped = 0.0, 0, False
     settled_zero = 0
+    unpaid = 0                # claimed, priced above zero, and the pool could not pay it
 
     for slot in sorted(by_slot):
         for entry in plan_slot(by_slot[slot], total_layers, now=now):
@@ -160,10 +161,19 @@ def close_slots(total_layers, now=None, log=print):
             payee = models.get_node_owner(entry["node_id"]) or entry["node_id"]
             entry["payee"] = payee
             if not models.transfer(config.GENESIS_BUCKETS_EMISSION_ID, payee, reward):
-                # The pool is empty. The row stays settled at 0 rather than being retried
-                # forever, and this is said loudly: emission ending is a tokenomics event, not
-                # a transient error.
-                models.settle_attendance(entry["node_id"], slot, 0.0, now=now)
+                # The pool is empty. The row stays CLAIMED so it is not retried forever, but
+                # its reward is corrected to 0, because nothing was paid.
+                #
+                # This used to call `settle_attendance(..., 0.0)`, which cannot work: that
+                # UPDATE carries `WHERE paid_at IS NULL` and the successful claim four lines
+                # above has just falsified it. So the row kept its full reward while the pool
+                # paid nothing -- `emitted_since` (which is what the daily cap is read against)
+                # counted money that never moved, and the ledger disagreed with the attendance
+                # rows by exactly this amount, permanently. Found by writing the reconciliation
+                # in `reconcile_emission.py` and asking what would make its two legs differ.
+                models.void_settlement(entry["node_id"], slot)
+                entry["reward"] = 0.0
+                unpaid += 1
                 log(f"[emission] POOL EXHAUSTED — cannot pay {reward:.6f} NRN to "
                     f"'{payee}' for slot {int(slot)}. Availability rewards have "
                     f"stopped; per-request earnings are unaffected.")
@@ -177,6 +187,9 @@ def close_slots(total_layers, now=None, log=print):
     # the log, which is half of why [P40] could not be answered from the logs alone. The
     # early return above still keeps a genuinely idle sweep silent.
     tail = " (daily emission cap reached)" if capped else ""
+    # `unpaid` is counted apart from `settled_zero`: a row that earned nothing and a row the
+    # pool could not pay are the same zero in the ledger and completely different events.
+    tail += f", {unpaid} unpayable (pool exhausted)" if unpaid else ""
     if nodes_paid:
         log(f"[emission] paid {total_paid:.4f} NRN to {nodes_paid} node-slot(s) across "
             f"{len(by_slot)} slot(s)"
@@ -185,7 +198,7 @@ def close_slots(total_layers, now=None, log=print):
         log(f"[emission] settled {settled_zero} node-slot(s) at 0 across "
             f"{len(by_slot)} slot(s), paid nothing" + tail)
     return {"slots": len(by_slot), "paid": round(total_paid, 6), "nodes": nodes_paid,
-            "zero": settled_zero, "capped": capped}
+            "zero": settled_zero, "unpaid": unpaid, "capped": capped}
 
 
 def coverage_report(nodes, total_layers, now=None):

@@ -5,6 +5,8 @@ Approved reconciliation approach (founder decision, 2026-07-28): BACKDATE
 __emission_pool__ by whatever node earnings already exist under the old unconditional-mint
 model, rather than resetting existing balances. Nobody's already-earned NRN disappears.
 """
+import time as _time
+
 from coordinator import config, models
 
 
@@ -43,6 +45,15 @@ def seed_genesis():
         c.execute(
             "INSERT OR IGNORE INTO ledger (node_id, balance, account_type) VALUES (?,0,'bucket')",
             (config.ESCROW_LEDGER_ID,))
+        # Record what the emission pool was seeded WITH. It is not recoverable afterwards --
+        # the seed is 600,000,000 minus a backdate computed from balances that have since
+        # moved -- so without this, "how much has left the emission pool" cannot be answered
+        # from the database at all, and `reconcile_emission.py` has to infer its own second
+        # number and can only bound it. Written here rather than derived later because this is
+        # the only instant the value exists. Does not help the LIVE database, which was seeded
+        # before this line existed; that one needs --seed.
+        c.execute("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?,?,?)",
+                  ("emission_pool_seed", repr(emission_seed), _time.time()))
         return True
 
 

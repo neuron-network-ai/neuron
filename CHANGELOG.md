@@ -8,6 +8,39 @@ This project is early alpha. NRN has no cash value, and the network is a handful
 
 ## Unreleased
 
+Coordinator-side only — nothing here changes the agent, so no installer version is needed.
+
+- **The emission ledger can now be checked against its own attendance rows** —
+  `coordinator/reconcile_emission.py` ([P40]). 262.89 NRN has been distributed and nothing had
+  ever compared what the ledger *holds* against what the attendance rows *say it should hold*.
+  Read-only by construction: one `mode=ro` connection, no `--execute`, and no SQL that is not a
+  `SELECT` — each asserted from the module's syntax tree, plus a test that hashes a database
+  before and after a full run. Exits 1 on a discrepancy, so it can be scheduled.
+  **Run on the live ledger 2026-08-17 and it reconciles**: 330.427894 NRN recorded against a
+  330.4278938 NRN drop in the pool, every one of 316 settled rows re-pricing correctly from its
+  own frozen inputs, supply invariant intact. First independent confirmation that the NRN
+  distributed so far is correct.
+- **It says why a node-hour earned nothing, and when.** 199 of 318 settled hours on the live
+  ledger paid zero — all refused by a gate rather than zeroed by the daily cap. Now counted per
+  reason, per node, with the window each run of them falls in. That last part is what turned a
+  statistic into [P47]: the misses run to the current slot, and the worst-hit machine is the
+  driver, which `verify_service` skips by design and which therefore **cannot earn availability
+  emission at all**. Roughly 243 NRN of unearnable hours against 333 NRN distributed.
+- **Fixed: a payment the pool could not make was recorded as though it had been made.**
+  `close_slots` claims the attendance row before it moves the money — correct, since the
+  alternative can pay twice — and walked the reward back with
+  `settle_attendance(..., 0.0)` when the transfer failed. That UPDATE carries
+  `WHERE paid_at IS NULL`, which the claim four lines earlier has just falsified, so it could
+  never fire: the row kept its full reward, and `emitted_since` — what the daily cap is read
+  against — counted NRN that never moved. `models.void_settlement` replaces it. Latent (the
+  pool holds ~600M against 262 spent) and found by asking what would make the new
+  reconciliation's two legs disagree.
+- **Genesis records what the emission pool was seeded with** (`settings['emission_pool_seed']`).
+  The seed is `600,000,000` minus a backdate computed from balances that have since moved, so
+  after the fact it is not recoverable — meaning "how much has left the pool" could not be
+  answered from the database at all. New databases only; the live one predates the line and
+  needs `--seed`.
+
 ## v0.20.4
 
 Same release as 0.20.3 plus the wallet work that landed after it was built. Cut as a new
