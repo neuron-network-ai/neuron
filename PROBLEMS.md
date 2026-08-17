@@ -176,6 +176,62 @@ mistake wearing different clothes.**
 Related: [P46] (a build that was self-consistent in the repo and broken once installed),
 [P39] (the claim panel, on the same unswapped route).
 
+### [P50] 🔴 One PC held two node identities in one config file, and a restart picked the wrong one — 5.26 NRN was one overwrite from orphaned (2026-08-17)
+
+**Lived, not theorised.** Restarting the agent to clear [P49]'s stale range brought it back as
+**`agent-optinovate`** — a node last seen 2026-08-07 — instead of `agent-optinovate-6ff49d`, the
+identity that had been serving all week and holds **5.259616 NRN**. The log said so plainly and
+nobody had ever read it: *"this node's token has been superseded, most likely by another copy of
+the agent registering the same node id"*.
+
+`%LOCALAPPDATA%\NEURON\config.json` held the 2026-08-11 `agent-optinovate` config; the live
+`-6ff49d` config was in `config.json.prev`. Something had rotated them. Then the restart made it
+irreversible on disk: `_save()` copies config.json to `.prev` before writing, so the fresh start
+**overwrote `.prev` with the wrong config** and the only on-disk copy of the live node's token
+was gone — inside two minutes, as a side effect of a fix for something else.
+
+**Recovered because the coordinator keeps the token too.** `nodes.node_token` is stored in
+plaintext and is what `node_by_token` matches, so the credential was re-readable from the live
+DB and written back into a rebuilt config. The node came up as `agent-optinovate-6ff49d
+[verified], assigned layers [0, 9]`, retook relay port 9004, and **passed its next challenge**.
+Had the coordinator hashed that column — which is the obvious hardening, and still right — this
+recovery would have been impossible and the balance stranded.
+
+**Why 🔴, when nothing was actually lost.** It came within one file write, and every property
+that made it survivable was luck rather than design:
+  * **A node's whole identity is one token in one file** ([P39], [P45]) — and this shows the file
+    does not even have to be deleted. It only has to be *rotated*, by any of several paths, none
+    of which announce themselves.
+  * **The 401 was not fatal.** The agent logged `heartbeat failed: 401` and `could not report
+    ms_per_layer: 409` and carried on serving, so a machine that has silently lost its identity
+    looks exactly like a working one. It earns nothing while doing so, which is [P47] again by
+    another road.
+  * **One machine can hold many identities.** The ledger carries seven `agent-optinovate-*`
+    accounts; six are empty registrations from earlier runs. Nothing reaps them, and nothing
+    warns that this PC has registered eight times.
+
+**What would close it, cheapest first:**
+  1. **Say it loudly.** A 401 on ping means *this agent is no longer who it thinks it is*. It
+     should be an ERROR naming the node id and the remedy, not a warning between two INFO lines.
+  2. **Never rotate a config that holds a token without keeping a copy that is not the rotation
+     target.** `.prev` being a single slot is what made this destructive; the backup and the
+     thing being overwritten were the same file one generation apart.
+  3. **Bind the owner, and this stops being about the machine at all** — see below. This is the
+     real fix and the founder named it while it was happening.
+
+**The founder's point, and it is the right one: pay the person, not the box.** Emission already
+resolves `get_node_owner(node) or node` at settle time ([P39] phase 3), so a node with an OWNER
+recorded pays into the wallet that person logs into. Then a rotated config costs a registration
+and nothing else — the balance was never on the disk. Today no owner is bound to any live node,
+because the claim panel that binds one is served at `/next` and every default user gets
+`chat.html` — which makes **[P48] item 3 the blocker for this too**, not only for the wallet UI.
+A machine-shaped identity is not merely inconvenient; it is the reason a config file rotation is
+a financial event.
+
+Related: [P45] (the token in one file, and the `git checkout` that would have wiped it), [P39]
+(the credential and the owner link), [P49] (the restart this happened during), [P47] (a node that
+has lost its identity earns nothing and looks fine).
+
 ### [P49] 🟢 The 28.6 is explained: a node holding the whole model answered a different question, and said so in an ack nobody read — fixed (2026-08-17)
 
 **Found by watching the fix from Session 62 run live, which is the only way it could have been
