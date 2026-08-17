@@ -159,6 +159,51 @@ def test_the_operator_sees_their_own_version_and_why_it_is_behind():
     assert "download-failed" in html
 
 
+def test_a_node_ahead_of_the_network_is_not_told_to_downgrade():
+    """Live on the founder's own dashboard, 2026-08-17: **"v0.20.4 — v0.20.3 is available"**.
+
+    The node had self-updated to 0.20.4 while the coordinator still advertised 0.20.3 (a
+    zz-agent-release.conf drop-in winning on lexical order — the Session 61 trap again). The
+    comparison was `av == latest`, which answers "same or different" and was read as "current
+    or behind", so a node NEWER than the network was shown an upgrade prompt for an older
+    build. That reads as "you are out of date" and invites a downgrade, which is the one thing
+    [P30]'s rollback machinery exists to keep deliberate.
+    """
+    _clear()
+    ahead = _bump(config.AGENT_VERSION)
+    models.register_node("ahead", "1.1.1.1", 50999, 0, 9, 8, 16, "tok-ahead", trusted=True,
+                         agent_version=ahead, auto_update=True)
+    page = main.node_dashboard("ahead", token="tok-ahead")
+    html = page.body.decode() if hasattr(page, "body") else str(page)
+    assert f"v{ahead}" in html
+    assert "is available" not in html, "a node ahead of the network must not be told to update"
+    assert "newer than" in html, "and it should say which side is actually stale"
+    assert "nodes check once a day" not in html, \
+        "it will not update itself to anything, so do not promise that it will"
+
+
+def test_version_order_is_numeric_not_lexical():
+    """`"0.20.10" > "0.20.9"` is False as strings, so swapping == for > would have replaced one
+    wrong answer with a subtler one that only appears at the tenth patch release."""
+    assert main._version_gt("0.20.10", "0.20.9")
+    assert not main._version_gt("0.20.9", "0.20.10")
+    assert main._version_gt("0.21.0", "0.20.99")
+    assert not main._version_gt("0.20.4", "0.20.4")
+    assert main._version_gt("v0.20.4", "0.20.3"), "a leading v is still a version"
+    assert main._version_gt("0.20.1", "0.20"), "0.20 is 0.20.0, not a shorter thing"
+    # An unreadable version is never 'ahead' -- that would invent certainty about a build we
+    # cannot parse, which is why `unknown` is its own bucket on the public page.
+    for junk in (None, "", "nightly", "0.20.x", 3):
+        assert not main._version_gt(junk, "0.20.3"), junk
+        assert not main._version_gt("0.20.3", junk), junk
+
+
+def _bump(v):
+    parts = [int(p) for p in v.split(".")]
+    parts[-1] += 1
+    return ".".join(str(p) for p in parts)
+
+
 def test_the_operator_of_a_silent_build_is_told_it_is_unreported_not_current():
     _clear()
     models.register_node("old", "1.1.1.1", 50999, 0, 9, 8, 16, "tok-old", trusted=True)

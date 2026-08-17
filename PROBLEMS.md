@@ -124,6 +124,58 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
 
 ## Problems & risks
 
+### [P48] 🟡 Three things the operator sees are wrong or stale, and each looked fine from inside the repo (2026-08-17)
+
+All three found by the founder **looking at the live product** rather than at the code. That is
+the pattern of [P46] and it is worth naming again: every one of these is invisible from a
+passing test suite, because the repo is self-consistent and the thing that is wrong is the
+relationship between the repo and what a person is actually served.
+
+**1. A node AHEAD of the network was told to downgrade — fixed.** The founder's own dashboard
+read **"v0.20.4 — v0.20.3 is available"**. `main.py` compared with `av == latest`, which answers
+*same or different* and was being read as *current or behind*, so any difference rendered as an
+upgrade prompt — including a node newer than the network. It also promised "nodes check once a
+day", which that node will never act on because there is nothing above it to install.
+
+Both sides are ordinary and the fix deliberately diagnoses neither: 0.20.3 is the latest
+PUBLISHED release and the coordinator advertises it correctly, while the founder's machine runs
+a locally-built 0.20.4 that was never released — and the mirror case, a coordinator whose
+`NEURON_AGENT_VERSION` pin went stale behind a shadowed systemd drop-in, is Session 61 and just
+as real. Naming either as the fault would be a guess printed as a finding.
+
+`_version_gt` compares numerically, because swapping `==` for `>` would only have moved the
+bug: `"0.20.10" > "0.20.9"` is **False** as strings, so the lexical fix breaks at the tenth
+patch release. An unparseable version is never "ahead" — inventing certainty about a build we
+cannot read is what `unknown` is bucketed separately to avoid. The same equality shape was in
+the public rollout counter (`on_latest`) and the `stuck` list, so a fully-updated fleet read as
+behind the moment a release pin went stale; both fixed.
+
+**2. Every download link pointed two releases back — fixed.** `docs/index.html` (twice) and
+`README.md` sent visitors to **v0.20.2** while **v0.20.3** was the published release. Silent by
+construction: a stale link still *works*, serving an older installer perfectly happily, so
+nothing fails and every new volunteer gets the old build. The opposite mistake is one keystroke
+away and worse — pointing at v0.20.4, which is built but was never released, 404s for everyone.
+`test_download_links.py` now asserts every link names one version and that the version has
+release notes in the repo, the cheapest offline proxy for "actually released".
+
+**3. 0.20.4's headline feature is on a route nobody visits — NOT fixed, and it is the
+interesting one.** The founder expected `≈ N network answers left` and saw
+`NEURON v0.20.4 — 2.99 NRN`. Nothing is broken: that line lives in
+`ui/web/src/components/Sidebar.tsx`, which is the React app served at **`/next`**, while `/`
+still serves `ui/static/chat.html`. So the entire wallet UI that 0.20.4 exists to ship is
+invisible to anyone using the default route, which is everyone.
+
+That makes the `/next` → `/` swap a **shipping** problem rather than the tidy-up it has been
+filed as. It is blocked on porting 59 source-text assertions in `ui/test_chat_ui.py` — tests
+that assert on chat.html's HTML strings, which is exactly why they cannot follow the behaviour
+to a different implementation. Same root as Session 61's finding that the claim panel's tests
+stubbed `window.ethereum` and asserted on source text, so connect → sign → bind had never
+actually executed. **A release note describing a feature no default user can reach is [P31]'s
+mistake wearing different clothes.**
+
+Related: [P46] (a build that was self-consistent in the repo and broken once installed),
+[P39] (the claim panel, on the same unswapped route).
+
 ### [P47] 🟡 The driver could not earn availability emission at all — cause 1 fixed, and the skip rested on a hypothesis that was false (2026-08-17)
 
 **Fixed: the driver is challenged now, so it can earn.** The skip's premise was measured and it

@@ -204,6 +204,38 @@ def _load_serving():
             pass
 
 
+def _version_parts(v):
+    """(0, 20, 4) from "0.20.4" / "v0.20.4". None when it does not parse as a dotted number.
+
+    Version strings were compared with `==` everywhere, which answers "same or different" and
+    was read as "current or behind". Those differ in exactly one case and it is live: a node
+    NEWER than what the coordinator advertises. `"0.20.4" > "0.20.3"` happens to be true as
+    strings, but `"0.20.10" > "0.20.9"` is false, so string ordering is not a fix either.
+    """
+    if not isinstance(v, str):
+        return None
+    try:
+        parts = tuple(int(p) for p in v.strip().lstrip("vV").split("."))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    # At least MAJOR.MINOR. A bare `3` parses happily as (3,) and then sorts above every
+    # 0.x build this project has ever shipped -- so an agent reporting a stray integer would
+    # be read as newer than the network. Every version here is dotted; anything else is a
+    # value we cannot read, and that is what None is for.
+    return parts if len(parts) >= 2 else None
+
+
+def _version_gt(a, b):
+    """Is version `a` strictly newer than `b`? False whenever either side cannot be parsed --
+    an unknown version is never treated as ahead, since inventing certainty about a build we
+    cannot read is the mistake `unknown_ver` is bucketed separately to avoid."""
+    pa, pb = _version_parts(a), _version_parts(b)
+    if pa is None or pb is None:
+        return False
+    n = max(len(pa), len(pb))                  # 0.20 vs 0.20.1 -- pad, do not compare lengths
+    return pa + (0,) * (n - len(pa)) > pb + (0,) * (n - len(pb))
+
+
 def serving_model():
     with _serving_lock:
         return dict(_serving)
@@ -1899,7 +1931,12 @@ def dashboard():
     # bucket rather than being folded into "old": an agent too old to report its version is not
     # the same as one known to be behind, and merging them would invent certainty.
     online_nodes = [n for n in nodes if n["status"] == "online"]
-    on_latest = sum(1 for n in online_nodes if n.get("agent_version") == config.AGENT_VERSION)
+    # "on the latest" must include a node NEWER than what this coordinator advertises, or the
+    # rollout line reports a fully-updated fleet as behind the moment a release pin goes stale
+    # -- which is the live state that produced "v0.20.4 — v0.20.3 is available".
+    on_latest = sum(1 for n in online_nodes
+                    if n.get("agent_version") == config.AGENT_VERSION
+                    or _version_gt(n.get("agent_version"), config.AGENT_VERSION))
     unknown_ver = sum(1 for n in online_nodes if not n.get("agent_version"))
     version_line = ""
     if online_nodes:
@@ -1908,7 +1945,9 @@ def dashboard():
         if unknown_ver:
             parts.append(f"{unknown_ver} running a build too old to report its version")
         stuck = [n for n in online_nodes
-                 if n.get("auto_update") == 0 and n.get("agent_version") != config.AGENT_VERSION]
+                 if n.get("auto_update") == 0
+                 and n.get("agent_version") != config.AGENT_VERSION
+                 and not _version_gt(n.get("agent_version"), config.AGENT_VERSION)]
         if stuck:
             parts.append(f"{len(stuck)} with auto-update switched off, so they will not move on "
                          f"their own")
@@ -2074,13 +2113,30 @@ def node_dashboard(node_id: str, token: str = None,
                    "(a build older than 0.20.2 does not say)</span>")
     elif av == latest:
         ver_txt = f"v{av} <span style='color:#6b7280'>(current)</span>"
+    elif _version_gt(av, latest):
+        # AHEAD, not behind. This read "v0.20.4 — v0.20.3 is available" on the founder's own
+        # dashboard: the comparison was string equality, so ANY difference rendered as an
+        # upgrade prompt, including a node newer than the network. Telling an operator that an
+        # older build "is available" reads as "you are out of date" and invites a downgrade,
+        # which is precisely what [P30]'s rollback machinery exists to make deliberate.
+        #
+        # The wording deliberately does NOT diagnose which side is stale, because both are
+        # ordinary. Live case: 0.20.3 is the latest PUBLISHED release and the coordinator
+        # advertises it correctly, while the founder's machine runs a locally-built 0.20.4 that
+        # was never released. The other case — a coordinator whose NEURON_AGENT_VERSION pin
+        # went stale behind a shadowed systemd drop-in — is Session 61 and equally real. Naming
+        # either as the fault would be a guess printed as a finding.
+        ver_txt = (f"v{av} <span style='color:#6b7280'>(newer than v{latest}, the release this "
+                   f"network advertises — nothing to do)</span>")
     else:
         ver_txt = (f"v{av} <span style='color:#b45309'>— v{latest} is available</span>")
     bits = [ver_txt]
     if node.get("auto_update") == 0:
         bits.append("<span style='color:#b45309'>auto-update is OFF, so this node will not "
                     "update itself</span>")
-    elif av and av != latest:
+    elif av and av != latest and not _version_gt(av, latest):
+        # Only when it is actually BEHIND. A node ahead of the advertised version will not
+        # "update itself" to anything, so promising it would is just wrong.
         bits.append("nodes check once a day and never mid-request")
     chk, chk_at = node.get("update_check"), node.get("update_checked_at")
     if chk and chk not in ("current",):
