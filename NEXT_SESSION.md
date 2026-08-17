@@ -159,7 +159,7 @@ untouched. 0.20.4's wallet UI lives only on /next while / serves the old
 chat.html, so the feature the release exists for reaches no default user.
 Blocked on 59 source-text assertions in ui/test_chat_ui.py.
 
-Nothing is pushed — seven commits on main-full. Pushing is also what publishes
+Nothing is pushed — nine commits on main-full. Pushing is also what publishes
 the corrected download links to the GitHub Pages site.
 
 Environment gotchas and the rest of the open list are in NEXT_SESSION.md.
