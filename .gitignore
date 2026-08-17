@@ -35,6 +35,14 @@ agent/config.bad.json
 # every local agent config, not just the test ones -- config.driver.json holds this machine's
 # node_token and relay ticket. `agent/config.node-*.json` below did not match config.driver.json.
 agent/config.*.json
+# ...and the BASE name too, which `agent/config.*.json` never matched. It was tracked, holding a
+# null template, on a path that on every real installation holds a live `node_token` -- the one
+# credential for that node's earnings ([P39]: lose the token, lose the money). Two ways that
+# ends badly: an operator commits after their agent has run and publishes their own token to a
+# public repo, and `git checkout` on a node replaces a working config with nulls and detaches it
+# from its balance. `ensure_config()` writes DEFAULT_CONFIG when the file is absent, so a fresh
+# clone still starts cleanly -- nothing needed the template to be committed.
+agent/config.json
 # the atomic _save() keeps the previous config alongside the new one, node_token included
 agent/*.prev
 # holds a wallet private_key. The `*.key` rule further down does NOT match a .json filename,
