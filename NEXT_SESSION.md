@@ -44,28 +44,66 @@ would have flagged the driver on its very next sweep.
 Commits: `6a30df0`, `c9c9e1b` on `main-full`, on top of Session 62's five. **Still nothing
 pushed** — pushing is also what publishes the corrected download links to the GitHub Pages site.
 
+## Then the session kept going, and most of it is now live
+
+**Deployed twice, verified, and the network is healthy.** The verifier was restarted, the
+coordinator deployed (`audit_slots`, `/verifier/heartbeat`, `poc_excused`, `last_poc_at`, then
+`retired_nodes` + the funded-delete guard), and the reconciliation runs **clean with zero
+warnings**: 347.415369 NRN across 329 settled rows, three legs agreeing, replay matching.
+
+**The driver earns again — 38 → 40 passes.** [P49]'s verifier-side fix turned the 28.6 into an
+honest `PLACEMENT MISMATCH`, and restarting the agent made it adopt the coordinator's 0-9. Its
+ack now reads `{"s1": 0, "s2": 10, "holds": [0, 9]}` and its attendance rows carry `poc_ok=1`.
+
+**[P50] filed 🔴 — the restart nearly cost the node.** It came back as `agent-optinovate`, the
+dead Aug-7 identity, because this one PC holds two identities in one config file; the fresh start
+then overwrote `config.json.prev` and destroyed the only on-disk copy of the live token. Recovered
+from `nodes.node_token` on the coordinator. Read that entry before touching an agent config.
+
+**Two nodes retired properly.** `delete_node` now refuses a funded node (409) and leaves a
+tombstone; `agent-bhpc012104-82cbee` (work PC, gone) and the `agent-optinovate` ghost are both
+recorded, which is what cleared the last permanent warning.
+
+**391.441387 NRN swept to `w_d35c84…76a9`.** The Pavilion is at zero; 5.31 NRN remains in node
+accounts, almost all of it this PC's driver — and the driver is earning again, so that grows
+hourly until an owner is bound.
+
+**[P39]: the claim was built and unreachable, now fixed in the repo.** Zero nodes had ever been
+claimed — not because it was broken, but because it rendered only inside the wallet panel, and
+the server's `needs_owner` was `logged_in AND not owned`, so a logged-out operator saw nothing.
+The message explaining why to sign in was gated on being signed in. There is now an `#ownclaim`
+strip above the composer driven by `unclaimed`. **It does not reach the live UI until the app is
+rebuilt** — the agent serves its own packaged copy.
+
+**The `/next` swap would currently be a REGRESSION.** Checked directly: the React app has no
+low-balance strip, no wallet-ID panel, no degraded banner, no token cap and no
+local-vs-network header. The blocker was never the 59 assertions — it is feature parity, and the
+tests were only a proxy for it. Also: the claim panel is on `/` already, so the note saying it
+lives only on `/next` was wrong.
+
 ## Do these first
 
-1. **Restart `verify_service.py`** — it runs from the repo, so this alone picks up the
-   verifier-side `holds` check and turns the driver's failure into an honest *PLACEMENT
-   MISMATCH, not a bad node* line instead of a wrong answer scored against it. Do this first;
-   it is the cheap half and needs nothing else.
-
-   **The `node_server` fix does NOT arrive with a restart.** The live agent is the packaged
-   `neuron-agent.exe` in `%LOCALAPPDATA%\Programs\NEURON` — restarting it re-runs the installed
-   0.20.4 build, not the repo. It needs a rebuild and reinstall (or a release the auto-updater
-   picks up). Same trap as the desktop UI: repo edits are invisible until the build is redone.
-   Until then the verifier-side fix is carrying this on its own, which is exactly why it was
-   written to work against today's agents.
-2. **Then watch `verify_service.log`.** Expect `PLACEMENT MISMATCH` for the driver, not a pass:
-   it really does hold 0-27 while assigned 0-9, and that is the next thing to fix (below). What
-   must NOT appear is `wrong answer (max_err 28.6)`.
-3. **Deploy the coordinator** — `audit_slots`, `/verifier/heartbeat`, `poc_excused`,
-   `last_poc_at` are all schema/endpoint changes and `init_db()` migrates on start. Nothing pays
-   an excused hour until the verifier is actually heartbeating, by construction
-   (`audit_epoch()`), so the deploy order does not matter.
-4. **Re-run the reconciliation** afterwards. It now understands `poc_excused`; without the
-   coordinator deploy it reads an older DB exactly as before.
+1. **Rebuild and reinstall the agent.** It is the one thing everything else is now waiting on,
+   and it carries two separate fixes that cannot arrive any other way, because the live agent is
+   the packaged `neuron-agent.exe` in `%LOCALAPPDATA%\Programs\NEURON` and a restart just re-runs
+   installed 0.20.4:
+     * `node_server`'s probe/last-stage discrimination ([P49]) — currently carried entirely by
+       the verifier-side `holds` check, which was written for exactly this;
+     * the `#ownclaim` strip ([P39]) — until the rebuild, no operator can discover the claim,
+       which is the whole point of tonight's work. **The driver's node balance grows every hour
+       it stays unclaimed.**
+   `PACKAGING.md` is the runbook. Watch [P46]: a partial copy leaves last build's bundle beside
+   this build's `index.html`; run the installer properly rather than hand-copying.
+2. **Then claim this machine's node through the UI** — sign in, and the strip is there. It is
+   the first real use of the path, and it is what proves the new-user story end to end:
+   install, sign in, earnings are yours rather than the machine's. 5.26 NRN and rising is the
+   test case.
+3. **Watch `verify_service.log` after the rebuild.** The driver should pass quietly (a re-check
+   logs at DEBUG). What must NOT appear is `wrong answer (max_err 28.6)` — that would mean the
+   rebuild did not take.
+4. **Re-run the reconciliation** after anything touches the ledger. It is currently clean with
+   ZERO warnings, which is the state that makes [P40] item 2 (running it from cron) worth
+   doing — it will now only speak when something is actually wrong.
    ```
    ssh -i C:\Users\optin\.ssh\oracle_coordinator ubuntu@150.230.22.250 "python3 /tmp/reconcile_emission.py --db /home/ubuntu/neuron/coordinator/neuron.db --seed-from-backup --replay"
    ```
@@ -128,44 +166,42 @@ pushed** — pushing is also what publishes the corrected download links to the 
 ## Prompt for the next window
 
 ```
-Continue NEURON. Read PROBLEMS.md [P49] [P47] [P48] [P39] and sessions.md,
-plus NEXT_SESSION.md — that has the handoff.
+Continue NEURON. Read PROBLEMS.md [P50] [P49] [P47] [P39] [P48] and
+NEXT_SESSION.md — that has the handoff.
 
-STATE: Session 63 restarted the verifier and the driver FAILED, at max_err 28.6
-— the figure [P47] called unexplained. [P49] explains it: the driver holds the
-whole model (0-27) while assigned 0-9, so node_server's is_true_last sent a
-stage-1 probe into the LAST-stage branch and it computed layers[10:] + norm.
-Its ack said "holds": [0, 27] the whole time and challenge_middle_node ignored
-it — [P37] verbatim, one function over. Fixed both sides. Serving was never
-affected; only verification was, which is why it stayed invisible.
+STATE: most of Session 63 is deployed and live. The coordinator carries
+audit_slots, /verifier/heartbeat, poc_excused, last_poc_at, retired_nodes and
+the funded-delete guard. The reconciliation runs CLEAN with zero warnings
+(347.415369 NRN, 329 rows, replay matching). The driver passes challenges again
+(38 -> 40) after [P49] and an agent restart. 391.441387 NRN was swept to
+w_d35c84...76a9; 5.31 NRN remains in node accounts and grows hourly.
 
-[P47] causes 2 and 3 are fixed: emission now pays for PROVEN work rather than
-OBSERVED work, because verify_service.log shows the verifier was not running
-for 53% of its own history and 57 of the Pavilion's 64 unpaid hours are hours
-nobody could have been challenged in. STAGE1_FAILURES_ARE_SCORED stays False —
-the evidence arrived and pointed the other way.
+FIRST: rebuild and reinstall the agent. Everything now waits on it — the live
+agent is the packaged neuron-agent.exe, so a restart re-runs installed 0.20.4.
+It carries two fixes that cannot arrive any other way: node_server's probe vs
+last-stage discrimination ([P49], currently carried by the verifier-side holds
+check alone), and the #ownclaim strip ([P39]). Then sign in and claim this
+machine's node through the UI — that is the first real use of the path and the
+proof of the new-user story.
 
-FIRST: restart verify_service.py (it runs from the repo, so it picks up the
-holds check on its own — the node_server fix needs a REBUILD, since the live
-agent is the packaged neuron-agent.exe), then deploy the coordinator —
-audit_slots, /verifier/heartbeat, poc_excused and last_poc_at are schema and
-endpoint changes, and init_db() migrates on start. Nothing pays an excused hour
-until the verifier is heartbeating, by construction, so deploy order is free.
-Then watch for PLACEMENT MISMATCH on the driver rather than a wrong answer.
+WATCH OUT — [P50], read it before touching an agent config. This one PC holds
+two node identities in one config file. Restarting the agent brought back the
+dead one, and the fresh start overwrote config.json.prev, destroying the only
+on-disk copy of the live token. It was recovered from nodes.node_token on the
+coordinator.
 
-THEN — [P49]'s cause rather than its symptom: the driver registers as 0-9 and
-serves 0-27, and placement_drift cannot see it because it compares against what
-the node CLAIMED at registration, not what it holds. Decide what the
-coordinator should do with `holds` besides refuse — [P32]'s ownership inversion
-says not "believe it", so the question is what it may legitimately raise.
+THEN: [P49]'s cause. The driver was registering 0-27 while assigned 0-9 because
+auto-repair moves a range and never tells the node ([P37]'s open item). The
+restart fixed today; the handshake is the real repair.
 
-ALSO OPEN: the /next -> / swap is still a SHIPPING blocker ([P48] item 3),
-untouched. 0.20.4's wallet UI lives only on /next while / serves the old
-chat.html, so the feature the release exists for reaches no default user.
-Blocked on 59 source-text assertions in ui/test_chat_ui.py.
+DO NOT assume the /next swap is a tidy-up OR that it is close. Checked
+directly: the React app has no low-balance strip, no wallet-ID panel, no
+degraded banner, no token cap and no local-vs-network header, so swapping today
+REGRESSES every user. The blocker is feature parity, not the 59 assertions. The
+claim panel is already on /, so the note saying otherwise was wrong.
 
-Nothing is pushed — nine commits on main-full. Pushing is also what publishes
-the corrected download links to the GitHub Pages site.
+Nothing is pushed — 18 commits on main-full. Pushing also publishes the
+corrected download links to the GitHub Pages site.
 
 Environment gotchas and the rest of the open list are in NEXT_SESSION.md.
 ```
