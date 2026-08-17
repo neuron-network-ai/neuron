@@ -15,7 +15,34 @@
 set -euo pipefail
 
 HOST="${NEURON_DEPLOY_HOST:-ubuntu@150.230.22.250}"
-KEY="${NEURON_DEPLOY_KEY:-$HOME/.ssh/oracle_coordinator}"
+
+# WHERE THE KEY ACTUALLY IS, which is not always "$HOME/.ssh".
+#
+# This script is normally run from Git Bash on the founder's Windows box, and Git Bash sets
+# $HOME to a POSIX-looking path (`/home/user1`) that frequently does not exist on the machine.
+# The real profile is %USERPROFILE%. The failure that produced this: `Identity file
+# /home/user1/.ssh/oracle_coordinator not accessible` followed by `Permission denied
+# (publickey)` — two messages that read like a key problem when the key was fine and the path
+# was invented. Worse, it happens AFTER the dry run passes, because --dry-run never opens an
+# ssh connection, so the rehearsal cannot catch it.
+_key_default="$HOME/.ssh/oracle_coordinator"
+if [ ! -f "$_key_default" ] && [ -n "${USERPROFILE:-}" ]; then
+  _win_home="$(cygpath -u "$USERPROFILE" 2>/dev/null || true)"
+  if [ -n "$_win_home" ] && [ -f "$_win_home/.ssh/oracle_coordinator" ]; then
+    _key_default="$_win_home/.ssh/oracle_coordinator"
+  fi
+fi
+KEY="${NEURON_DEPLOY_KEY:-$_key_default}"
+if [ ! -f "$KEY" ]; then
+  # Said here rather than letting ssh say it, because ssh's version of this is "Permission
+  # denied (publickey)" — which sends you looking at the VM's authorized_keys for a fault that
+  # is entirely on this side.
+  printf '\n\033[1m== deploy key not found\033[0m\n' >&2
+  echo "   looked for: $KEY" >&2
+  echo "   set NEURON_DEPLOY_KEY to its real path, e.g." >&2
+  echo "     NEURON_DEPLOY_KEY=/c/Users/<you>/.ssh/oracle_coordinator $0" >&2
+  exit 1
+fi
 REMOTE="${NEURON_DEPLOY_DIR:-/home/ubuntu/neuron}"
 SERVICE="neuron-coordinator"
 PUBLIC_URL="${NEURON_PUBLIC_URL:-http://150.230.22.250:8001}"
