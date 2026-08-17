@@ -25,22 +25,56 @@ HOST="${NEURON_DEPLOY_HOST:-ubuntu@150.230.22.250}"
 # (publickey)` — two messages that read like a key problem when the key was fine and the path
 # was invented. Worse, it happens AFTER the dry run passes, because --dry-run never opens an
 # ssh connection, so the rehearsal cannot catch it.
-_key_default="$HOME/.ssh/oracle_coordinator"
-if [ ! -f "$_key_default" ] && [ -n "${USERPROFILE:-}" ]; then
-  _win_home="$(cygpath -u "$USERPROFILE" 2>/dev/null || true)"
-  if [ -n "$_win_home" ] && [ -f "$_win_home/.ssh/oracle_coordinator" ]; then
-    _key_default="$_win_home/.ssh/oracle_coordinator"
-  fi
+#
+# There are THREE different bashes this can run under on one Windows machine and they disagree
+# about every path involved:
+#   Git Bash   $HOME=/c/Users/<you>        Windows drives at /c/...      has cygpath
+#   WSL        $HOME=/home/<linuxuser>     Windows drives at /mnt/c/...  no cygpath, and
+#                                          %USERPROFILE% is not inherited
+#   MSYS/other anything
+# `bash foo.sh` from cmd.exe picks whichever is first on PATH, which on Windows 11 with WSL
+# installed is usually WSL — so the key sits at /mnt/c/Users/<you>/.ssh and $HOME points at a
+# Linux home that has never seen it. So: look in all of them rather than assume one.
+_key_name="oracle_coordinator"
+_candidates=("$HOME/.ssh/$_key_name")
+if [ -n "${USERPROFILE:-}" ]; then
+  _u="$(cygpath -u "$USERPROFILE" 2>/dev/null || true)"                    # Git Bash
+  [ -n "$_u" ] && _candidates+=("$_u/.ssh/$_key_name")
+  # No cygpath (WSL): translate C:\Users\you -> /c/Users/you and /mnt/c/Users/you by hand.
+  _p="${USERPROFILE//\\//}"                                                # backslash -> slash
+  _drive="$(printf '%s' "${_p%%:*}" | tr 'A-Z' 'a-z')"; _rest="${_p#*:}"
+  _candidates+=("/$_drive$_rest/.ssh/$_key_name" "/mnt/$_drive$_rest/.ssh/$_key_name")
 fi
+# Last resort: whatever profile actually holds a key, under either mount layout.
+#
+# Drive letters are iterated EXPLICITLY rather than globbed. `/[a-z]/Users/...` looks like it
+# would work and does not: in Git Bash `/c` is a virtual mount, the root directory does not
+# enumerate it, so the pattern never expands and the whole fallback is silently dead. It is
+# only the leaf `*` (a real directory listing) that can be globbed.
+for _d in c d e; do
+  for _root in "/$_d" "/mnt/$_d"; do
+    [ -d "$_root/Users" ] || continue
+    for _g in "$_root"/Users/*/.ssh/"$_key_name"; do
+      [ -f "$_g" ] && _candidates+=("$_g")
+    done
+  done
+done
+_key_default="$HOME/.ssh/$_key_name"
+for _c in "${_candidates[@]}"; do
+  if [ -f "$_c" ]; then _key_default="$_c"; break; fi
+done
 KEY="${NEURON_DEPLOY_KEY:-$_key_default}"
 if [ ! -f "$KEY" ]; then
   # Said here rather than letting ssh say it, because ssh's version of this is "Permission
   # denied (publickey)" — which sends you looking at the VM's authorized_keys for a fault that
   # is entirely on this side.
   printf '\n\033[1m== deploy key not found\033[0m\n' >&2
-  echo "   looked for: $KEY" >&2
+  echo "   this shell is: $(uname -s), HOME=$HOME" >&2
+  echo "   looked in:" >&2
+  for _c in "${_candidates[@]}"; do echo "     $_c" >&2; done
   echo "   set NEURON_DEPLOY_KEY to its real path, e.g." >&2
-  echo "     NEURON_DEPLOY_KEY=/c/Users/<you>/.ssh/oracle_coordinator $0" >&2
+  echo "     NEURON_DEPLOY_KEY=/mnt/c/Users/<you>/.ssh/oracle_coordinator $0   # WSL" >&2
+  echo "     NEURON_DEPLOY_KEY=/c/Users/<you>/.ssh/oracle_coordinator $0       # Git Bash" >&2
   exit 1
 fi
 REMOTE="${NEURON_DEPLOY_DIR:-/home/ubuntu/neuron}"
