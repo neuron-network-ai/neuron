@@ -2176,7 +2176,45 @@ The original entry follows.
   dedicated "quality-preserving quantization" session (candidate: alongside/after S14),
   NOT a rushed integration now. No real users yet (per ROADMAP's One Rule).
 
-### [P10] 🔴 No stranger can actually join yet — everything assumes ONE Tailscale net (BLOCKS S12)
+### [P10] 🟢 No stranger can actually join yet — everything assumes ONE Tailscale net — RESOLVED, confirmed live (2026-08-17)
+
+**As written, this is now false: a stranger CAN join. None has.** Those are different
+statements, and keeping the first one on the board because the second is true is what left this
+marked 🔴 — and marked **BLOCKS S12** — long after the work landed. Same stale-diagnostic
+failure as [P32], on the entry that gates the roadmap.
+
+Every claim re-checked on 2026-08-17, against the running system rather than the history below:
+
+  * **Sub-problem 1, public coordinator.** `https://neuronnet.duckdns.org/status` returns 200
+    over the open internet, from a machine on no tailnet. No Tailscale anywhere in the path.
+  * **Sub-problem 2, node↔node across NAT.** The relay is not merely built, it is the DEFAULT:
+    `use_relay()` returns `bool(self.cfg.get("behind_nat", True))`. Both live nodes came up on
+    relay endpoints today — `150.230.22.250:9003` (Pavilion) and `:9004` (Windows PC) — logged
+    as *"relay tunnel started — reachable via … (NAT-friendly)"*. Peers are handed a publicly
+    routable address, which is the whole of what this entry demanded.
+  * **Open join.** Registration needs no shared secret; a secret-less node joins probationary
+    and is promoted by proof-of-compute. `coordinator/test_open_join.py` 26/26.
+  * **The two bugs that would have killed the first stranger on their first command.**
+    `agent/__init__.py` exists; the probe role's slice bound is `self.hi + 1`.
+  * **[P12], `/complete` auth**, listed here as outstanding: `complete_token` is issued by
+    `/infer` and required to settle.
+
+And the thing the entry called *"what's genuinely left"* — an outside person installing a
+package — now exists: **NEURON-Setup-0.20.3.exe** is a public GitHub release, the coordinator
+advertises it with a verified SHA-256, and `STRANGER_INSTALL.md` is the guide.
+
+**So what remains is not engineering.** Nobody outside this project has run the installer. That
+is an adoption fact, and it belongs to `GROWTH_PLAN.md` and the scout, not to a problems log —
+holding it here made an architectural blocker out of a marketing one, and stopped S12 reading as
+unblocked when it was.
+
+**Genuinely open, and neither blocks a first stranger:** every relayed hop costs an extra
+round trip through Amsterdam, and beyond roughly 100 relayed nodes the single relay is the
+bottleneck (`SCALING.md`). Both are volume problems, and this network has two nodes.
+
+The history that got here follows.
+
+### [P10-orig] 🔴 The problem as first found (2026-07-22)
 - **Symptom:** the coordinator is Tailscale-only (`100.114.189.46:8001`, ufw scoped to
   `tailscale0`) and nodes reach each other over Tailscale IPs (`register_nodes` stores
   `tailscale_ip`; node_a dials node_c's IP; node_c dials node_b's). A stranger is **not**
