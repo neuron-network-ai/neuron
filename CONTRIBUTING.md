@@ -15,12 +15,22 @@ python -m coordinator.test_open_join
 Run all of them, and **judge by exit code, not by the last printed line**:
 
 ```bash
-for t in coordinator/test_*.py agent/test_*.py; do
+for t in coordinator/test_*.py agent/test_*.py ui/test_*.py test_*.py \
+         api/test_*.py security/test_*.py safety/test_*.py engine/test_*.py \
+         rag/test_*.py tools/test_*.py blockchain/test_*.py; do
+  [ -e "$t" ] || continue
   m=$(echo "${t%.py}" | tr '/' '.')
   python -m "$m" >/dev/null 2>&1 && echo "ok   $m" || echo "FAIL $m"
 done
 python packaging/test_app_entry.py >/dev/null 2>&1 && echo "ok   packaging" || echo "FAIL packaging"
 ```
+
+**Run all of them, not the ones near your change.** This loop used to cover `coordinator/` and
+`agent/` only — 68 of the 100 suites — so following it and seeing green meant a third of the repo
+had not been run at all. On 2026-08-18 a full sweep found two regressions from the night before,
+and neither was in a directory the change had touched: a stubbed `plan_slot` lambda that broke
+when the real function gained an argument, and a routing test deleting nodes that `delete_node`
+had just started refusing. Both would have shipped.
 
 That warning is not decorative. A suite raises on the first bad assert and prints no summary,
 so its output *ends* with `PASS` lines from the cases that already ran. Four suites stayed red
