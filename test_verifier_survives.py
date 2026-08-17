@@ -232,6 +232,101 @@ def main():
     finally:
         ka.verifier_processes, ka.oldest_process_age_s = real_procs, real_age
 
+    print("\n-- stage 1 is challenged, and a pass is what unlocks its emission")
+    # Until 2026-08-17 the verifier skipped every node with layer_start == 0, on the stated
+    # grounds that the middle probe "computes layers without the embedding a first-stage node
+    # applies". node_server's probe role does not embed either -- it runs
+    # common.mid_stage(model, self.lo, self.hi + 1, hidden), exactly what make_middle_challenge
+    # computes -- and measured against a real NodeServer on the real 0-9 slice it answers with
+    # max_err 0. The skip's real cost was economic: emission pays only on a passing challenge
+    # (models.mark_slot_poc), so the driver could never earn an availability hour. [P47].
+    def _stub(v, passed, max_err=0.0):
+        v.challenge = lambda node, total: {"passed": passed, "max_err": max_err, "ms": 5}
+
+    def _run_sweep(v, node, get, clear=True):
+        real = requests.get
+        try:
+            requests.get = get
+            if clear:
+                cap.clear()
+            v.sweep()
+        finally:
+            requests.get = real
+
+    posted = []
+    real_post = requests.post
+    stage1 = {"nodes": [{"node_id": "driver-x", "standing": "verified", "status": "online",
+                         "tailscale_ip": "10.0.0.1", "port": 50999,
+                         "layer_start": 0, "layer_end": 9}]}
+
+    def fake_post(url, **kw):
+        posted.append((url, kw.get("json")))
+        return FakeResponse({"node_id": "driver-x", "passed": kw["json"]["passed"],
+                             "reputation": "3/3", "flagged": False, "standing": "verified",
+                             "eligible": True, "challenges_passed": 3, "challenges_failed": 0})
+
+    try:
+        requests.post = fake_post
+        v2 = verify_service.Verifier("http://coordinator.test", "secret", interval=1)
+        _stub(v2, True)
+        _run_sweep(v2, stage1, lambda url, **kw: FakeResponse(stage1))
+        check("a stage-1 node is challenged rather than skipped", len(posted) == 1, str(posted))
+        check("...and its PASS is recorded, which is what pays it",
+              posted and posted[0][1]["passed"] is True, str(posted))
+        check("...announced once, not every cycle",
+              len([m for m in cap.at(logging.INFO) if "stage 1" in m]) == 1,
+              str(cap.at(logging.INFO)))
+
+        print("\n-- a stage-1 FAILURE is logged and never recorded")
+        # Asymmetric on purpose. A pass proves the node computes its range correctly; a failure
+        # would flag the one machine holding stage 1, and a flagged driver is not a degraded
+        # network, it is no network at all. The 28.6 of 2026-08-11 was never explained.
+        posted.clear()
+        v3 = verify_service.Verifier("http://coordinator.test", "secret", interval=1)
+        _stub(v3, False, 28.6)
+        # Collected across all sweeps, not just the last: the unscored branch resets the strike
+        # counter, so the ERROR lands on the FAIL_STRIKES-th sweep and the one after it is back
+        # to "strike 1 of 3". That cycling is intentional -- it keeps the log to one line per
+        # three cycles instead of one per cycle.
+        cap.clear()
+        for _ in range(verify_service.FAIL_STRIKES + 1):
+            _run_sweep(v3, stage1, lambda url, **kw: FakeResponse(stage1), clear=False)
+        check("no failure is attested against the driver", posted == [], str(posted))
+        errs = cap.at(logging.ERROR)
+        check("...but it is said loudly", any("NOTHING RECORDED" in m for m in errs), str(errs))
+        check("...naming the driver as the reason",
+              any("stage-1" in m and "network down" in m for m in errs), str(errs))
+        check("the flag stays off by config, so tightening it is one line",
+              verify_service.STAGE1_FAILURES_ARE_SCORED is False)
+
+        print("\n-- every other node still gets scored exactly as before")
+        posted.clear()
+        middle = {"nodes": [{"node_id": "mid-y", "standing": "verified", "status": "online",
+                             "tailscale_ip": "10.0.0.2", "port": 50999,
+                             "layer_start": 10, "layer_end": 18}]}
+        v4 = verify_service.Verifier("http://coordinator.test", "secret", interval=1)
+        _stub(v4, False, 33.79)
+        for _ in range(verify_service.FAIL_STRIKES + 1):
+            _run_sweep(v4, middle, lambda url, **kw: FakeResponse(middle))
+        check("a middle node's failure IS recorded",
+              any(p[1]["passed"] is False for p in posted), str(posted))
+
+        print("\n-- a node holding the whole model is the last stage, not stage 1")
+        # layer_end == total - 1 makes it the last stage, which has always been challengeable.
+        # It reached this branch during [P37]'s collapse, when one machine held all 28 layers.
+        posted.clear()
+        whole = {"nodes": [{"node_id": "solo-z", "standing": "verified", "status": "online",
+                            "tailscale_ip": "10.0.0.3", "port": 50999,
+                            "layer_start": 0, "layer_end": 27}]}
+        v5 = verify_service.Verifier("http://coordinator.test", "secret", interval=1)
+        _stub(v5, False, 12.0)
+        for _ in range(verify_service.FAIL_STRIKES + 1):
+            _run_sweep(v5, whole, lambda url, **kw: FakeResponse(whole))
+        check("its failure is recorded like any last-stage node",
+              any(p[1]["passed"] is False for p in posted), str(posted))
+    finally:
+        requests.post = real_post
+
     print("\n-- the doctor calls a stale verifier log dead")
     import neuron_doctor
     rep = neuron_doctor.Report()

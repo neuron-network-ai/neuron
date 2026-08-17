@@ -5887,6 +5887,40 @@ first time would not fix the driver either.
 None of this was visible until the zeros were counted per node and dated. The reconciliation was
 built to check arithmetic and found a product bug instead.
 
+### The skip was guarding a hypothesis, and the hypothesis was false
+
+The obvious fix was to build a stage-1 challenge. Before writing one, I read what the existing
+probe actually does — and `node_server`'s probe role does not embed either. It runs
+`common.mid_stage(model, self.lo, self.hi + 1, hidden)`, which is exactly what
+`make_middle_challenge` computes. The two ARE the same function.
+
+There are weights and a 0-9 slice on this machine, so that is testable rather than arguable.
+Real `NodeServer`, real slice, real challenge over a socket: **max_err 0**. Not inside the 0.05
+tolerance — zero.
+
+The old comment had labelled its own reasoning a hypothesis and refused to score a machine on a
+guess, which was the right instinct. What made it expensive is that nobody connected it to
+emission: no challenge means no `mark_slot_poc` means no availability hour, ever.
+
+Second experiment before touching anything, because the skip was also standing in for a real
+danger: a node challenged on a range it does not hold now raises `RangeMismatch` — refused,
+recorded in neither direction — instead of returning the wrong-looking answer that flagged
+three honest machines in [P37]. That is what makes removing the skip safe.
+
+So stage 1 is challenged now and its failures are still unscored
+(`STAGE1_FAILURES_ARE_SCORED = False`), the same asymmetry `drifted` already uses: a pass is
+evidence and pays the driver, a failure would flag the one machine holding stage 1. `unscored =
+drifted or (is_stage1 and not …)` widens the existing meaning rather than adding a second
+mechanism to keep in step with it.
+
+The 28.6 of 2026-08-11 is still unexplained, and [P47] says so instead of claiming the credit.
+The best account is that the driver ran a pre-0.20 agent whose ack omitted `s1`, so a range
+disagreement slipped into `verify()` unnoticed; both live nodes now send `s1` and `holds`. A
+good explanation, not a proven one — which is exactly why the failures stay unscored.
+
+`test_stage1_challenge.py` is 6 end-to-end checks and skips cleanly where there are no weights.
+`test_verifier_survives.py` is 36.
+
 Also caught while adding it: `d.setdefault(k, {})[c] = d[k].get(c, 0) + 1` evaluates its
 right-hand side first, so the lookup runs before the key exists. Python's assignment order,
 and it only shows on the first row for each node.

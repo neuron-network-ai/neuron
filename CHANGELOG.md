@@ -8,7 +8,17 @@ This project is early alpha. NRN has no cash value, and the network is a handful
 
 ## Unreleased
 
-Coordinator-side only — nothing here changes the agent, so no installer version is needed.
+Coordinator- and verifier-side only — nothing here changes the agent, so no installer version
+is needed. **The verifier must be restarted for the stage-1 change to take effect.**
+
+- **The driver is verified, and therefore paid** ([P47]). `verify_service` skipped every node
+  with `layer_start == 0`, believing the middle probe could not validate one because a
+  first-stage node embeds token ids first. It does not: `node_server`'s probe role runs
+  `mid_stage` on the hidden state it is given, exactly what the challenge computes. Measured
+  end to end against a real NodeServer on a real slice — max_err 0. Because emission pays only
+  on a passing challenge, that skip had silently made the driver unable to earn an availability
+  hour for its entire existence: ~243 NRN on the live network. Its failures are still not
+  scored, since flagging the machine holding stage 1 would take the network down.
 
 - **The emission ledger can now be checked against its own attendance rows** —
   `coordinator/reconcile_emission.py` ([P40]). 262.89 NRN has been distributed and nothing had

@@ -48,6 +48,46 @@ FAIL_STRIKES = 3
 # reputation while breaking every request it touched (live 2026-08-10, [P33]).
 UNREACHABLE_STRIKES = 5
 
+# Whether a FAILED challenge against the stage-1 node counts against its reputation.
+#
+# Stage-1 nodes were skipped entirely until 2026-08-17, on the stated grounds that the middle
+# probe "computes layers without the embedding a first-stage node applies". That was flagged in
+# the code as a hypothesis, and it is wrong: `node_server`'s probe role never embeds either --
+# it runs `common.mid_stage(model, self.lo, self.hi + 1, hidden)`, which is exactly what
+# `make_middle_challenge` computes. Measured end to end against a real NodeServer on the real
+# 0-9 slice: max_err 0. Exactly zero, not merely inside atol.
+#
+# The skip's cost was not a gap in reputation. Emission pays only on a passing challenge
+# (`models.mark_slot_poc`), so a node that is never challenged can never earn an availability
+# hour -- and the driver is the machine [P43] shows carries the largest fixed cost on the
+# network. 81 unearnable hours on `agent-optinovate-6ff49d`, ~243 NRN, found by [P40]'s
+# reconciliation.
+#
+# So stage-1 nodes are challenged now. Their FAILURES are still not scored, and the asymmetry is
+# deliberate -- the same shape `drifted` already uses, for a sharper reason. A pass is real
+# evidence: it proves the node computes its own range correctly, and recording it is what makes
+# the driver payable. A failure would flag the one machine holding stage 1, and a flagged driver
+# is not a degraded network, it is no network at all. This path has never run against a live
+# driver, and an unproven check must not be able to take the network down on its first day.
+# Flip this to True once the live driver has been seen passing -- one deliberate line, with
+# evidence, which is what the original skip was written to insist on.
+#
+# The history the old comment carried, kept because it is the reason for the caution above.
+# The stage-1 path had NEVER EXECUTED: a whole-tuple ack comparison raised PLACEMENT MISMATCH
+# first, every sweep, and hid it -- the driver acked `s2` and omitted `s1`, so `(None, 10) !=
+# (0, 10)`. Fixing that comparison on 2026-08-11 pointed a never-run check at the driver, which
+# came back `max_err 28.6, strike 1 of 3`, and the skip was added rather than risk three of
+# those flagging it. 28.6 was read as "the right answer to a different question" and explicitly
+# labelled a hypothesis. It is still a hypothesis: what is now measured is only that TODAY's
+# node_server, on a correct slice, answers the probe exactly, and that a node challenged on a
+# range it does not hold raises RangeMismatch (refused, nothing recorded) rather than returning
+# a wrong-looking answer -- both checked end to end, 2026-08-17. The 2026-08-11 driver was
+# running a pre-0.20 agent whose ack omitted `s1`, so a range disagreement could pass unnoticed
+# into `verify()`; both live nodes now report `s1` and `holds`. That is a good explanation, not
+# a proven one, which is exactly why failures stay unscored until the live driver is seen to
+# pass.
+STAGE1_FAILURES_ARE_SCORED = False
+
 # Reading the roster is retried WITHIN a cycle. A home connection produces 502s and DNS
 # failures routinely — the last three lines this service ever logged were one 502 and two
 # "Failed to resolve neuronnet.duckdns.org" ([P24]) — and one bad read used to cost a whole
@@ -285,33 +325,21 @@ class Verifier:
             # their standing and the network its routability.
             drifted = bool(n.get("placement_drift"))
 
-            # THE MIDDLE PROBE IS NOT A VALID CHALLENGE FOR STAGE 1, AND SILENCE ABOUT THAT IS
-            # WORSE THAN THE GAP. `make_middle_challenge` computes layers[s1:s2] on a raw hidden
-            # state -- no embedding. A first-stage node normally embeds token ids first, so the
-            # two are not computing the same function and the node answers "wrong" every time.
-            #
-            # This path had NEVER EXECUTED against a stage-1 node: a whole-tuple ack comparison
-            # raised PLACEMENT MISMATCH first, every sweep, and hid it. Fixing that comparison on
-            # 2026-08-11 pointed a never-run check at `agent-optinovate-6ff49d` -- the driver --
-            # which came back `max_err 28.6, strike 1 of 3`. Three of those would have attested a
-            # failure against the one machine that holds stage 1, and a flagged driver is not a
-            # degraded network, it is no network at all.
-            #
-            # 28.6 has [P37]'s signature (deterministic, and the right answer to a different
-            # question) but that is a HYPOTHESIS, and a guess is not grounds for scoring somebody
-            # else's machine. Until a stage-1 challenge is built and proven, this node is not
-            # challenged and is SAID to be unchallenged -- the opposite of [P31], where an
-            # unexecuted capability was documented as working.
-            if int(n["layer_start"]) == 0 and int(n["layer_end"]) != total - 1:
-                self.last_checked[nid] = time.time()
-                if nid not in self.unchallengeable:
-                    self.unchallengeable.add(nid)
-                    log.warning("%s (stage 1, layers %d-%d) is NOT BEING VERIFIED: the middle "
-                                "probe computes layers without the embedding a first-stage node "
-                                "applies, so it cannot pass. Nothing is recorded either way. "
-                                "Proof-of-compute does not currently cover the driver.",
-                                nid, int(n["layer_start"]), int(n["layer_end"]))
-                continue
+            # STAGE 1 IS CHALLENGED, AND ITS FAILURES ARE NOT SCORED. See
+            # STAGE1_FAILURES_ARE_SCORED above for the measurement that retired the old skip and
+            # for why the asymmetry is the right side to err on. `unscored` widens `drifted`'s
+            # existing meaning -- "a bad answer from this node is not evidence about this node"
+            # -- rather than adding a second parallel mechanism to keep in step with it.
+            is_stage1 = int(n["layer_start"]) == 0 and int(n["layer_end"]) != total - 1
+            if is_stage1 and nid not in self.unchallengeable:
+                self.unchallengeable.add(nid)
+                log.info("%s (stage 1, layers %d-%d) is being challenged with the middle probe. "
+                         "A pass is recorded and unlocks its availability emission; a failure "
+                         "is logged and NOT recorded, because flagging the driver would take "
+                         "the network down and this path has not yet run against a live one.",
+                         nid, int(n["layer_start"]), int(n["layer_end"]))
+            # From here on the two reasons a failure means nothing are handled as one.
+            unscored = drifted or (is_stage1 and not STAGE1_FAILURES_ARE_SCORED)
 
             try:
                 res = self.challenge(n, total)
@@ -367,16 +395,18 @@ class Verifier:
                                 UNREACHABLE_STRIKES)
                     continue
                 self.unreachable_strikes[nid] = 0
-                if drifted:
+                if unscored:
                     # The hang-up IS the drift, arriving as an exception instead of a typed
                     # RangeMismatch. Recording it would put our stale range in the node's file.
                     self.last_checked[nid] = time.time()
+                    why = ("placement_drift is set, so this is the coordinator's range "
+                           "disagreeing with the node's slice, not a bad machine. Fix placement "
+                           "(./coordinator/pin_layers.sh --driver)" if drifted else
+                           "this is the stage-1 node and its failures are not scored yet "
+                           "(STAGE1_FAILURES_ARE_SCORED) — a flagged driver is no network at all")
                     log.error("%s: could not answer in %d consecutive cycles (%s) — NOTHING "
-                              "RECORDED: placement_drift is set, so this is the coordinator's "
-                              "range disagreeing with the node's slice, not a bad machine. Fix "
-                              "placement (./coordinator/pin_layers.sh --driver) — until then no "
-                              "challenge against this node can mean anything.",
-                              nid, u, e.__class__.__name__)
+                              "RECORDED: %s — until then no challenge against this node can "
+                              "mean anything.", nid, u, e.__class__.__name__, why)
                     continue
                 log.error("%s: could not complete a challenge in %d consecutive cycles (%s) — "
                           "recording a failure. A node that cannot answer cannot serve.",
@@ -429,17 +459,25 @@ class Verifier:
                     log.warning("%s: wrong answer (max_err %.4g), strike %d of %d — not "
                                 "recorded yet", nid, res["max_err"], s, FAIL_STRIKES)
                     continue
-                if drifted:
+                if unscored:
                     # Pavilion's `max_err 33.79` was deterministic across attempts and across
                     # verifier restarts, because it was the right answer to a different question:
                     # it computed 10-18 with no final norm while the verifier compared against
                     # 10-27 + norm ([P37]). A wrong answer under drift is the expected result of
                     # asking the wrong question, so it is not evidence either.
+                    #
+                    # A stage-1 wrong answer is unscored for a different reason: the 28.6 of
+                    # 2026-08-11 was never explained, only hypothesised about, and the machine
+                    # it would flag is the one holding stage 1.
                     self.strikes[nid] = 0
-                    log.error("%s: wrong answer (max_err %.4g) — NOTHING RECORDED: "
-                              "placement_drift is set, so the node is being asked about layers "
-                              "the coordinator only believes it holds. Fix placement first.",
-                              nid, res["max_err"])
+                    why = ("placement_drift is set, so the node is being asked about layers the "
+                           "coordinator only believes it holds. Fix placement first."
+                           if drifted else
+                           "this is the stage-1 node. A wrong answer here is worth "
+                           "INVESTIGATING (it is the 28.6 of 2026-08-11 recurring) but not "
+                           "scoring — flagging the driver would take the whole network down.")
+                    log.error("%s: wrong answer (max_err %.4g) — NOTHING RECORDED: %s",
+                              nid, res["max_err"], why)
                     continue
                 try:
                     self.attest(nid, False, res["max_err"])

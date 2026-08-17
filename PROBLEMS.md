@@ -124,7 +124,46 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
 
 ## Problems & risks
 
-### [P47] 🔴 The driver cannot earn availability emission at all, and "we did not check" is paid exactly like "it failed" (2026-08-17)
+### [P47] 🟡 The driver could not earn availability emission at all — cause 1 fixed, and the skip rested on a hypothesis that was false (2026-08-17)
+
+**Fixed: the driver is challenged now, so it can earn.** The skip's premise was measured and it
+does not hold. `verify_service` claimed the middle probe "computes layers without the embedding
+a first-stage node applies" — but `node_server`'s probe role does not embed either. It runs
+`common.mid_stage(model, self.lo, self.hi + 1, hidden)`, which is exactly what
+`make_middle_challenge` computes. End to end against a real `NodeServer` on the real 0-9 slice:
+**max_err 0**. Not inside tolerance — zero.
+
+The code had labelled its own reasoning a hypothesis and refused to act on a guess, which was
+right. What made the guess costly was that nobody joined it to emission: a node that is never
+challenged never gets `mark_slot_poc`, so the skip silently made the driver unpayable, and it
+took [P40]'s reconciliation to notice.
+
+**Failures stay unscored, deliberately** (`STAGE1_FAILURES_ARE_SCORED = False`). A pass is real
+evidence and recording it is what pays the driver; a failure would flag the one machine holding
+stage 1, and a flagged driver is not a degraded network, it is no network at all. Same
+asymmetry `drifted` already uses, and `unscored = drifted or (is_stage1 and not …)` widens that
+existing meaning rather than running a second mechanism alongside it. Flip the flag once the
+live driver has been seen passing — one deliberate line, with evidence.
+
+**The 2026-08-11 `max_err 28.6` is still unexplained**, and the entry says so rather than
+claiming the credit. What is now measured is that today's `node_server` on a correct slice
+answers exactly, and that a node challenged on a range it does not hold raises `RangeMismatch`
+— refused, recorded in neither direction — instead of returning a wrong-looking answer. That
+second property is what makes removing the skip safe, and it is why an unexplained failure can
+no longer flag anyone. The 2026-08-11 driver ran a pre-0.20 agent whose ack omitted `s1`, so a
+range disagreement could pass unnoticed into `verify()`; both live nodes now send `s1` and
+`holds`. A good explanation, not a proven one.
+
+`test_stage1_challenge.py`: 6 checks, end to end, skipping cleanly where there are no weights.
+`test_verifier_survives.py`: 36.
+
+**Still open — causes 2 and 3 below are untouched**, and the driver's 81 lost hours are not
+recoverable. Verify on the live network by watching `poc_ok` for the driver in the next
+reconciliation run.
+
+The original filing follows.
+
+### [P47-orig] 🔴 As first found (2026-08-17)
 
 **Measured, not suspected.** `reconcile_emission.py` on the live ledger: **199 of 318 settled
 node-hours (63%) paid nothing**, 168 of them for want of a proof-of-compute challenge inside
