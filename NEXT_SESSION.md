@@ -103,8 +103,8 @@ STATE: [P40] is closed — emission reconciles on the live ledger (333.41 NRN,
 three legs agreeing, all 318 settled rows re-pricing correctly). [P47] cause 1
 is fixed but NOT YET DEPLOYED: the verifier now challenges stage-1 nodes, which
 is what lets the driver earn availability emission at all, and it does nothing
-until verify_service is restarted. Two commits on main-full, unpushed:
-a8cb3ba, 386b9db.
+until verify_service is restarted. [P48] is filed — two of its three fixed.
+Five commits on main-full, none pushed: a8cb3ba 386b9db 7c5aa4b ef9c9ae c3389cc.
 
 FIRST: restart the verifier, let one slot close, then re-run the reconciliation
 and check whether agent-optinovate-6ff49d has stopped accruing
