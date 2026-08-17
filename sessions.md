@@ -5691,6 +5691,46 @@ large part of why it had never been clicked, and a dev-only mock middleware now 
 
 Not done: a real MetaMask signature, and the desktop rebuild.
 
+### Deployed, 0.20.3 released, and the first node updated
+
+The coordinator is live on the new code and the chain never moved: `driver_stage1_layers`
+appears on slice-info (it exists nowhere else), `[[0,9],[10,27]]` unchanged, routable, healthy.
+`tools/predeploy_check.py` predicted exactly that beforehand by running the new
+`canonical_assignment` against the live roster, which is the check worth having — a deploy that
+re-splits the chain costs every node a re-download and takes chat down while they finish.
+
+Four things went wrong on the way, none of them in the code being deployed:
+
+- **`bash` from cmd.exe is WSL on this machine**, not Git Bash. `$HOME=/home/user1`, the key is
+  at `/mnt/c/...`, `cygpath` does not exist and `%USERPROFILE%` is not inherited. `deploy.sh`
+  resolved the key from `$HOME` and reported `Permission denied (publickey)` — a message that
+  sends you to the VM's `authorized_keys` for a fault entirely on the local side. Two attempts
+  to fix it failed, the second because `/[a-z]/Users/...` never globs in Git Bash either: `/c`
+  is a virtual mount the root does not enumerate. It now checks every layout and prints
+  `uname -s`, `$HOME` and every path tried when it still cannot find a key.
+- **`--dry-run` passed both times.** It never opens an ssh connection, so the one step that
+  would catch a key problem is the one the rehearsal skips.
+- **`zz-agent-release.conf`** won on lexical order over the `agent-sha.conf` drop-in, so the
+  coordinator kept publishing 0.20.2 and its old hash after the deploy. Harmless — it meant the
+  fleet never entered the daily decline loop an empty hash would have caused — but it took a
+  `systemctl show` to see, because a shadowed drop-in looks identical to one that did not apply.
+- **`agent/config.json` was tracked in git** ([P45]), and updating the Pavilion meant turning a
+  copied directory into a checkout. One `git checkout -f` from wiping the node_token for ~213
+  NRN. Found by asking what the command would overwrite rather than running it.
+
+The Pavilion is now on 0.20.3, and its first log is the best evidence of the session:
+`cpu x86_64: avx2 ok` — [P41]'s probe on real Linux hardware, correct, and not blocking a
+working node — followed by a config migration that picked up `donate_ram_gb`, and
+`weight_dtype=fp32` arriving at the coordinator for the first time. That field has been read by
+the balancer for weeks with nothing able to reach it.
+
+It also re-downloaded its 1.69 GB slice, because the slice predated the marker file and [P36]
+treats provenance that cannot be established as a mismatch. Working as intended, and it will
+not recur.
+
+The Windows PC is still on 0.20.2 and is the frozen build with `auto_update` on, so it should
+install 0.20.3 by itself. Nothing has ever exercised that path against a real release.
+
 ## Known limits / next steps
 - **The 3.2 / 4.6 / 6.2 tok/s scaling curve predates Ethernet** and was measured with
   54–109 ms of Wi-Fi power-save latency on every node_c hop (Session 59). The sub-linearity

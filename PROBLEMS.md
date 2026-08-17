@@ -124,6 +124,47 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
 
 ## Problems & risks
 
+### [P45] 🟢 The file that holds a node's token was tracked in git — fixed (2026-08-17)
+
+**`agent/config.json` was in the repository.** `.gitignore` carried
+`agent/config.*.json` — added deliberately, with a comment explaining that
+`config.driver.json` holds a node_token — and that pattern never matches the BASE name. So the
+one path that on every real installation holds a live `node_token` was version-controlled.
+
+The committed contents were a null template, and `git log -S'"node_token": "'` over that file is
+empty, so **nothing ever leaked**. That is why this sat unnoticed: the failure needs somebody to
+commit *after* their agent has run, and so far only the founder has, from a machine whose agent
+runs from `%LOCALAPPDATA%` rather than the checkout.
+
+**Found one command from doing real damage.** The Pavilion's `~/neuron` turned out not to be a
+git repository at all — it was provisioned by file copy — so updating it meant making it one.
+`git checkout -f` overwrites tracked files, and `agent/config.json` was tracked, so the obvious
+command would have replaced a working config with nulls and detached `node-c-pavilion` from the
+account holding **~213 NRN**. That is [P39]'s thesis exactly: a node's entire credential is the
+token in one file on one disk, and nothing else on the network knows the account exists.
+
+Two ways it ends badly, only one of which needs a mistake:
+  1. an operator commits after their agent has run and publishes their own token publicly;
+  2. any `git checkout`/`git restore` on a node silently detaches it from its earnings.
+
+**Fixed by untracking** (`git rm --cached`) plus an ignore rule for the base name. Checked
+first, because removing a tracked file is only safe if nothing needed it: `ensure_config()`
+writes `DEFAULT_CONFIG` when the file is absent, so a fresh clone still starts — asserted
+against a scratch directory, which produced a config equal to `DEFAULT_CONFIG` with
+`node_token: None`. Verified live: the Pavilion's checkout kept its identity, `diff` against the
+pre-update backup was clean, and it came back as `node-c-pavilion` with its layers.
+
+**Left open, and it is the more interesting half:** the Pavilion is now the FIRST node that is a
+git checkout. Every other node was provisioned by copy, and nothing has audited what else that
+path assumed. Two things already differ — a checkout carries the whole repo rather than the
+subset a copy shipped, and it makes `git pull` a real update mechanism on a machine whose
+`updater.py` deliberately refuses to touch source trees. Worth deciding whether nodes SHOULD be
+checkouts (cheap updates, and `git status` shows drift) or whether that is a footgun on a
+stranger's PC, before the next node is provisioned either way.
+
+Related: [P39] (the token is the only credential), [P36] (provenance that cannot be established
+is treated as a mismatch — the same reflex, applied to weights).
+
 ### [P44] 🟡 Auto-repair assigns the driver and the last node slices it never checks they can hold — two of three fixed (2026-08-16)
 
 **Fixed: the driver is now checked.** `_can_drive` asks `max_layers_for(n, gpl, head_gb=…)`
