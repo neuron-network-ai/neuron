@@ -170,8 +170,14 @@ def read_all(con):
     # table, which reads as "every slot was audited" -- i.e. exactly the pre-[P47] behaviour, so
     # an older database reconciles the way it always did.
     runs = unaudited_runs(con, DEFAULTS) if "audit_slots" in have else {}
+    # Machines known to be gone for good ([P39] item 5). Absent on a snapshot older than the
+    # table, which reads as "no retirement was ever recorded" -- true of every such database,
+    # and it simply leaves the orphan warning behaving exactly as it did before.
+    retired = ({r["node_id"]: dict(r) for r in con.execute("SELECT * FROM retired_nodes")}
+               if "retired_nodes" in have else {})
     return {"have": have, "ledger": ledger, "attendance": attendance,
-            "settings": settings, "owners": owners, "unaudited_runs": runs}
+            "settings": settings, "owners": owners, "unaudited_runs": runs,
+            "retired": retired}
 
 
 def dsum(values):
@@ -634,21 +640,47 @@ def reconcile(data, params, seed=None, now=None, replay=False, total_layers=None
             {"nodes": {k: str(v) for k, v in c["ambiguous"].items()}})
     if c["orphan_node"]:
         by_ledger = {r["node_id"]: r for r in ledger}
-        detail = {}
-        for nid, amt in sorted(c["orphan_node"].items()):
-            row = by_ledger.get(nid)
-            detail[nid] = (
-                f"{amt} NRN paid; ledger row holds {float(row['balance']):.6f} NRN "
-                f"(total_earned {float(row['total_earned']):.6f})" if row else
-                f"{amt} NRN paid, and there is no ledger row either — it went nowhere")
-        add("warn", "attendance-without-node",
-            f"{len(c['orphan_node'])} node(s) have settled attendance but no row in `nodes`. "
-            f"`delete_node` removes the node and leaves its attendance and its ledger, so the "
-            f"machine kept being paid after it ceased to exist — and since the payee is "
-            f"resolved as `get_node_owner(id) or id`, and a deleted node has no owner, the NRN "
-            f"landed in an account whose only credential was that machine's node_token "
-            f"([P39]). Payee unknowable at settle time; excluded from the arrival check",
-            detail)
+        # A RETIRED node is not an anomaly, it is a machine we were told about ([P39] item 5).
+        # Splitting these apart is what lets this run as a standing assertion: the orphan warning
+        # has been true and unactionable since 2026-08-02 and would never clear, because the
+        # machine is not coming back -- and a check that always warns is a check nobody reads,
+        # which is the failure [P40] exists to prevent arriving through [P40]'s own output.
+        retired = data.get("retired", {})
+        known = {k: v for k, v in c["orphan_node"].items() if k in retired}
+        unknown = {k: v for k, v in c["orphan_node"].items() if k not in retired}
+
+        def _detail(items):
+            out = {}
+            for nid, amt in sorted(items.items()):
+                row = by_ledger.get(nid)
+                out[nid] = (
+                    f"{amt} NRN paid; ledger row holds {float(row['balance']):.6f} NRN "
+                    f"(total_earned {float(row['total_earned']):.6f})" if row else
+                    f"{amt} NRN paid, and there is no ledger row either — it went nowhere")
+                r = retired.get(nid)
+                if r:
+                    when = time.strftime("%Y-%m-%d", time.gmtime(float(r["retired_at"])))
+                    out[nid] += f" — retired {when}" + (f": {r['reason']}" if r.get("reason") else "")
+            return out
+
+        if known:
+            add("ok", "attendance-from-retired-nodes",
+                f"{len(known)} retired node(s) hold settled attendance totalling "
+                f"{sum(known.values(), Decimal(0))} NRN. Accounted for: the machine was "
+                f"deliberately unregistered and left a tombstone, so its hours are explained "
+                f"rather than missing. Still excluded from the arrival check, because the payee "
+                f"at settle time remains unknowable",
+                _detail(known))
+        if unknown:
+            add("warn", "attendance-without-node",
+                f"{len(unknown)} node(s) have settled attendance but no row in `nodes` and no "
+                f"retirement record. `delete_node` removes the node and leaves its attendance "
+                f"and its ledger, so the machine kept being paid after it ceased to exist — and "
+                f"since the payee is resolved as `get_node_owner(id) or id`, and a deleted node "
+                f"has no owner, the NRN landed in an account whose only credential was that "
+                f"machine's node_token ([P39]). Payee unknowable at settle time; excluded from "
+                f"the arrival check",
+                _detail(unknown))
     if c["checked"]:
         add("info", "emission-arrived",
             f"{len(c['checked'])} payee(s) hold total_earned >= the emission they were paid")

@@ -183,6 +183,31 @@ CREATE TABLE IF NOT EXISTS attendance (
 -- ever recorded also has no row, and those are slots from before this mechanism existed rather
 -- than slots we failed to audit. `audit_epoch()` is what stops the deploy itself looking like a
 -- network-wide outage and paying for presence across the whole of history.
+-- A node that is gone for good, and the fact that we KNOW it is gone ([P39] item 5, [P50]).
+--
+-- `delete_node` removes the `nodes` row and leaves the attendance and the ledger behind, so a
+-- retired machine's settled hours become unattributable: the reconciliation reports them as
+-- `attendance-without-node` and cannot tell a deliberate retirement from a node that vanished
+-- out of the coordinator's own bookkeeping. `agent-bhpc012104-82cbee` has been that warning
+-- since 2026-08-02 and it will never clear on its own, because the machine is not coming back.
+--
+-- That matters more than tidiness: [P40] item 2 wants the reconciliation run as a STANDING
+-- assertion, and a check that always warns is a check nobody reads -- which is the failure mode
+-- [P40] exists to prevent, reintroduced by its own output.
+--
+-- A tombstone rather than a soft-delete on `nodes`, deliberately. Every reader of `nodes`
+-- (routing, verification, placement, dashboards) would have to learn to exclude a retired row,
+-- and one that forgot would route traffic to a machine that no longer exists. Deleting stays
+-- exactly as destructive as it was; what changes is that it now leaves a receipt.
+CREATE TABLE IF NOT EXISTS retired_nodes (
+    node_id       TEXT PRIMARY KEY,
+    retired_at    REAL NOT NULL,
+    reason        TEXT,
+    layer_start   INTEGER,
+    layer_end     INTEGER,
+    final_balance REAL
+);
+
 CREATE TABLE IF NOT EXISTS audit_slots (
     slot_start REAL PRIMARY KEY,
     heartbeats INTEGER NOT NULL DEFAULT 0,
@@ -676,10 +701,60 @@ def online_nodes(now=None):
     return [n for n in list_nodes(now) if n["status"] == "online"]
 
 
-def delete_node(node_id):
+class NodeStillFunded(RuntimeError):
+    """Refusing to delete a node whose ledger account still holds NRN ([P39] item 5)."""
+
+
+def delete_node(node_id, reason=None, force=False, now=None):
+    """Unregister a node, leaving a tombstone that says we know it is gone.
+
+    Two things this used to get wrong, both of which cost real NRN or nearly did:
+
+    **It would strand money.** A node account's only credential is the `node_token` in one
+    config.json on one disk ([P39], [P45]), and deleting the row destroys the coordinator's
+    copy — after which nothing can prove who owned the balance. `agent-bhpc012104-82cbee` was
+    recovered only because that machine was the founder's; on a volunteer's PC the same sequence
+    strands their earnings permanently. So a funded node is refused, and `force` exists for the
+    operator who has already swept it and means it.
+
+    **It left an unattributable hole.** The `attendance` and `ledger` rows survive, so the
+    reconciliation finds settled hours belonging to no node and cannot distinguish a deliberate
+    retirement from its own bookkeeping losing a machine. It has reported exactly that since
+    2026-08-02 and could never stop, because the node is gone for good — and [P40] item 2 wants
+    that check running as a standing assertion, where a permanent warning is one nobody reads.
+
+    The tombstone records the range and the final balance because both are needed to make sense
+    of the hours afterwards, and neither is recoverable once the row is gone.
+    """
+    now = time.time() if now is None else now
     with _db() as c:
+        row = c.execute("SELECT layer_start, layer_end FROM nodes WHERE node_id=?",
+                        (node_id,)).fetchone()
+        if row is None:
+            return False
+        bal = c.execute("SELECT balance FROM ledger WHERE node_id=?", (node_id,)).fetchone()
+        balance = float(bal["balance"]) if bal is not None else 0.0
+        if balance > 0 and not force:
+            raise NodeStillFunded(
+                f"'{node_id}' still holds {balance:.6f} NRN. Deleting it destroys the "
+                f"node_token that is the only credential for that balance, so the NRN would be "
+                f"unreachable by anyone. Sweep it to a wallet first "
+                f"(coordinator/claim_node_earnings.py), or pass force=True if it has already "
+                f"been swept and you mean to retire the node anyway.")
+        # Tombstone FIRST. If the delete fails the receipt is harmless; if it succeeds and the
+        # receipt had not been written, the fact is gone with the row.
+        c.execute("INSERT OR REPLACE INTO retired_nodes "
+                  "(node_id, retired_at, reason, layer_start, layer_end, final_balance) "
+                  "VALUES (?,?,?,?,?,?)",
+                  (node_id, now, reason, row["layer_start"], row["layer_end"], balance))
         cur = c.execute("DELETE FROM nodes WHERE node_id=?", (node_id,))
         return cur.rowcount > 0
+
+
+def retired_nodes():
+    """{node_id: {retired_at, reason, ...}} — machines known to be gone for good."""
+    with _db() as c:
+        return {r["node_id"]: dict(r) for r in c.execute("SELECT * FROM retired_nodes")}
 
 
 def slot_start_for(ts, slot_seconds=None):

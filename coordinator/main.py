@@ -726,7 +726,15 @@ def unregister(node_id: str, x_node_token: str = Header(default=None),
         raise HTTPException(status_code=401,
                             detail="this node's own X-Node-Token, or the operator's "
                                    "X-Register-Secret, is required")
-    models.delete_node(node_id)
+    # A funded node is refused rather than deleted ([P39] item 5): the node_token this destroys
+    # is the only credential for that balance, so the NRN would become unreachable by anyone.
+    # 409 rather than 400 -- the request is well-formed and the caller may well retry it after
+    # sweeping, which is exactly what the message tells them to do.
+    try:
+        models.delete_node(node_id, reason=f"unregistered via API by "
+                                           f"{'operator' if by_operator else 'node owner'}")
+    except models.NodeStillFunded as e:
+        raise HTTPException(status_code=409, detail=str(e))
     return {"status": "unregistered", "node_id": node_id,
             "by": "operator" if by_operator else "node"}
 
