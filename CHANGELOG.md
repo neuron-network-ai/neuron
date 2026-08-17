@@ -8,6 +8,21 @@ This project is early alpha. NRN has no cash value, and the network is a handful
 
 ## Unreleased
 
+## v0.20.4
+
+Same release as 0.20.3 plus the wallet work that landed after it was built. Cut as a new
+version rather than rebuilt as 0.20.3, because different bytes under a published version is
+exactly what `agent_version` exists to make impossible — the coordinator advertises a SHA, and
+a second build of the same source does not match it.
+
+- **You can see how much of the free grant is left** — `≈ N network answers left` in the
+  sidebar, with a nudge to contribute below 30. Hidden entirely when the balance could not be
+  read, because "we could not ask" must never render as a confident number.
+- **Running out explains itself.** The grant is one-time by design: NRN pays other volunteers
+  for their electricity and CPU, and an automatic top-up would commit their hardware to
+  unlimited free use. The message now says that, and names the part nobody would guess —
+  contributing this machine needs *less* memory than running the model on it does.
+
 ## v0.20.3
 
 The release that makes a model too big for one machine actually placeable, and the one that
