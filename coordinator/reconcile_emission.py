@@ -664,7 +664,11 @@ def reconcile(data, params, seed=None, now=None, replay=False, total_layers=None
             return out
 
         if known:
-            add("ok", "attendance-from-retired-nodes",
+            # "info", not "ok": the LEVELS are error/warn/info and `info` is what renders as
+            # `ok  ` in the report. Using the rendered word as a level raised KeyError in
+            # report()'s sort, on the live database, after the unit tests were green -- they
+            # call reconcile() and never render.
+            add("info", "attendance-from-retired-nodes",
                 f"{len(known)} retired node(s) hold settled attendance totalling "
                 f"{sum(known.values(), Decimal(0))} NRN. Accounted for: the machine was "
                 f"deliberately unregistered and left a tombstone, so its hours are explained "
@@ -792,7 +796,15 @@ def emit(line=""):
           .encode("ascii", "replace").decode("ascii"))
 
 
-def report(res, db_path, params, seed_note):
+def report(res, db_path, params, seed_note, emit=None):
+    """Render the findings. `emit` is injectable so a test can render one.
+
+    Not a convenience: the level a finding carries has to be one this function can sort and mark,
+    and nothing checked that until a finding added at level "ok" — which is not a level at all, it is
+    how `info` is PRINTED — passed the whole suite and then raised KeyError here, against the
+    live database, which is the only place this function ever runs.
+    """
+    emit = emit or globals()["emit"]
     a, b, c = res["a"], res["b"], res["c"]
     emit(f"ledger            : {db_path}")
     emit("mode              : READ-ONLY (this script has no write path)")

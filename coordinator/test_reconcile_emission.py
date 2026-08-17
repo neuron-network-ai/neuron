@@ -478,10 +478,38 @@ def test_a_RETIRED_node_is_accounted_for_rather_than_warned_about():
     out = R.reconcile(_read(path), PARAMS, seed=R.KNOWN_LIVE_SEED, now=SLOT0 + SLOT * 2)
     assert "attendance-without-node" not in _codes(out, "warn"), \
         "a known retirement was still reported as an anomaly"
-    assert "attendance-from-retired-nodes" in _codes(out, "ok")
+    assert "attendance-from-retired-nodes" in _codes(out, "info")
     finding = next(f for f in out["findings"] if f["code"] == "attendance-from-retired-nodes")
     assert "decommissioned" in finding["extra"]["n1"], finding["extra"]
     assert out["ok"], "a retirement must not make the reconciliation fail"
+
+
+def test_every_finding_uses_a_level_the_report_can_render():
+    """Levels are error/warn/info; `info` is what PRINTS as `ok`. Adding a finding at level "ok"
+    passed every assertion here and then raised KeyError in report()'s sort — on the live
+    database, after this suite was green, because nothing here had ever rendered a report.
+
+    So render one. Driving `report` over a database carrying each interesting finding at once is
+    the cheap way to keep the two halves in step: a level that cannot be sorted or marked is a
+    crash at the only moment this script is ever used."""
+    path = _fake([_row("n1", 1.0), _row("n2", 1.0), _row("kept", 1.0)],
+                 ledger=[("n1", 1.0, 1.0, "node"), ("n2", 1.0, 1.0, "node"),
+                         ("kept", 1.0, 1.0, "node")],
+                 nodes={"kept": None})
+    with sqlite3.connect(path) as c:
+        c.execute("CREATE TABLE IF NOT EXISTS retired_nodes (node_id TEXT PRIMARY KEY, "
+                  "retired_at REAL NOT NULL, reason TEXT, layer_start INTEGER, "
+                  "layer_end INTEGER, final_balance REAL)")
+        c.execute("INSERT INTO retired_nodes VALUES (?,?,?,?,?,?)",
+                  ("n1", SLOT0, "retired", 0, 9, 0.0))
+    res = R.reconcile(_read(path), PARAMS, seed=R.KNOWN_LIVE_SEED, now=SLOT0 + SLOT * 2)
+    assert {f["level"] for f in res["findings"]} <= {"error", "warn", "info"}, \
+        sorted({f["level"] for f in res["findings"]})
+    lines = []
+    R.report(res, path, PARAMS, None, emit=lambda line="": lines.append(line))
+    text = "\n".join(lines)
+    assert "attendance-from-retired-nodes" in text, text
+    assert "attendance-without-node" in text, text
 
 
 def test_an_unretired_orphan_still_warns_alongside_a_retired_one():
@@ -496,7 +524,7 @@ def test_an_unretired_orphan_still_warns_alongside_a_retired_one():
         c.execute("INSERT INTO retired_nodes VALUES (?,?,?,?,?,?)",
                   ("n1", SLOT0, "retired", 0, 9, 0.0))
     out = R.reconcile(_read(path), PARAMS, seed=R.KNOWN_LIVE_SEED, now=SLOT0 + SLOT * 2)
-    assert "attendance-from-retired-nodes" in _codes(out, "ok")
+    assert "attendance-from-retired-nodes" in _codes(out, "info")
     warn = next(f for f in out["findings"] if f["code"] == "attendance-without-node")
     assert "n2" in warn["extra"] and "n1" not in warn["extra"], warn["extra"]
 
