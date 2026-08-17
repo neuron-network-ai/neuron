@@ -1130,8 +1130,12 @@ function showError(body, detail, code, partial){
     body.innerHTML = "⚠ " + (detail || "please log in") +
       "<br>" + ($("#auth").innerHTML || "");
   } else if(code === "insufficient_funds"){
-    body.textContent = "⚠ Not enough NRN balance for this request. " +
-      (detail || "");
+    // [P29]/[P39]: name BOTH steps. Contributing a machine credits the NODE; only claiming it
+    // links those earnings to the wallet this person signs in with. Until 2026-08-17 there was
+    // no link at all, so an invitation to contribute pointed at something that could not work.
+    body.textContent = "⚠ Not enough NRN balance for this request. Contributing a machine "
+      + "earns more, and claiming it links those earnings to this wallet. "
+      + (detail || "");
   } else {
     body.textContent = "⚠ " + (detail || "inference failed");
   }

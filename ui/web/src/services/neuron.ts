@@ -210,8 +210,15 @@ export function errorMessage(err: NeuronError, hadText: boolean): string {
     ? ' The answer above is correct as far as it goes.'
     : '';
   switch (err.code) {
+    // [P29]. "Contributing a machine earns more" was a FALSE PROMISE until 2026-08-17: node
+    // earnings landed in a ledger row belonging to the machine, with no route into the wallet
+    // the person signs in with, so the one action the message offered did not solve the problem
+    // it pointed at. [P39] closed that — but only for a node whose owner has been RECORDED, and
+    // recording it is a separate deliberate act. Naming both steps is the difference between an
+    // instruction that works and one that sounds like it should.
     case 'insufficient_funds':
-      return 'You are out of NRN for now. Contributing a machine earns more.' + tail;
+      return 'You are out of NRN for now. Contributing a machine earns more — and claiming it '
+        + 'links those earnings to this wallet.' + tail;
     case 'content_policy_violation':
       return 'That response was stopped by the acceptable-use policy.' + tail;
     case 'no_local_engine':

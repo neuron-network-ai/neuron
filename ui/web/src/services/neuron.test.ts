@@ -201,3 +201,21 @@ describe('errorMessage', () => {
     expect(without).not.toContain('correct as far as it goes');
   });
 });
+
+describe('running out of NRN names an action that actually works', () => {
+  // [P29] said the invitation "does not yet actually solve the problem it points at": node
+  // earnings landed in a row belonging to the machine with no route into the user's wallet.
+  // [P39] built that route, and it needs the owner RECORDED — a separate deliberate act. A
+  // message naming only half of it is the same false promise with better grammar.
+  it('tells the user to contribute AND to claim', () => {
+    const m = errorMessage({ code: 'insufficient_funds' } as any, false);
+    expect(m).toMatch(/contribut/i);
+    expect(m).toMatch(/claim/i);
+    expect(m).toMatch(/this wallet/i);
+  });
+
+  it('keeps a partial answer, because it was already paid for', () => {
+    expect(errorMessage({ code: 'insufficient_funds' } as any, true))
+      .toMatch(/correct as far as it goes/);
+  });
+});
