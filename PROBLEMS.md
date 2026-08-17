@@ -1344,7 +1344,43 @@ the CPU fleet — and network latency then becomes the bottleneck, which **flips
 build order**: the direct-reply and single-codec fixes stop being premature the moment the
 first GPU joins.
 
-### [P29] 🔴 A user who runs out of NRN has no way to get more
+### [P29] 🟡 A user who runs out of NRN has no way to get more — the blocking half is fixed (2026-08-17)
+
+**The entry's own closing line was "the node→wallet link is now the blocking item for the whole
+earn-and-spend loop." That link shipped and deployed today.** `nodes.owner_wallet_id` records
+which wallet a node's earnings belong to, `bind_payout_address` sets it as part of a signed
+payout binding, and `close_slots` transfers availability emission to
+`get_node_owner(node_id) or node_id` — so a claimed node credits the person, not the machine.
+[P39] phases 1–3, live on the coordinator as of 2026-08-17.
+
+**So a contributor now has a route, and the UI's invitation stopped being a lie.** It said
+"Contributing a machine earns more" while earnings landed in a row nobody could spend from —
+the entry names that precisely: *the invitation does not yet actually solve the problem it
+points at.* It does now. Both pages were updated to name BOTH steps, because contributing
+credits the NODE and only claiming links it to the wallet, and a message naming half of a
+two-step action is the same false promise with better grammar. `neuron.test.ts` asserts the copy
+mentions contributing, claiming, and this wallet.
+
+**What is genuinely left is a DECISION, not an implementation**, and TOKENOMICS §12.6 already
+frames it and refuses to pre-empt it:
+
+> a one-time 25 NRN grant … then earn-or-buy … ~100 chat turns, then the account is dry
+> forever. That is correct for a coin with utility and *wrong* for a first-stranger trial.
+> **Decide which one the next release is for before handing anybody an installer.**
+
+A person who contributes hardware is now served. A person who only ever consumes still stops
+permanently at ~100 turns, and whether that is a bug or the product is the question above.
+Deliberately not implemented here: a recurring allowance changes circulating supply and opens
+faucet farming across sybil logins, which is an economic decision with a legal surface (§10,
+§12.7), not a repair to apply on engineering judgement.
+
+Downgraded 🔴 → 🟡 rather than closed: the mechanism that made this red is gone, the remaining
+half is a policy call, and an installer is now public — so the deadline §12.6 sets ("before
+handing anybody an installer") has technically already passed.
+
+The original entry follows.
+
+### [P29-orig] 🔴 As first filed
 
 `/infer` holds ~0.158 NRN before it dispatches, so a wallet below that is refused before a
 chain is built. The faucet is **one-time per wallet** (409 on re-claim) and gated on
