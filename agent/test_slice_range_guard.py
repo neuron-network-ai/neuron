@@ -149,8 +149,109 @@ def main():
     finally:
         node_server.load_slice_model = real_load
 
+    # [P42] level 2. Defined BELOW main(); the call happens at runtime so the order
+    # is fine, and keeping them here means one summary and one exit code.
+    for fn in (test_level2_passes_when_the_assigned_range_is_fully_materialized,
+               test_level2_catches_a_layer_that_never_arrived,
+               test_level2_ignores_meta_layers_OUTSIDE_the_assigned_range,
+               test_level2_does_not_block_an_architecture_it_does_not_recognise,
+               test_level2_survives_a_range_wider_than_the_model,
+               test_reload_refuses_and_says_what_to_do):
+        fn()
+
     print(f"\n{ok} passed, {fail} failed")
     return fail == 0
+
+
+
+
+# --------------------------------------------------------------------------- #
+# [P42] LEVEL 2: a layer the header PROMISED but the file did not deliver
+#
+# The range guard above reads the safetensors header and asks "is layer N named here". It
+# cannot ask "did layer N actually arrive" -- `load_slice_model` fills a full skeleton with
+# strict=False, so a truncated download, or a tensor mapped to a shard it is absent from,
+# leaves the layer listed and its weights on the meta device. Nothing raises. The node serves
+# uninitialized weights and returns fluent nonsense: the same ending as 2026-08-07, reached by
+# the one path the header check does not inspect.
+#
+# Scoped to the ASSIGNED range, which is the whole difficulty -- most of a sliced node's model
+# is legitimately meta, so the global version of this assertion would refuse every node.
+# --------------------------------------------------------------------------- #
+class _P:
+    def __init__(self, meta):
+        self.is_meta = meta
+
+
+class _Layer:
+    def __init__(self, meta):
+        self._meta = meta
+
+    def named_parameters(self):
+        return [("self_attn.q_proj.weight", _P(self._meta)),
+                ("mlp.down_proj.weight", _P(self._meta))]
+
+
+class _Model:
+    """A skeleton shaped like the real one: `model.model.layers`, some materialized, some not."""
+    def __init__(self, n, materialized):
+        inner = type("Inner", (), {})()
+        inner.layers = [_Layer(i not in materialized) for i in range(n)]
+        self.model = inner
+
+
+def test_level2_passes_when_the_assigned_range_is_fully_materialized():
+    m = _Model(28, materialized=set(range(10, 19)))
+    check("a slice whose assigned layers all arrived loads",
+          node_server.unmaterialized_layers(m, 10, 18) == [])
+
+
+def test_level2_catches_a_layer_that_never_arrived():
+    # 10-18 assigned, but 14 came back empty -- the case the header check waves through,
+    # because the header NAMED layer 14.
+    m = _Model(28, materialized=set(range(10, 19)) - {14})
+    bad = node_server.unmaterialized_layers(m, 10, 18)
+    check("a layer present in the header but unmaterialized is caught", len(bad) == 2)
+    check("...and it is named, so the operator knows which one",
+          all(b.startswith("layers.14.") for b in bad))
+
+
+def test_level2_ignores_meta_layers_OUTSIDE_the_assigned_range():
+    """The reason this cannot be a global assertion. `load_slice_model` builds the FULL model
+    and this node holds a slice of it, so layers 0-9 and 19-27 being meta is correct."""
+    m = _Model(28, materialized=set(range(10, 19)))
+    check("layers this node does not serve are allowed to be meta",
+          node_server.unmaterialized_layers(m, 10, 18) == [])
+    check("...and the same model FAILS if it is assigned a range it did not download",
+          node_server.unmaterialized_layers(m, 0, 27) != [])
+
+
+def test_level2_does_not_block_an_architecture_it_does_not_recognise():
+    """Unknown shape is 'do not block', the same answer an unreadable header gets: refusing to
+    start on a check meant to catch a mismatch would take working nodes down."""
+    check("a model with no .model.layers returns None rather than raising",
+          node_server.unmaterialized_layers(object(), 0, 27) is None)
+
+
+def test_level2_survives_a_range_wider_than_the_model():
+    m = _Model(28, materialized=set(range(0, 28)))
+    check("an end past the last layer does not IndexError",
+          node_server.unmaterialized_layers(m, 20, 99) == [])
+
+
+def test_reload_refuses_and_says_what_to_do():
+    """The message has to name the file to delete: this is a stranger's PC, and the remedy is
+    a re-download rather than anything they could debug."""
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "node_server.py"),
+               encoding="utf-8").read()
+    # Anchored on the CALL, not the name: `def unmaterialized_layers(model, layer_start` also
+    # matches, so a looser anchor greps the function's docstring and grades the comment.
+    call = "unfilled = unmaterialized_layers(model, layer_start, layer_end)"
+    check("reload() raises on unmaterialized assigned layers", call in src)
+    check("...before the pointer swap, so a failing node serves nothing rather than garbage",
+          src.index(call) < src.index("self.model = model", src.index(call)))
+    check("...and the refusal tells the operator to delete the slice",
+          "re-download" in src.split(call)[1][:900])
 
 
 if __name__ == "__main__":

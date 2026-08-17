@@ -70,6 +70,41 @@ def _layer_set(slice_dir):
     return idx or None
 
 
+def unmaterialized_layers(model, layer_start, layer_end):
+    """Assigned decoder layers still holding meta tensors after a load. [] when all are real.
+
+    **The second half of [P42], and it catches what the header check cannot.** `_layer_set`
+    asks whether a layer is NAMED in the safetensors header; this asks whether it actually
+    arrived. A truncated download, or a tensor mapped to a shard it is absent from, leaves a
+    layer listed and unmaterialized — `load_slice_model` fills the skeleton with
+    `strict=False`, so nothing raises, and the node serves uninitialized weights and returns
+    fluent nonsense. Same ending as the 2026-08-07 incident, reached by the one path the range
+    guard does not inspect.
+
+    SCOPED to the assigned range, which is the whole difficulty. `Uraroga/spikingbrain-cpu-
+    cluster` asserts this globally because its two ranks hold the whole model between them;
+    here most of the model is legitimately meta, because `load_slice_model` builds a FULL
+    skeleton and this node holds a slice of it. A global assertion would refuse every node on
+    the network.
+
+    Decoder layers only, deliberately: `embed_tokens` and `lm_head` belong to the DRIVER
+    (`neuron_driver`, stage 1), and node_server only ever serves the `mid` and `last` roles.
+    A node that has them is a node that was handed weights it will not run.
+
+    Returns None when the model is not shaped the way this expects — unknown architecture is
+    "do not block", the same answer an unreadable header gets.
+    """
+    layers = getattr(getattr(model, "model", None), "layers", None)
+    if layers is None:
+        return None
+    bad = []
+    for i in range(layer_start, min(layer_end + 1, len(layers))):
+        for name, p in layers[i].named_parameters():
+            if getattr(p, "is_meta", False):
+                bad.append(f"layers.{i}.{name}")
+    return bad
+
+
 def _layers_in_slice(slice_dir):
     """(lo, hi) of the decoder layers present, or None. For messages, not for the check --
     the extremes cannot see a hole in the middle. `_layer_set` is what reload() guards on."""
@@ -250,6 +285,20 @@ class NodeServer:
             gc.collect()                         # drop the last reference before allocating
             _empty_device_cache()
             model = load_slice_model(slice_dir)
+            # [P42] level 2. The header said these layers were here; this asks whether they
+            # arrived. Raised BEFORE the pointer swap, so a node that fails this keeps serving
+            # nothing rather than serving garbage — `self.model` is already None by now, and
+            # the coordinator's re-placement is what recovers it (see the ordering note above).
+            unfilled = unmaterialized_layers(model, layer_start, layer_end)
+            if unfilled:
+                shown = ", ".join(unfilled[:4]) + (" …" if len(unfilled) > 4 else "")
+                raise RuntimeError(
+                    f"refusing to serve layers {layer_start}-{layer_end}: {len(unfilled)} "
+                    f"weight tensor(s) in the assigned range are still uninitialized after "
+                    f"loading {slice_dir} ({shown}). The header listed these layers but the "
+                    f"file did not deliver them — a truncated or partially-written download. "
+                    f"Serving them would return plausible nonsense. Delete {slice_dir} to "
+                    f"re-download.")
             with compute_lock:
                 self.model = model
                 self.lo, self.hi, self.n = layer_start, layer_end, total_layers
