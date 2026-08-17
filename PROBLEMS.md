@@ -244,14 +244,32 @@ pinned separately** — the `holds` check alone makes the RangeMismatch assertio
 cannot stand as evidence for the node-side fix; the ack's `s1` is what tells the branches apart.
 Both tripwires verified to fire, then restored.
 
-**Still open, and it is the cause rather than the symptom:** this node registers as 0-9 and
-serves 0-27, and nothing in the coordinator can see that. `placement_drift` compares the
-assignment against `reported_layer_*`, which is what the node CLAIMED at registration — both
-0-9 — so the field reads false while the disagreement is real. The node's actual range is only
-ever visible in a challenge ack. [P37] deliberately did NOT feed an observed range back into
-placement ([P32]'s ownership inversion), and that is still right; but a coordinator that can
-never learn a node is serving a different range than it was given has no way to raise the alarm
-either. Worth deciding what it should do with `holds` besides refuse.
+**Verified live after deploying, 2026-08-17 22:40.** The driver now produces
+*"PLACEMENT MISMATCH, not a bad node — node holds layers 0-27 but was challenged on 0-9 …
+nothing recorded against it"*, on the verifier-side fix alone; the packaged agent still runs the
+old `node_server`, which is exactly the case that half was written for.
+
+**Still open, and it is the cause rather than the symptom: the node serves 0-27 while assigned
+0-9.** Corrected from this entry's first draft, which claimed the coordinator could not see it —
+`reported_layer_*` read 0-9 when first checked and **0-27** a few hours later, so the node
+re-registered with its real range and `placement_drift` is now **True**. The coordinator's own
+drift signal names it, and has since before the deploy: the pre-restart verifier was already
+logging *"placement_drift is set"* while still computing a wrong answer, which is the [P37]
+shape once more — the field that explains it sitting in `/node/list`, read by nothing that could
+act on it.
+
+So the remaining question is not detection, it is **which way to resolve it**: assign the driver
+the 0-27 it actually holds, or make it serve the 0-9 it was given. That is a placement decision
+with a routing consequence and it is not the verifier's to take — [P37] deliberately did not
+feed an observed range back into placement ([P32]'s ownership inversion), and that is still
+right. **Until it is resolved the driver still earns nothing**, and correctly so: the slot IS
+audited, so [P47]'s unaudited-hour excuse does not and must not apply to it.
+
+**And the deeper question underneath: why does a 64 GB machine end up serving the whole model
+while registered for a slice?** `agent.log` reads *"this machine can run
+Qwen/Qwen2.5-1.5B-Instruct itself — fetching quantized weights instead of the pipeline-driver
+slice"*. A node that can run the model locally appears to take a path that leaves its NodeServer
+on 0-27. That is one config decision away from being the whole answer.
 
 Related: [P37] (the same ack, the same lesson, the sibling function), [P47] (the emission this
 was silently costing), [P42] (the reload guard that made the test harder and was right to).

@@ -72,14 +72,12 @@ pushed** — pushing is also what publishes the corrected download links to the 
 
 ## Open, roughly in order
 
-- **[P49]'s cause, not its symptom: the driver registers as 0-9 and serves 0-27, and the
-  coordinator cannot see it.** `placement_drift` compares the assignment against
-  `reported_layer_*` — what the node CLAIMED at registration — and both are 0-9, so the field
-  reads false while the disagreement is real. A node's actual range is only ever visible in a
-  challenge ack. [P37] deliberately did not feed an observed range back into placement ([P32]'s
-  ownership inversion) and that is still right, but a coordinator that can never learn a node is
-  serving a different range has no way to raise the alarm. Decide what it should do with `holds`
-  besides refuse.
+- **[P49]'s cause: the driver serves 0-27 while assigned 0-9 — decide which way to fix it.**
+  `placement_drift` is **True** and `reported_layer_*` reads 0-27, so detection is not the
+  problem; the coordinator has been saying so. The choice is to assign the driver the 0-27 it
+  holds, or make it serve the 0-9 it was given. **Until then it still earns nothing, correctly**
+  — the slot is audited, so [P47]'s unaudited excuse does not apply. `./coordinator/pin_layers.sh
+  --driver` is what the verifier's own error line points at.
 - **Why is the driver serving the whole model at all?** `agent.log` shows *"this machine can run
   Qwen/Qwen2.5-1.5B-Instruct itself — fetching quantized weights instead of the pipeline-driver
   slice"*. A 64 GB machine that can run the model locally appears to end up with a NodeServer on
