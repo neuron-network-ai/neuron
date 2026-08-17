@@ -1381,7 +1381,57 @@ the CPU fleet — and network latency then becomes the bottleneck, which **flips
 build order**: the direct-reply and single-codec fixes stop being premature the moment the
 first GPU joins.
 
-### [P29] 🟡 A user who runs out of NRN has no way to get more — the blocking half is fixed (2026-08-17)
+### [P29] 🟢 A user who runs out of NRN has no way to get more — decided and closed (2026-08-17)
+
+**DECISION: no recurring faucet. The one-time grant stands, and the product now says so before
+you reach the end of it.** TOKENOMICS §12.6 posed this and refused to pre-empt it — *"correct
+for a coin with utility and wrong for a first-stranger trial. Decide which one the next release
+is for."* Decided here, on the reasoning below, because an installer is now public and the
+question cannot stay open.
+
+**Who actually pays for a free tier.** NRN is not a project credit; it is a claim on other
+volunteers' electricity and CPU time. A recurring grant would commit *their* hardware to
+unlimited free consumption by people who contribute nothing — and that is not the project's to
+give away. The faucet is OAuth-gated, and free Google accounts are free, so a renewing grant is
+a standing invitation to farm exactly the resource the network depends on donations for. Saying
+no here protects volunteers, which is the only constituency that cannot protect itself.
+
+**And the population it strands is far smaller than this entry assumed.** Three things changed:
+
+  1. **Local-first inference is the default.** `ui/app.py` tries `best_local_model()` before the
+     network, and `local_gguf.stream` reports `cost_nrn: 0.0` and makes no `/infer` call —
+     *nobody else's hardware ran this.* A machine with 3.6 GB available runs the 1.5B itself,
+     free and unlimited; 1.5 GB runs the 0.5B. Such a machine never reaches this error at all.
+  2. **Contributing needs LESS machine than running the model does.** One layer of the 1.5B is
+     ~3.3 GB total RAM, against 3.6 GB *available* for local inference. So a machine too weak to
+     answer for itself can still earn by answering for others.
+  3. **Earnings now reach the person.** [P39] phases 1–3 deployed today: a claimed node credits
+     the owner's wallet, not the machine's ledger row.
+
+What remains stranded is a machine under ~3.3 GB total RAM whose owner will not contribute it —
+and [P41]'s instruction-set floor excludes most of that hardware before this ever applies. That
+is a hardware limit, not a policy cruelty.
+
+**What was genuinely wrong, and is now fixed: the product never said any of this.** A hard limit
+is not unfair; *discovering it by hitting it* is. So:
+
+  * the sidebar shows `≈ N network answers left` while there is still room to act, and says
+    "contribute this machine to earn more" under 30 — hidden entirely when the balance could not
+    be read, because "we could not ask" must never render as a confident number;
+  * the out-of-NRN message states the reason rather than the refusal — *"It paid other people to
+    run answers on their machines, and there is no automatic top-up"* — and names the thing
+    nobody would guess, that contributing needs less memory than running the model locally.
+
+Asserted rather than left to taste: `wallet.test.ts` pins the three-state balance and the
+warning threshold; `neuron.test.ts` pins that the message says WHY, promises no top-up ("for
+now", "try again later" are asserted ABSENT), and names both the contribute and claim steps.
+45 vitest.
+
+**Deliberately still not built: a purchase path.** TOKENOMICS §12.7 is explicit that a coin
+people buy is a different regulatory object and *"a public sale is not something to ship on
+engineering judgement."* That review has not happened, so the third option stays closed.
+
+### [P29-detail] 🟡 How the blocking half was fixed (2026-08-17)
 
 **The entry's own closing line was "the node→wallet link is now the blocking item for the whole
 earn-and-spend loop." That link shipped and deployed today.** `nodes.owner_wallet_id` records

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ChatThread, Folder } from '../types';
-import { Wallet, NetworkState, formatNrn, networkLabel } from '../services/wallet';
+import { Wallet, NetworkState, formatNrn, networkLabel, messagesLeft, isLowBalance }
+  from '../services/wallet';
 import { NodeOwnerPanel } from './NodeOwnerPanel';
 import {
   Plus,
@@ -222,6 +223,19 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <div className="flex flex-col gap-1">
               {renderWalletRow('Balance', wallet.balance, wallet.error)}
               {renderWalletRow('Earned', wallet.totalEarned, wallet.error)}
+              {/* Where you are in the free grant, BEFORE you reach the end of it. The grant
+                  is one-time by design — NRN buys other volunteers' compute, and refilling it
+                  automatically would commit their hardware to unlimited free use. Given that,
+                  discovering the limit by hitting it is the genuinely unfair part, and this is
+                  the fix for it. Hidden when the balance could not be read: "we could not ask"
+                  must never render as a confident number. */}
+              {messagesLeft(wallet.balance) !== null && (
+                <div className={`text-[11px] pt-0.5 ${
+                  isLowBalance(wallet.balance) ? 'text-ink' : 'text-ink-faint'}`}>
+                  {`≈ ${messagesLeft(wallet.balance)} network answers left`}
+                  {isLowBalance(wallet.balance) && ' · contribute this machine to earn more'}
+                </div>
+              )}
               {wallet.email && (
                 <div className="text-[11px] text-ink-faint truncate pt-0.5" title={wallet.email}>
                   {wallet.email}

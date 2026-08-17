@@ -214,6 +214,26 @@ describe('running out of NRN names an action that actually works', () => {
     expect(m).toMatch(/this wallet/i);
   });
 
+  // The [P29] decision, asserted so it cannot be softened by accident. There is no recurring
+  // faucet, deliberately: NRN buys other volunteers' electricity and CPU, and refilling it
+  // automatically commits THEIR hardware to unlimited free use. What is owed in exchange for
+  // saying no is a straight reason and a real alternative.
+  it('says WHY it ran out — it paid other people', () => {
+    const m = errorMessage({ code: 'insufficient_funds' } as any, false);
+    expect(m).toMatch(/other people/i);
+  });
+
+  it('does not promise a top-up that is never coming', () => {
+    const m = errorMessage({ code: 'insufficient_funds' } as any, false);
+    expect(m).toMatch(/no automatic top-up/i);
+    expect(m).not.toMatch(/for now|try again later|come back/i);
+  });
+
+  it('names the thing nobody would guess: contributing needs LESS machine than local', () => {
+    expect(errorMessage({ code: 'insufficient_funds' } as any, false))
+      .toMatch(/less memory/i);
+  });
+
   it('keeps a partial answer, because it was already paid for', () => {
     expect(errorMessage({ code: 'insufficient_funds' } as any, true))
       .toMatch(/correct as far as it goes/);

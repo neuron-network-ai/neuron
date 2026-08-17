@@ -216,9 +216,17 @@ export function errorMessage(err: NeuronError, hadText: boolean): string {
     // it pointed at. [P39] closed that — but only for a node whose owner has been RECORDED, and
     // recording it is a separate deliberate act. Naming both steps is the difference between an
     // instruction that works and one that sounds like it should.
+    // The message a person gets at the end of the free grant, so it says WHY rather than just
+    // no. NRN buys other volunteers' electricity and CPU time; that is the thing that ran out,
+    // and there is no recurring faucet because refilling it would commit THEIR hardware to
+    // unlimited free use, which is not the project's to give away. What is owed instead is a
+    // straight answer about what is still available — and contributing needs LESS machine than
+    // running the model locally does, which is the part nobody would guess.
     case 'insufficient_funds':
-      return 'You are out of NRN for now. Contributing a machine earns more — and claiming it '
-        + 'links those earnings to this wallet.' + tail;
+      return 'Your free NRN is spent. It paid other people to run answers on their machines, '
+        + 'and there is no automatic top-up. Contributing this computer as a node earns more — '
+        + 'it needs less memory than running the model here would — and claiming it links those '
+        + 'earnings to this wallet.' + tail;
     case 'content_policy_violation':
       return 'That response was stopped by the acceptable-use policy.' + tail;
     case 'no_local_engine':

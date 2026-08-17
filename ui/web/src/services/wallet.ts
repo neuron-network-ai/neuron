@@ -92,6 +92,35 @@ export function formatNrn(v: number | null): string {
 }
 
 /**
+ * Roughly what a network answer costs: `PRICE_PER_1K_WEIGHTED` (1.0 NRN/1k weighted tokens)
+ * against a typical turn. The coordinator holds ~0.158 NRN before it will dispatch at all, so
+ * this is also the floor below which the next message is refused outright.
+ */
+export const NRN_PER_MESSAGE = 0.158;
+
+/**
+ * About how many more network answers this balance buys. null when unknown — never 0, because
+ * "we could not read your balance" and "you have none" must not render the same ([P43]'s
+ * three-state rule, applied to a number people plan around).
+ *
+ * WHY THIS IS SHOWN AT ALL, and it is the whole of the [P29] decision. The grant is 25 NRN,
+ * about 158 messages, and then it is gone for good — there is no recurring faucet and there
+ * should not be one (see below). Given that, a person is entitled to know where they are in it
+ * BEFORE they arrive at the end. Discovering a hard limit by hitting it is the part that is
+ * actually unfair; the limit itself is not.
+ */
+export function messagesLeft(balance: number | null): number | null {
+  if (balance == null || !isFinite(balance)) return null;
+  return Math.max(0, Math.floor(balance / NRN_PER_MESSAGE));
+}
+
+/** Worth warning about: roughly a fifth of the initial grant, or unable to send at all. */
+export function isLowBalance(balance: number | null): boolean {
+  const n = messagesLeft(balance);
+  return n !== null && n <= 30;
+}
+
+/**
  * How the header describes who served an answer.
  *
  * A machine that can hold the serving model answers LOCALLY BY DESIGN, so the network must not
