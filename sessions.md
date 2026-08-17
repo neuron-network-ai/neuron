@@ -6041,6 +6041,87 @@ way rather than trusting the analysis that produced it.
 `test_stage1_challenge.py` 10, `test_verifier_survives.py` 37. Every tripwire fired before being
 restored.
 
+## Session 63b (2026-08-18) — install integrity, and what a full sweep finds that a targeted one cannot
+
+### The install, not the build
+
+[P46] left the harder half open in its own words: the guard proves the BUILD is coherent, it
+cannot prove the INSTALL is. That is the half that broke — `/next` served an index.html asking
+for a bundle nobody had copied, the page rendered nothing, and `/`, `/status` and the node's
+earnings were all green.
+
+`ui/app_assets.py` is now the single definition of "which files does this page reference, and
+are they here", imported by both the build-time test and the running app. Two copies would drift
+exactly where it matters: the installed app checked by a rule the build never had to satisfy.
+`/next` refuses to serve a broken install — 503 naming the missing files and the remedy — and
+startup logs it loudly, because silence and health looked identical for six days. An orphaned
+bundle is a WARNING, not an error: the page still works, and crying wolf on a working install is
+how a check stops being read.
+
+`neuron.iss` gained the other two remedies [P46] listed: `[InstallDelete]` on the content-hashed
+`assets` directory, so the copy is a replace rather than a merge, and `CloseApplications=yes`, so
+the running app is asked to close before it is overwritten ([P24]). Restart Manager asks rather
+than kills, so a node mid-request finishes instead of dropping the chain it is serving.
+
+### The update nobody could see
+
+A release the operator has to install was visible on the coordinator's dashboard and nowhere the
+operator looks. `/app/update` reports it and the page states it above the composer, using
+[P48]'s numeric comparison server-side. Verified live: running 0.20.4 against a published
+0.20.3 returns `available: false` — a node AHEAD of the network is not told to downgrade. An
+unreachable coordinator returns an error rather than "up to date", and there is no dismiss state,
+because a remembered dismissal is how a node stays on a bad build forever.
+
+### Writing that surface found the trap under it
+
+`config.AGENT_VERSION` defaulted to **0.20.4** — built, never released, no release notes.
+`AGENT_DOWNLOAD_URL` is derived from it, every node reads it daily, and the new update notice
+links to it. Production was correct only because a systemd drop-in pinned 0.20.3 over the
+committed default: a hidden configuration quietly correcting a wrong value, which is [P48]'s
+shape exactly.
+
+**`test_version_lockstep` was enforcing the wrong value.** It asserted
+`config.AGENT_VERSION == updater.LOCAL_VERSION` — "the coordinator publishes what this build is"
+— which is true only at the instant of a release and false for the entire window between
+building N+1 and publishing it. The repo had been sitting in that window. What is actually
+required is an ordering: you cannot publish a version you have not built. That keeps the whole
+original hazard (a version ahead of every installer makes each node install its way to the same
+version, daily, forever) and permits the normal between-releases state. Whether the published
+version was really released is now checked in `test_download_links.py`, on the same
+"has release notes" proxy the download links already use — applied to the version that reaches
+the fleet, where it matters far more than on a web page.
+
+### All 100 suites, which is the point
+
+96 ok, 4 problems. **Two were regressions from the night before**, and neither was in a file this
+session had touched: a stubbed `plan_slot` lambda that broke when it gained `unaudited_run`
+(a TypeError naming a lambda, in a test about owner links), and `test_replica` deleting nodes
+that had earned, which `delete_node` now refuses. Running only the suites near the change would
+have shipped both.
+
+`blockchain/test_nrn.py` now SKIPs without a local EVM instead of failing. No machine here runs
+one — the contract is deployed nowhere — so it returned non-zero on every full run for every
+developer, and a suite that always fails is one people scroll past. `NRN_REQUIRE_EVM=1` restores
+the hard failure. `packaging/test_app_entry.py` is not importable as a module and should stay
+that way: a `packaging/__init__.py` would shadow the PyPI `packaging` package for the whole repo.
+
+And the sweep priced my own change: the verifier heartbeat added ~60s to `test_flag_recovery`,
+one failed DNS lookup per sweep. Lowering the timeout did nothing, because DNS gives up long
+before a timeout applies — the harness simply had to stub it, as it already stubs `nodes` and
+`attest`. 62s to 3s, same 36 checks.
+
+### A parity claim I got wrong
+
+I reported the React app missing five features and the `/next` swap a regression for every user.
+That grepped for chat.html's IDENTIFIERS rather than for behaviours, so anything React spells
+differently read as absent. It has the wallet-id reveal, the node-owner claim, payout binding,
+`insufficient_funds`, reroute, partial survival, `localCapable` and low balance — plus personas,
+per-thread settings and speech, which chat.html lacks, and a better token cap.
+
+Three real gaps, one of which can hurt somebody: `ChatInput`'s `canSend` has no health term, so
+React will send into a chain that cannot answer where chat.html refuses. A three-item job, not a
+rewrite — and the 59 assertions were never the blocker, they were a bad proxy for parity.
+
 ## Known limits / next steps
 - **The 3.2 / 4.6 / 6.2 tok/s scaling curve predates Ethernet** and was measured with
   54–109 ms of Wi-Fi power-save latency on every node_c hop (Session 59). The sub-linearity

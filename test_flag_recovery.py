@@ -191,6 +191,15 @@ def test_verifier():
         def total_layers(self):
             return 28
 
+        def heartbeat(self):
+            """Stubbed with the rest of the network ([P47] cause 2).
+
+            This harness talks to a coordinator at `http://c` that does not exist. `nodes` and
+            `attest` are already overridden for that reason; the heartbeat was not, so every
+            sweep spent ~2.7s failing to resolve a hostname and this file took a minute. Not a
+            timeout — DNS gives up long before one — which is why lowering it did nothing.
+            """
+
         def attest(self, node_id, passed, max_err):
             self.attested.append((node_id, passed))
             return {"node_id": node_id, "passed": passed, "reputation": 1.0,
