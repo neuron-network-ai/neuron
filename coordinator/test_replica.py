@@ -82,8 +82,12 @@ def main():
     check("verified replica now selectable", "last-stranger" in picks2)
 
     # 5) removing all base replicas but keeping the stranger still yields a complete chain
-    models.delete_node("last-b")
-    models.delete_node("last-4th")
+    # force=True: these replicas have earned during the test, and `delete_node` now refuses a
+    # funded node because deleting it destroys the node_token that is the only credential for
+    # that balance ([P39] item 5). Routing is what this file is about, so the money is beside
+    # the point here -- but stating it deliberately is the whole value of that guard.
+    models.delete_node("last-b", force=True, reason="test teardown")
+    models.delete_node("last-4th", force=True, reason="test teardown")
     chain, missing = router.build_chain()
     check("chain still complete via the stranger alone",
           not missing and last_of(chain) == "last-stranger")

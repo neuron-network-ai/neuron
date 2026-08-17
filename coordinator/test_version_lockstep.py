@@ -74,9 +74,31 @@ def main():
     check("the running build and the installer agree", local == installer,
           f"a node would report {local} for a build stamped {installer}; `agent_version` is "
           f"the field a rollback is confirmed by")
-    check("the coordinator publishes the version that actually exists", published == local,
-          f"published {published}, shipped {local}. Publishing a version no installer produces "
-          f"makes every node download and install its way to the same version, daily, forever")
+    # NOT equality, and the difference matters. This asserted `published == local`, which reads
+    # "the coordinator publishes what this build is" — true only at the INSTANT of a release, and
+    # false for the whole window between building N+1 and publishing it. The repo sat in that
+    # window with `config.AGENT_VERSION` defaulting to 0.20.4, a build that was never released:
+    # `AGENT_DOWNLOAD_URL` is derived from it, so every agent's daily check and the Chat UI's
+    # update notice both pointed at a 404, and production was correct only because a systemd
+    # drop-in on the VM pinned 0.20.3 over it. A test forcing a wrong default, with a hidden
+    # configuration quietly correcting it, is worse than no test.
+    #
+    # What is actually required is an ORDERING — you cannot publish a version you have not built
+    # — which keeps the whole of the original hazard. Publishing something NEWER than any
+    # installer produces is what makes a fleet download and install its way to the same version
+    # daily, forever, and that is still refused. Publishing something older is a release that has
+    # not happened yet, which is the normal state of a repository between releases.
+    #
+    # That the published version was really RELEASED is checked in test_download_links.py, on
+    # the same "has release notes" proxy the download links use.
+    pl, pp = updater._parse(local), updater._parse(published)
+    check("the coordinator never publishes a version no installer has built", pp <= pl,
+          f"published {published}, newest build {local}. A version ahead of every installer "
+          f"makes each node download, verify and install its way to the same version, daily, "
+          f"forever")
+    if pp < pl:
+        print(f"        note: {local} is built but {published} is published — normal between "
+              f"releases; test_download_links.py checks {published} was really released")
 
     for name, v in (("updater.LOCAL_VERSION", local), ("config.AGENT_VERSION", published),
                     ("neuron.iss AppVersion", installer)):

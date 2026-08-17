@@ -67,6 +67,37 @@ def main():
         check(f"v{v} has release notes, so it was really released", os.path.exists(notes),
               f"no {os.path.basename(notes)} — is v{v} built but unreleased? that link 404s")
 
+    # THE SAME QUESTION, ASKED OF THE VERSION THAT REACHES THE FLEET.
+    #
+    # A stale link on a web page serves an older installer and nothing breaks. What
+    # `coordinator/config.AGENT_VERSION` names is different in kind: every agent asks
+    # `/agent/version` daily, `AGENT_DOWNLOAD_URL` is DERIVED from it, and the personal Chat UI
+    # now shows "vX is available — Get it" pointing at that url. Naming a version that was never
+    # published turns all three into a 404 for every volunteer at once.
+    #
+    # It is 0.20.4 in the file today, and 0.20.4 has no release notes: production is correct only
+    # because a systemd drop-in pins 0.20.3 on the VM. That is a real configuration holding back
+    # a wrong default, and it is exactly the shape of [P48] — the repo self-consistent, the thing
+    # a person is actually served wrong. Empty AGENT_SHA256 means nobody would INSTALL the 404
+    # (the correct failure direction), but they are still told to go and get it.
+    #
+    # Read as text rather than imported: importing `coordinator.config` picks up the environment
+    # of whoever runs the suite, so on the VM this check would read the pin and pass while the
+    # committed default stayed wrong.
+    cfg = open(os.path.join(HERE, "coordinator", "config.py"), encoding="utf-8").read()
+    m = re.search(r'AGENT_VERSION\s*=\s*os\.environ\.get\(\s*"NEURON_AGENT_VERSION"\s*,\s*'
+                  r'"([0-9][0-9.]*)"\s*\)', cfg)
+    check("coordinator/config.py declares a default AGENT_VERSION", bool(m), cfg[:200])
+    if m:
+        av = m.group(1)
+        notes = os.path.join(HERE, f"RELEASE_NOTES_v{av}.md")
+        check(f"the coordinator's default AGENT_VERSION (v{av}) was really released",
+              os.path.exists(notes),
+              f"no RELEASE_NOTES_v{av}.md. AGENT_DOWNLOAD_URL is derived from this, so every "
+              f"agent's daily update check and the Chat UI's update notice both point at a "
+              f"release that does not exist. Production is only correct while an env pin "
+              f"overrides it — remove the pin and the whole fleet is sent to a 404.")
+
     print(f"\n{ok} passed, {fail} failed")
     return fail == 0
 

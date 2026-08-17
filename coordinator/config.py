@@ -121,7 +121,14 @@ REPLICA_SLOWDOWN_LIMIT = float(os.environ.get("NEURON_REPLICA_SLOWDOWN_LIMIT", "
 # is already treated.
 MS_PER_LAYER_TTL_S = float(os.environ.get("NEURON_MS_PER_LAYER_TTL_S", "21600"))
 
-AGENT_VERSION = os.environ.get("NEURON_AGENT_VERSION", "0.20.4")
+# The latest RELEASED agent, which is not the same fact as the newest build in this repo and
+# must never be raised to one that has not been published. Every node reads this daily,
+# AGENT_DOWNLOAD_URL is derived from it, and the Chat UI's update notice links to it — so naming
+# an unreleased version points the whole fleet at a 404 at once. It defaulted to 0.20.4 (built,
+# never released) and production was correct only because a systemd drop-in pinned 0.20.3 over
+# it. Bump this when a release is PUBLISHED, not when one is built; test_download_links.py
+# refuses a value with no release notes.
+AGENT_VERSION = os.environ.get("NEURON_AGENT_VERSION", "0.20.3")
 # Where a node fetches that version, and the hash it must match before anything is run.
 # The download is NOT served from here: this VM has 1 GB of RAM and the installer is ~200 MB,
 # so the coordinator only advertises metadata and GitHub Releases does the bandwidth.

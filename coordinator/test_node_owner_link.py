@@ -154,7 +154,10 @@ def main():
 
     def stub_for(node_id):
         models.unpaid_attendance = lambda before: [{"node_id": node_id, "slot_start": slot}]
-        emission.plan_slot = lambda rows, total, now=None: [
+        # **kw so this stub survives plan_slot gaining arguments. It gained `unaudited_run`
+        # ([P47] cause 2) and this broke with a TypeError that named a lambda, in a test about
+        # owner links — a signature-shaped failure a long way from the change that caused it.
+        emission.plan_slot = lambda rows, total, now=None, **kw: [
             {"node_id": node_id, "slot_start": slot, "reward": 1.0, "replicas": 1,
              "multiplier": 1.0, "attended_frac": 1.0, "reason": None}]
         models.settle_attendance = lambda *a, **kw: True
