@@ -39,7 +39,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 SLICE_0_9 = os.path.join(HERE, "agent", "model_slice_0_9")
-PORT_OK, PORT_DRIFT = 51997, 51996
+PORT_OK, PORT_DRIFT, PORT_FULL = 51997, 51996, 51995
 
 ok = fail = 0
 
@@ -75,6 +75,7 @@ def main():
         return True
 
     from security import proof_of_compute as poc
+    import common
 
     LO, HI, N = 0, 9, 28
 
@@ -97,9 +98,56 @@ def main():
         check("RangeMismatch is raised", False, "the challenge ran and returned an answer")
     except poc.RangeMismatch as e:
         check("RangeMismatch is raised", True)
-        check("...naming both ranges", "(0, 10)" in str(e) and "(10, 19)" in str(e), str(e))
+        # Wording changed when `holds` started being checked FIRST ([P47], 2026-08-17): the node
+        # reports what it really has, so the message can name that instead of two abstract
+        # tuples. Strictly more informative — it says which side is wrong.
+        check("...naming both ranges", "0-9" in str(e) and "10-18" in str(e), str(e))
     except poc.ChallengeRefused as e:
         check("RangeMismatch is raised", False, f"got plain ChallengeRefused: {e}")
+
+    print("\n-- a node holding the WHOLE model is refused, not answered wrongly")
+    # The case that was actually costing the driver every hour it ever worked, found live on
+    # 2026-08-17 and reproduced here. `agent-optinovate-6ff49d` is assigned 0-9 and its
+    # NodeServer serves 0-27 -- a 64 GB machine that loaded the whole model -- so
+    # `is_true_last` (self.hi == n-1) was TRUE and a probe fell into the LAST-stage branch.
+    # It ran layers[10:] + the final norm for a challenge about layers 0-9 and answered
+    # max_err 28.5958: deterministic, confident, and about a different question entirely.
+    # That is the unexplained figure of 2026-08-11, and it was never a bad machine.
+    #
+    # Built on the 0-9 slice and then moved to hi == N-1, because [P42]'s reload guard rightly
+    # refuses to CONSTRUCT a 0-27 server over a 0-9 slice and this machine has no full slice to
+    # hand. What is under test is role SELECTION, which reads self.hi and self.n and nothing
+    # else, so this reproduces the live driver's state exactly where it matters. The forward
+    # pass is never reached: the range is refused first, which is the whole point.
+    full = _serve(SLICE_0_9, LO, HI, N, PORT_FULL)
+    full.hi = N - 1                    # now `is_true_last` is True, as on the live driver
+    inp3, _ = poc.make_middle_challenge(LO, HI + 1)
+    try:
+        poc.challenge_middle_node("127.0.0.1", PORT_FULL, LO, HI + 1, inp3)
+        check("a full-model node refuses a stage-1 probe instead of answering it", False,
+              "it returned an answer — this is the 28.6")
+    except poc.RangeMismatch as e:
+        check("a full-model node refuses a stage-1 probe instead of answering it", True)
+        check("...naming what it really holds, so the operator is told the placement is stale",
+              "0-27" in str(e), str(e))
+
+    # WHICH BRANCH ANSWERED, pinned separately. The two fixes are independent and either one
+    # alone makes the check above pass: `challenge_middle_node` now reads `holds`, so it would
+    # raise RangeMismatch even against an unpatched node still using the last-stage branch.
+    # That is deliberate (it works against today's agents with no release) and it is exactly why
+    # it cannot stand as evidence for the node-side fix. The ack tells them apart: only the
+    # PROBE branch sends `s1`, and only the probe branch computes this node's own layers.
+    import socket as _socket
+    _s = _socket.create_connection(("127.0.0.1", PORT_FULL), timeout=30)
+    try:
+        common.send_msg(_s, {"type": "config", "s1": LO, "s2": HI + 1})
+        ack = common.recv_msg(_s)
+    finally:
+        _s.close()
+    check("a probe config is answered by the PROBE branch, not the last-stage one",
+          ack.get("s1") is not None, f"ack={ack}")
+    check("...and it reports its own real range rather than echoing the caller's",
+          (ack.get("s1"), ack.get("s2")) == (0, N), f"ack={ack}")
 
     print("\n-- the verifier no longer skips stage 1")
     import verify_service

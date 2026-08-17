@@ -394,7 +394,29 @@ class NodeServer:
                         bconn.settimeout(common.HOT_TIMEOUT_S)
                         common.send_msg(conn, {"ok": True, "layers": self.n, "s1": s1, "s2": s2,
                                                **ack_wire})
-                    elif is_true_last:                        # LAST stage role (real pipeline traffic)
+                    elif is_true_last and "s1" not in msg:    # LAST stage role (real pipeline traffic)
+                        # `and "s1" not in msg` is load-bearing, and it is what let the driver be
+                        # unpayable for its entire existence ([P47]). `is_true_last` asks what
+                        # THIS node holds, never what it was ASKED -- so a machine holding the
+                        # whole model (0-27 of 28) is "true last" for every question, including a
+                        # verifier's probe about layers 0-9. It then ran `last_stage(model, 10)`
+                        # = layers[10:] + the final norm, and answered a question nobody asked:
+                        # deterministic, confident, and wrong by max_err 28.6 -- the unexplained
+                        # figure in [P47], live again on 2026-08-17.
+                        #
+                        # `s1` is the discriminator because the two callers genuinely differ, and
+                        # not by convention: real pipeline traffic reaches a last stage from the
+                        # middle relay 12 lines above, which sends {"s2", "n", "wire"} and never
+                        # an `s1` -- there is nothing for it to mean, since the last stage's own
+                        # start is implied by `s2`. `challenge_middle_node` always sends one.
+                        # So the presence of `s1` on a config with no `host_b` can only be a
+                        # verifier asking about a specific range, which is the probe.
+                        #
+                        # A full-model node now answers the probe from its own lo/hi (0-27), the
+                        # ack says so, and `challenge_middle_node` raises RangeMismatch: the node
+                        # is fine, the placement is stale, nothing recorded in either direction.
+                        # That is the [P37] outcome and it is the correct one -- refuse a range
+                        # rather than run garbage for it.
                         # `s2` arrives from the CALLER and decides which layers actually run --
                         # `last_stage(model, s2)` is `layers[s2:]`. It used to be taken on trust.
                         # A caller working from a stale placement then asks for a range this

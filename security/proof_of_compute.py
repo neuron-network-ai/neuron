@@ -171,6 +171,29 @@ def challenge_middle_node(host, port, s1, s2, inp, timeout=CHALLENGE_TIMEOUT_S):
         # silently stopped checking the most important machine in the chain until 0.20 ships.
         # That is exactly [P35]'s disease returning through its own cure: running perfectly,
         # checking nothing. A check that CANNOT pass is not a strict check, it is a dead one.
+        # CHECK `holds` TOO, because s1/s2 alone cannot see the case that has been costing the
+        # driver every hour it has ever worked. Live 2026-08-17, `agent-optinovate-6ff49d`:
+        # assigned 0-9, actually serving 0-27 (it is a 64 GB machine that loaded the whole
+        # model), so `node_server`'s `is_true_last` is TRUE and a probe config falls into the
+        # LAST-stage branch. That branch runs `layers[s2:]` + the final norm -- layers 10-27 for
+        # a challenge asking about 0-9 -- and its ack omits `s1` entirely. So `a1` is None, which
+        # the rule below correctly reads as silence rather than disagreement, and `a2` is the
+        # caller's own `s2` echoed back, which can never disagree. Both checks pass and the node
+        # returns a confident, deterministic, completely unrelated answer: max_err 28.5958, the
+        # same figure as 2026-08-11, which [P47] recorded as unexplained.
+        #
+        # `holds` was in that ack the whole time. This is [P37] exactly -- "the ack that
+        # explained it was on the wire from the beginning and `challenge_node` threw it away" --
+        # and the fix that closed it there was never applied to this function. Checked FIRST, so
+        # a node that reports its real range gets the accurate diagnosis rather than the weaker
+        # s1/s2 one, and works against today's agents with no release.
+        held = ack.get("holds")
+        if isinstance(held, (list, tuple)) and len(held) == 2 and None not in held:
+            if [int(held[0]), int(held[1])] != [s1, s2 - 1]:
+                raise RangeMismatch(
+                    f"node holds layers {int(held[0])}-{int(held[1])} but was challenged on "
+                    f"{s1}-{s2 - 1} -- registration/slice mismatch. It answered, and it told "
+                    f"the truth about what it has; the placement is what is stale")
         a1, a2 = ack.get("s1"), ack.get("s2")
         if (a1 is not None and a1 != s1) or (a2 is not None and a2 != s2):
             # Was a bare RuntimeError, so the verifier's blanket `except Exception` counted it
