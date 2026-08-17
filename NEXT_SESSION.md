@@ -110,12 +110,13 @@ lives only on `/next` was wrong.
 
 ## Open, roughly in order
 
-- **[P49]'s cause: the driver serves 0-27 while assigned 0-9 — decide which way to fix it.**
-  `placement_drift` is **True** and `reported_layer_*` reads 0-27, so detection is not the
-  problem; the coordinator has been saying so. The choice is to assign the driver the 0-27 it
-  holds, or make it serve the 0-9 it was given. **Until then it still earns nothing, correctly**
-  — the slot is audited, so [P47]'s unaudited excuse does not apply. `./coordinator/pin_layers.sh
-  --driver` is what the verifier's own error line points at.
+- **[P49]'s cause, still open even though the symptom is gone: auto-repair moves a node's range
+  and never tells the node.** Restarting the agent fixed today — `setup()` re-reads slice-info
+  and adopts the coordinator's answer (`agent.py:1135`), so it now serves 0-9, `placement_drift`
+  is False and it passes. But nothing pushed that change to it; a person did. That is [P37]'s
+  named open item, and it will recur on the next re-placement, silently, on whichever machine
+  is least able to notice. The migration path already has a prepare → download → ready → cut
+  over handshake that auto-repair does not use.
 - **Why is the driver serving the whole model at all?** `agent.log` shows *"this machine can run
   Qwen/Qwen2.5-1.5B-Instruct itself — fetching quantized weights instead of the pipeline-driver
   slice"*. A 64 GB machine that can run the model locally appears to end up with a NodeServer on
