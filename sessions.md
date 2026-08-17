@@ -5927,6 +5927,120 @@ and it only shows on the first row for each node.
 
 39 tests now.
 
+## Session 63 (2026-08-17) — the driver answered a question nobody asked, and the auditor was asleep
+
+The plan was: restart the verifier, watch one slot close, flip
+`STAGE1_FAILURES_ARE_SCORED` on the evidence. The evidence arrived and said the opposite.
+
+### The 28.6, live and reproducible
+
+Session 62 removed `verify_service`'s stage-1 skip, correctly: its stated premise — that a
+first-stage node embeds token ids and so cannot answer the middle probe — is false, measured at
+`max_err 0` against a real `NodeServer`. The restart therefore challenged the driver for the
+first time in six days, and it **failed**: `max_err 28.5958`, every two minutes, unchanging.
+
+That is the 2026-08-11 figure [P47] recorded as *"never explained, only hypothesised about"*.
+The hypothesis it offered was a pre-0.20 agent whose ack omitted `s1`. This agent is 0.20.4.
+
+Speaking the protocol to it directly is what settled it:
+
+    sent {"type": "config", "s1": 0, "s2": 10}
+    ACK  {"ok": true, "layers": 28, "s2": 10, "holds": [0, 27]}
+
+Two facts. It **holds 0-27** — the whole model, on a 64 GB machine that loaded all of it — while
+the coordinator assigns it 0-9. And there is **no `s1`** in the ack, which names the branch that
+answered: `node_server` selects its role with `is_true_last = (self.hi == self.n - 1)`, so a node
+holding through the final layer is "true last" for every question, including a probe about layers
+0-9. It ran `last_stage(model, 10)` — `layers[10:]` plus the final norm — and returned it
+confidently. The right answer to a different question, which is exactly why the error was large,
+stable, and identical six days and one release apart.
+
+The range check could not catch it, and for a reason worth keeping: `s1` is absent, which the
+code correctly reads as *silence, not disagreement* (a rule that exists because omitting a field
+is what an older agent does); and `s2` is the caller's own value echoed back, which can never
+disagree. `holds` was the one field that was neither — and `challenge_middle_node` threw it away.
+
+**That is [P37] verbatim, one function over.** Its finding was *"the ack that explained it was on
+the wire from the beginning and `challenge_node` threw it away"*, and the fix was to read `holds`.
+`challenge_middle_node`, four lines down the same file, never got it. Filed as [P49].
+
+Fixed on both sides, deliberately independent: the verifier-side `holds` check works against
+today's agents with **no release**, which matters when the machine is behind a NAT in a house; and
+`node_server` now uses `"s1" not in msg` to tell a probe from pipeline traffic, because the
+callers genuinely differ — a middle relay hands its next hop `{s2, n, wire}` and never an `s1`.
+
+**Serving was never affected**, which is why this stayed invisible for six days. Real traffic
+carries `host_b` and takes the middle role, which uses the caller's `s1`/`s2`. The driver has been
+computing layers 0-9 correctly for every actual request. It simply could not prove it — and under
+[P47] a node that cannot prove it is a node that is never paid.
+
+### The auditor was asleep for half the network's life
+
+[P47] cause 2 said emission cannot tell "we did not check" from "it failed". The interesting part
+turned out not to be `RangeMismatch` or `ChallengeRefused` at all. It is that the verifier is one
+process on a Windows PC, and `verify_service.log` says that process was **not running for 207 of
+the 390 hours of its own history — 53%**.
+
+In the exact window [P47] measured, of 174 hourly slots it was down for 46 and unable to read the
+roster for 11. **57 of `node-c-pavilion`'s 64 unpaid hours are hours in which the coordinator
+could not have challenged anybody.** That machine has passed 4,523 challenges. It is the
+most-proven node on the network, and it earned nothing for those hours because we were not
+watching.
+
+So the rule changed from *"a challenge passed inside this slot"* to **"the node's proof is
+current, or the reason it is not is provably ours."** Emission pays for **proven** work, not for
+**observed** work — the difference being entirely in the coordinator's hands.
+
+Three mechanisms, each bounded so that no path to payment is one a node can create, detect, or
+exploit. Rule 2 — presence alone must never pay — was the constraint the whole design was built
+around, not an afterthought:
+
+  1. **A pass carries**, for `EMISSION_POC_VALID_SLOTS`. Written onto the attendance row by
+     `touch_node` rather than read at settlement, so the row still freezes its own inputs, which
+     is what `--replay` rests on ([P40]).
+  2. **An unaudited slot is our failure.** `verify_service` posts `/verifier/heartbeat` every
+     cycle; `audit_slots` records it. A node cannot write one of those rows, suppress one, or
+     observe whether one exists.
+  3. **The excuse runs out**, at `EMISSION_MAX_UNAUDITED_SLOTS`. Bounded by count, not discounted
+     by rate — a discount would be a penalty for our own downtime, which is the thing being fixed.
+
+The load-bearing detail is the **epoch**. Absence of a row is the signal, and every slot in
+history has no row, so without `audit_epoch()` the deploy itself would read as a network-wide
+blackout and pay every present node for the whole of the past — paying for presence, arriving
+through the door built to protect volunteers. Its tripwire had to be checked twice: the first
+attempt did not fire, because the epoch turned out to be guarded in two places.
+
+Excused rows count toward replica depth, or our outage would read as scarcity and pay a
+**premium** at exactly the moment the coordinator knows least.
+
+`ChallengeRefused` and `RangeMismatch` are deliberately **not** excused, and that is where the
+real farming risk sits: the first is self-declared (a node says "I am paused" and would be paid
+for saying it, while not serving), and the second rests on a field the node reports itself. Both
+now record their reason regardless, which is the half that costs nothing.
+
+`reconcile_emission.py` had to learn all of this or [P40]'s standing assertion would have begun
+alarming on [P47]'s fix — every excused hour reading as a reward paid to a row that does not
+qualify. The equivalence test that keeps its duplicated pricing honest now randomises across the
+unaudited threshold, and immediately earned its keep: the excused short-circuit was skipping the
+block-of-serving-model gate, paying a node for holding layers 27-32 of a 28-layer model.
+
+Cause 3 was small and unambiguous: `/node/{id}/peer-attest` recorded the vote and never called
+`mark_slot_poc`. One passing vote now unlocks the hour — deliberately not the promotion bar,
+since requiring quorum would make emission hostage to how many peers happen to be awake, which is
+[P47]'s own mistake one level up.
+
+### The flag stayed off
+
+`STAGE1_FAILURES_ARE_SCORED` is still `False`. It was written to wait for one thing — the live
+driver seen passing — and what arrived was the live driver seen failing, for a reason nobody had
+found. Flipping it would have flagged the machine holding stage 1 on its very next sweep. The
+asymmetry did precisely the job it was written for, which is the argument for building it that
+way rather than trusting the analysis that produced it.
+
+`test_emission_unaudited.py` 19, `test_reconcile_emission.py` 40, `test_peer_verify.py` 16,
+`test_stage1_challenge.py` 10, `test_verifier_survives.py` 37. Every tripwire fired before being
+restored.
+
 ## Known limits / next steps
 - **The 3.2 / 4.6 / 6.2 tok/s scaling curve predates Ethernet** and was measured with
   54–109 ms of Wi-Fi power-save latency on every node_c hop (Session 59). The sub-linearity
