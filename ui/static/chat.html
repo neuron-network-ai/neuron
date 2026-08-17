@@ -222,6 +222,13 @@
     border:0;border-radius:6px;padding:.25rem .6rem;margin-left:.35rem;
     background:var(--brand);color:var(--on-brand)}
   #ownclaim button:disabled{opacity:.55;cursor:not-allowed}
+  /* Update notice. Quiet on purpose — an update is information, not a problem, and painting it
+     like the low-balance warning would teach people to ignore that one. */
+  #updnote{display:none;max-width:760px;width:100%;margin:0 auto .45rem;
+    background:var(--panel,rgba(127,127,127,.10));color:var(--muted);border-radius:8px;
+    padding:.4rem .7rem;font-size:12px;text-align:center}
+  #updnote.show{display:block}
+  #updnote a{color:var(--brand);font-weight:600;text-decoration:underline}
 </style>
 </head>
 <body>
@@ -275,6 +282,9 @@
              volunteer whose machine was earning never saw it. Zero nodes on the live network
              had an owner recorded. -->
         <div id="ownclaim" role="status"></div>
+        <!-- A release the operator has to act on was visible on the dashboard and nowhere the
+             operator looks. role=status, not alert: a new version is news, not an emergency. -->
+        <div id="updnote" role="status"></div>
         <div class="bar">
           <textarea id="input" rows="1" aria-label="Message"
                     placeholder="Type a message and press Enter…"></textarea>
@@ -765,6 +775,47 @@ async function refreshOwnClaim(){
   });
   el.append(msg, btn);
 }
+
+// IS THERE A NEWER BUILD? The coordinator's operator dashboard could answer this and the app
+// could not, so the one person who has to act on a release was the one person not told. Auto-
+// update handles most machines, but it is a setting a person can turn off, it can fail its
+// download, and a source checkout is deliberately never touched by it — all three end with a
+// node running an old build and nothing saying so.
+//
+// Deliberately quiet, and deliberately NOT a nag: no dismiss state to remember, no modal, no
+// badge. It states a fact with a link and gets out of the way. Anything louder trains people to
+// ignore the strip above it, which is a real warning about their balance.
+async function refreshUpdateNote(){
+  const el = $("#updnote");
+  if(!el) return;
+  let d;
+  try{ d = await (await fetch("/app/update")).json(); }
+  catch(err){ return; }
+  // `available` is computed server-side with a NUMERIC comparison ([P48]): "0.20.10" > "0.20.9"
+  // is false as strings, and a node AHEAD of the network must never be told to downgrade. An
+  // error means we could not check, which must never render as "you are up to date".
+  if(!d || !d.available){ el.className = ""; el.textContent = ""; return; }
+  el.className = "show";
+  el.textContent = "";
+  const msg = document.createElement("span");
+  msg.textContent = (d.rollback
+    ? "NEURON " + d.latest + " is the build this network is asking nodes to run (you have "
+      + d.running + "). "
+    : "NEURON " + d.latest + " is available — you are running " + d.running + ". ");
+  el.append(msg);
+  const a = document.createElement("a");
+  // The coordinator's own URL when it gives one, so a rollback points at the build the network
+  // actually wants rather than at whatever is newest on the releases page.
+  a.href = d.url || "https://github.com/neuron-network-ai/neuron/releases/latest";
+  a.target = "_blank";
+  a.rel = "noopener";
+  a.textContent = "Get it";
+  el.append(a);
+  const how = document.createElement("span");
+  how.textContent = " — quit NEURON first, then run the installer.";
+  el.append(how);
+}
+refreshUpdateNote();
 
 // Escape, or a click anywhere else, puts it away again: a revealed credential should not
 // stay on screen because the reader walked off.

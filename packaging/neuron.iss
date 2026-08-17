@@ -31,6 +31,16 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
+; STOP THE RUNNING APP BEFORE OVERWRITING IT ([P24], [P46]).
+; Installing over a live agent is how a partial copy happens: the running exe holds files open,
+; those specific files are skipped, and the install completes "successfully" with a directory
+; that is half one build and half another. On 2026-08-17 that left an index.html asking for a
+; bundle that was never copied — a blank page, with every other signal green.
+; Restart Manager asks the app to close rather than killing it, so a node mid-request finishes
+; rather than dropping the chain it is serving.
+CloseApplications=yes
+CloseApplicationsFilter=*.exe,*.dll,*.pyd
+RestartApplications=no
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Shortcuts:"
@@ -39,6 +49,19 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 ; zero ([P21]). A stranger will not go hunting for this checkbox, so the safe default is on;
 ; unticking it is still one click for anyone who wants to start it by hand.
 Name: "startup"; Description: "Start NEURON automatically when I sign in"; GroupDescription: "Startup:"
+
+[InstallDelete]
+; CLEAR THE CONTENT-HASHED BUNDLES BEFORE COPYING ([P46]).
+; Vite names every bundle with a content hash, so index.html references a DIFFERENT filename on
+; each build, and `ignoreversion` overwrites same-named files while NEVER pruning ones that
+; vanished. Left alone, an upgrade merges two builds: last build's index-OLD.js sits beside this
+; build's index.html, which asks for index-NEW.js. Both files look fine; the page renders
+; nothing.
+; Deleting the directory first makes the copy a REPLACE rather than a merge, which is the only
+; state in which the reference and the file are guaranteed to agree. Scoped to `assets` alone —
+; the rest of {app} is version-stable filenames that ignoreversion handles correctly, and a
+; broader delete would throw away files this installer does not put back.
+Type: filesandordirs; Name: "{app}\_internal\ui\static\app\assets"
 
 [Files]
 ; the whole PyInstaller onedir output (neuron-agent.exe + _internal\)

@@ -248,6 +248,40 @@ def main():
     check("a failure re-enables the button rather than stranding the strip",
           "btn.disabled = false;" in SRC)
 
+    print("\n-- a new release is told to the person who has to install it")
+    # 0.20.2 exists because nothing reported the running build, so a rollout was invisible and a
+    # rollback could not be confirmed. That was fixed for the OPERATOR'S dashboard; the app —
+    # the one place the person who must act actually looks — still said nothing. Auto-update
+    # covers most machines and is not enough on its own: it is a setting a person can switch
+    # off, its download can fail (`update_check` says which), and a source checkout is
+    # deliberately never touched by it.
+    check("there is a strip for it", '<div id="updnote" role="status">' in SRC)
+    check("...announced politely — a release is news, not an emergency",
+          '#updnote{' in SRC and 'role="status"' in SRC)
+    check("...and styled quieter than the balance warning above it",
+          "var(--muted)" in SRC[SRC.index("#updnote{"):SRC.index("#updnote a{")],
+          "louder than a real warning teaches people to ignore the real warning")
+    check("it asks the server, which compares NUMERICALLY ([P48])",
+          '"/app/update"' in SRC and "d.available" in SRC)
+    check("...and shows nothing when there is no newer build",
+          "if(!d || !d.available)" in SRC,
+          "'we could not check' must never render as 'you are up to date'")
+    check("it names both versions, so the reader can tell what changes",
+          "d.latest" in SRC and "d.running" in SRC)
+    check("a ROLLBACK is worded as the network asking, not as an upgrade",
+          "asking nodes to run" in SRC,
+          "telling someone to 'update' to an older build reads as a bug")
+    check("...following the coordinator's own url when it gives one",
+          "d.url ||" in SRC,
+          "a rollback must point at the build the network wants, not at whatever is newest")
+    check("the link opens away from the chat, safely",
+          'a.rel = "noopener"' in SRC)
+    check("it says to quit first, which is what makes the install complete ([P46])",
+          "quit NEURON first" in SRC)
+    check("there is no dismiss state to get stuck", "localStorage" not in
+          SRC[SRC.index("async function refreshUpdateNote"):SRC.index("refreshUpdateNote();")],
+          "a remembered dismissal is how a node stays on a bad build forever")
+
     print("\n-- a node dying is NOT presented as a failure")
     # The load-bearing correction in this file. A node dying mid-answer is RECOVERED, token
     # for token: neuron_driver._reroute takes a fresh chain and replays the junction cache into

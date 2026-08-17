@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import threading
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -45,6 +46,8 @@ from api.openai_compat import router as openai_router, docs_html
 from engine import local_gguf
 from rag import retriever as rag
 from safety import moderation
+from agent import updater
+from ui import app_assets
 from ui import conversations
 from ui import oauth as oauth_module
 
@@ -76,6 +79,23 @@ async def lifespan(app: FastAPI):
         threading.Thread(target=local_gguf.prefetch_best, daemon=True).start()
     else:
         DRIVER.ensure_loaded()
+    # [P46], the half a build-time guard cannot cover: is what was COPIED onto this machine
+    # coherent? The build test proves the source tree is; nothing checked the install, and the
+    # symptom is a blank page with every other signal green. Logged at startup because that is
+    # the one moment somebody is watching, and loudly because the alternative is silence that
+    # looks identical to health.
+    _assets = app_assets.verify(str(APP_DIR))
+    if _assets["built"] and not _assets["ok"]:
+        log.error("INSTALL IS INCOMPLETE — /next would render a blank page. index.html asks "
+                  "for %d file(s) that are not here: %s. %s",
+                  len(_assets["missing"]), ", ".join(_assets["missing"]), app_assets.REMEDY)
+    elif _assets["orphans"]:
+        # Not broken, and worth saying: this is what a merged-rather-than-replaced copy looks
+        # like, and it is the state that turns into the failure above on the next build.
+        log.warning("%d orphaned bundle(s) from an earlier build are sitting in the app "
+                    "directory (%s). Nothing is broken, but this is the fingerprint of an "
+                    "install that was merged rather than replaced.",
+                    len(_assets["orphans"]), ", ".join(_assets["orphans"][:4]))
     print(f"[ui] ready | coordinator={COORDINATOR} | chat at / , OpenAI API at /v1")
     yield
 
@@ -131,7 +151,75 @@ def index_next():
             "<h1>Not built</h1><p>Run <code>npm install &amp;&amp; npm run build</code> in "
             "<code>ui/web/</code>. The existing chat is unaffected at <a href='/'>/</a>.</p>",
             status_code=503)
+    # [P46]: a broken install must not be served as a blank page. Checked here as well as at
+    # startup because the directory can be changed under a running app -- that is exactly how it
+    # happened, a copy landing on top of an installation nobody stopped.
+    state = app_assets.verify(str(APP_DIR))
+    if not state["ok"]:
+        log.error("serving /next with %d missing asset(s): %s",
+                  len(state["missing"]), ", ".join(state["missing"]))
+        return HTMLResponse(
+            "<h1>This install is incomplete</h1>"
+            "<p>The page asks for files that are not on this machine, so it would render as a "
+            "blank screen:</p><ul>"
+            + "".join(f"<li><code>{m}</code></li>" for m in state["missing"])
+            + f"</ul><p>{app_assets.REMEDY}</p>"
+            "<p>The chat at <a href='/'>/</a> is unaffected and still works.</p>",
+            status_code=503)
     return FileResponse(str(built))
+
+
+# --------------------------------------------------------------------------- #
+# Is there a newer build? ([P48] item 1 taught the comparison; this is the surface)
+# --------------------------------------------------------------------------- #
+# Cached, because this is a network call and the page asks on every load. An hour is the right
+# order: `updater.CHECK_SECONDS` is a day, so a tighter TTL here would poll far more often than
+# the thing it reports on without ever learning anything new.
+_UPDATE_TTL_S = 3600.0
+_update_cache = {"at": 0.0, "data": None}
+_update_lock = threading.Lock()
+
+
+@app.get("/app/update")
+def app_update():
+    """What build is running, and is there a newer one?
+
+    The operator's own dashboard could already answer this and the app could not — so the
+    person who has to act on an update was the one person not told about it. `_version_gt`
+    compares NUMERICALLY ([P48]): `"0.20.10" > "0.20.9"` is False as strings, so a lexical
+    comparison breaks at the tenth patch release, and a node AHEAD of the network must never be
+    told to downgrade.
+
+    Never raises and never blocks the page: an unreachable coordinator returns
+    `available: false` with the reason, because "we could not check" must not render as "you
+    are up to date" ([P24], and the whole of 0.20.2's reasoning).
+    """
+    now = time.time()
+    with _update_lock:
+        cached = _update_cache["data"]
+        if cached is not None and (now - _update_cache["at"]) < _UPDATE_TTL_S:
+            return cached
+    running = updater.LOCAL_VERSION
+    try:
+        info = updater.remote_info(COORDINATOR)
+        latest = str(info.get("version") or "")
+        data = {
+            "running": running,
+            "latest": latest or None,
+            # `is_newer`, not `!=`: the founder's own machine ran a locally-built 0.20.4 while
+            # the network advertised 0.20.3, and equality-as-currency told a node ahead of the
+            # network to downgrade.
+            "available": bool(latest) and updater.is_newer(latest, running),
+            "rollback": bool(info.get("rollback")),
+            "url": info.get("url") or None,
+            "error": None,
+        }
+    except Exception as e:                      # noqa: BLE001 - a status call must not fail loudly
+        data = {"running": running, "latest": None, "available": False, "rollback": False,
+                "url": None, "error": str(e)}
+    with _update_lock:
+        _update_cache.update(at=now, data=data)
+    return data
 
 
 @app.get("/api-docs", response_class=HTMLResponse)

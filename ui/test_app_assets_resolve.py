@@ -43,19 +43,11 @@ def check(label, cond, detail=""):
         print(f"  FAIL  {label}" + (f"\n        {detail}" if detail else ""))
 
 
-def referenced_assets(html):
-    """Every local asset the page asks for, however it is spelled.
-
-    Vite emits `./assets/name-HASH.js`; a leading `./` or `/` is stripped so the result is
-    always a path relative to the app root, which is how it sits on disk.
-    """
-    out = set()
-    for m in re.finditer(r'(?:src|href)\s*=\s*["\']([^"\']+)["\']', html):
-        ref = m.group(1)
-        if ref.startswith(("http://", "https://", "//", "data:", "#")):
-            continue
-        out.add(ref.lstrip("./").lstrip("/"))
-    return out
+# Imported, not re-implemented. The build-time and runtime checks are the same question asked
+# at different times ([P46]), and two copies of "which files does this page reference" would
+# drift exactly where it matters: the installed app would be checked by a rule the build never
+# had to satisfy.
+from ui.app_assets import referenced_assets, verify   # noqa: E402
 
 
 def main():
