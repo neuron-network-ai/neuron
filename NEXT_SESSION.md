@@ -23,7 +23,13 @@ earn an availability hour for its entire existence (~243 NRN).
 pool could not make was recorded as though made — `models.void_settlement` replaces it. And
 `genesis.py` now records `emission_pool_seed`, which was previously unrecoverable after seeding.
 
-Commits: `a8cb3ba`, `386b9db` on `main-full`. Not pushed.
+**[P48] filed.** Three things found by looking at the live product, not the code. Fixed: a node
+ahead of the network was told to downgrade (`av == latest` read as "current or behind"), and the
+download links on `docs/index.html` and `README.md` sat two releases back at v0.20.2. Not fixed
+and the interesting one: 0.20.4's wallet UI only exists on `/next` — see the open list.
+
+Commits: `a8cb3ba`, `386b9db`, `7c5aa4b`, `ef9c9ae` on `main-full`. **Not pushed** — pushing is
+also what publishes the corrected download links to the GitHub Pages site.
 
 ## Do these first
 
@@ -46,6 +52,13 @@ Commits: `a8cb3ba`, `386b9db` on `main-full`. Not pushed.
   emission cannot tell "not checked" from "failed" — that is likely the Pavilion's 64 lost
   hours. And `/node/{id}/peer-attest` never calls `mark_slot_poc`, so peer verification firing
   would still not pay anyone. Cause 2 is a decision about what emission pays FOR, not just a fix.
+- **[P48] item 3 — the `/next` → `/` swap is a SHIPPING blocker, not a tidy-up.** 0.20.4's
+  headline wallet UI (`≈ N network answers left`, `ui/web/src/components/Sidebar.tsx`) is served
+  at `/next`, while `/` still serves `ui/static/chat.html`. Every default user sees the old page,
+  so the feature the release exists for reaches nobody. Blocked on 59 source-text assertions in
+  `ui/test_chat_ui.py` that assert on chat.html's HTML strings and therefore cannot follow the
+  behaviour across implementations — port them as behaviour, the way Session 61 ported the claim
+  panel. Items 1 and 2 of [P48] (version display, download links) are already fixed in `ef9c9ae`.
 - **[P40] item 2** — run the reconciliation as a standing assertion, not by hand.
 - **[P39] item 5** — `delete_node` leaves a funded ledger row behind. The 8.69 NRN on
   `agent-bhpc012104-82cbee` was recovered only because that node was yours; on a volunteer's
@@ -105,6 +118,14 @@ That is likely the Pavilion's 64 unpaid hours. Decide what emission should pay
 for, then build it — this is a tokenomics decision, not just a bug fix. Cause 3
 is smaller: /node/{id}/peer-attest never calls mark_slot_poc, so peer
 verification firing for the first time still would not pay anyone.
+
+ALSO OPEN, and reclassified: the /next -> / swap is a SHIPPING blocker, not a
+tidy-up ([P48] item 3). 0.20.4's headline wallet UI lives only on /next while /
+still serves the old chat.html, so the feature the release exists for reaches no
+default user. Blocked on 59 source-text assertions in ui/test_chat_ui.py.
+
+Nothing is pushed. Pushing is also what publishes the corrected download links
+to the GitHub Pages site.
 
 Environment gotchas and the rest of the open list are in NEXT_SESSION.md.
 Budget note: weekly usage was at 97% on 2026-08-17, resetting Friday 4pm.
