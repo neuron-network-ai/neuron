@@ -46,11 +46,17 @@ pushed** — pushing is also what publishes the corrected download links to the 
 
 ## Do these first
 
-1. **Restart the agent on the Windows PC** (`neuron-agent.exe`, currently PID-whatever from
-   `%LOCALAPPDATA%\Programs\NEURON`). The `node_server` fix only reaches it on a restart, and
-   until then the driver keeps failing. The verifier-side `holds` fix reaches it sooner — restart
-   `verify_service.py` too — and turns the failure into an honest *PLACEMENT MISMATCH, not a bad
-   node* line instead of a wrong answer.
+1. **Restart `verify_service.py`** — it runs from the repo, so this alone picks up the
+   verifier-side `holds` check and turns the driver's failure into an honest *PLACEMENT
+   MISMATCH, not a bad node* line instead of a wrong answer scored against it. Do this first;
+   it is the cheap half and needs nothing else.
+
+   **The `node_server` fix does NOT arrive with a restart.** The live agent is the packaged
+   `neuron-agent.exe` in `%LOCALAPPDATA%\Programs\NEURON` — restarting it re-runs the installed
+   0.20.4 build, not the repo. It needs a rebuild and reinstall (or a release the auto-updater
+   picks up). Same trap as the desktop UI: repo edits are invisible until the build is redone.
+   Until then the verifier-side fix is carrying this on its own, which is exactly why it was
+   written to work against today's agents.
 2. **Then watch `verify_service.log`.** Expect `PLACEMENT MISMATCH` for the driver, not a pass:
    it really does hold 0-27 while assigned 0-9, and that is the next thing to fix (below). What
    must NOT appear is `wrong answer (max_err 28.6)`.
@@ -141,8 +147,9 @@ for 53% of its own history and 57 of the Pavilion's 64 unpaid hours are hours
 nobody could have been challenged in. STAGE1_FAILURES_ARE_SCORED stays False —
 the evidence arrived and pointed the other way.
 
-FIRST: restart neuron-agent.exe on the Windows PC (the node_server fix only
-reaches it on a restart) and verify_service.py, then deploy the coordinator —
+FIRST: restart verify_service.py (it runs from the repo, so it picks up the
+holds check on its own — the node_server fix needs a REBUILD, since the live
+agent is the packaged neuron-agent.exe), then deploy the coordinator —
 audit_slots, /verifier/heartbeat, poc_excused and last_poc_at are schema and
 endpoint changes, and init_db() migrates on start. Nothing pays an excused hour
 until the verifier is heartbeating, by construction, so deploy order is free.
