@@ -165,6 +165,30 @@ interesting one.** The founder expected `≈ N network answers left` and saw
 still serves `ui/static/chat.html`. So the entire wallet UI that 0.20.4 exists to ship is
 invisible to anyone using the default route, which is everyone.
 
+**And it is worse than a shipping problem — it is the money-safety blocker (2026-08-17).** The
+founder put it exactly: *"the NRN distribution is a matter of ID, not the node — even if a person
+removes NEURON from the PC, his balance should come back to him."* That is the right design and
+emission already reaches for it: `close_slots` pays `get_node_owner(node) or node`, so a node
+with an OWNER recorded pays into the wallet that person logs into, and uninstalling costs them
+nothing.
+
+**Nobody can bind an owner, because the panel that does it is on this route.** Measured on the
+live ledger:
+
+| account | balance | owner |
+|---|---|---|
+| `node-c-pavilion` | 114.799539 NRN | **none** |
+| `agent-optinovate-6ff49d` | 5.259616 NRN | **none** |
+| `agent-bhpc012101-18f1da` | 0.051484 NRN | **none** |
+
+**120.11 NRN, and zero nodes with an owner bound.** Every one of those balances is protected by
+nothing but a `node_token` in one config.json on one disk — and [P50] is that file being
+*rotated*, not even deleted, and coming within one write of orphaning 5.26 NRN. The uninstaller
+would do it deliberately.
+
+So this route swap is not "the wallet UI is on the wrong URL". It is the reason a volunteer's
+earnings live on a machine instead of in an account.
+
 That makes the `/next` → `/` swap a **shipping** problem rather than the tidy-up it has been
 filed as. It is blocked on porting 59 source-text assertions in `ui/test_chat_ui.py` — tests
 that assert on chat.html's HTML strings, which is exactly why they cannot follow the behaviour
