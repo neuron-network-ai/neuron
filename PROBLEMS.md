@@ -124,6 +124,43 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
 
 ## Problems & risks
 
+### [P46] 🟡 The installed React UI is a blank page, because index.html and its bundle came from different builds (2026-08-17)
+
+**Live on the founder's machine, found by opening it.** `/next` served an `index.html` asking
+for `assets/index-DBnmnt4a.js`; that file returned **404**, while `assets/index-eBBdaPpV.js`
+from a build six days earlier sat beside it returning 200. The page loads, renders nothing, and
+every other signal is green — `/` is fine, `/status` is fine, the node serves and earns.
+
+**The mechanism is a property of the toolchain, not a one-off.** Vite content-hashes every
+bundle, so `index.html` names a DIFFERENT file on each build. `neuron.iss` copies with
+`ignoreversion`, which overwrites same-named files and **never prunes** ones that vanished. So
+anything that copies a SUBSET — an interrupted install, a file locked by the running agent, a
+hand-copy — leaves last build's bundle beside this build's index.html, and the two do not refer
+to each other. Files whose names did not change (`react-*.js`, `markdown-*.js`) update fine and
+disguise it further.
+
+Here the install directory held `neuron-agent.exe` and `index.html` from 2026-08-17 08:02 with
+`unins000.dat` from 2026-08-13, so the 0.20.3 installer had not run at all — a subset had been
+copied in. The immediate remedy is to quit the app and run the installer properly.
+
+**Guarded now:** `ui/test_app_assets_resolve.py` reads the built `index.html` and asserts every
+local asset it references exists, plus a second check for orphaned bundles — which is the
+fingerprint of a merged-rather-than-replaced copy and was present here. Verified against the
+broken directory: it reports exactly the two missing files. It runs on the SOURCE tree, so it
+fails before a bad build is ever packaged, and skips cleanly when `ui/static/app` is absent
+(a checkout with no Node is a legitimate state that `ui/app.py` already handles).
+
+**Still open, and it is the harder half:** the guard proves the BUILD is coherent; it cannot
+prove the INSTALL is. Nothing checks, on the machine, that what was copied matches what was
+shipped. Options, cheapest first — have `ui/app.py` verify its own index.html's assets at
+startup and log loudly if any are missing (it already knows the path); add an `[InstallDelete]`
+to `neuron.iss` clearing the app's `assets` directory before the copy, which removes the
+stale-orphan half entirely; and give the installer a stop-the-app step, whose absence [P24]
+already names.
+
+Related: [P24] (installing over a running agent, `neuron.iss` has no stop-the-app step),
+[P39] (the claim panel this was hiding — it is in the bundle that 404s).
+
 ### [P45] 🟢 The file that holds a node's token was tracked in git — fixed (2026-08-17)
 
 **`agent/config.json` was in the repository.** `.gitignore` carried
