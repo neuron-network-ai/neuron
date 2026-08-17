@@ -201,6 +201,53 @@ def main():
     check("no browser wallet is a stated condition with a way out, not a dead button",
           "No wallet extension in this browser" in SRC and "tools/sign_payout.html" in SRC)
 
+    print("\n-- the claim is REACHABLE, which is the whole difference between built and shipped")
+    # Live 2026-08-17: zero of three nodes on the network had an owner recorded, and 120.11 NRN
+    # sat in node accounts whose only credential is a node_token in one config.json. Not because
+    # the claim was broken — it was built in Session 61 and works — but because it rendered only
+    # inside the wallet panel, which needs you to be signed in AND to click "Wallet ID". And the
+    # server's `needs_owner` was `logged_in AND not owned`, so a logged-OUT operator got false
+    # and saw nothing: the message explaining why to sign in was gated on being signed in.
+    # [P50] is what that costs — a config file rotated by accident, one write from orphaning it.
+    check("there is a strip for it, above the composer, not buried in a panel",
+          '<div id="ownclaim" role="status">' in SRC)
+    check("...driven by `unclaimed` (the fact), not `needs_owner` (the readiness)",
+          "d.unclaimed" in SRC and "needs_owner" not in SRC.split("function refreshOwnClaim")[1],
+          "needs_owner is false while logged out, which is exactly when this must show")
+    check("...and it renders when LOGGED OUT, which is the state that was invisible",
+          "if(!d.logged_in){" in SRC and "Sign in to record the earnings as yours" in SRC)
+    check("...naming the real stake rather than a feature",
+          "tied to a file on this disk, and are lost with it" in SRC)
+    check("...offering the actual sign-in links, not just advice",
+          '"/auth/login/" + p' in SRC)
+    check("a signed-in operator gets the claim itself, not another instruction",
+          "Claim these earnings" in SRC)
+    check("...and is told where the NRN is now",
+          "is held under \" + d.node_id" in SRC)
+    check("it is NOT shown to a machine that serves no node",
+          "if(!d.is_node || !d.unclaimed)" in SRC,
+          "a driver-only machine has nothing to claim and must not be nagged")
+    check("...nor once an owner exists", 'el.className = ""' in SRC)
+    check("it is called OUTSIDE refreshAuth, which returns early when logged out",
+          "\nrefreshOwnClaim();" in SRC,
+          "folding it into refreshAuth reproduces, client-side, the gate that hid the feature")
+    check("signing out restores the invitation", "refreshOwnClaim();          // signing out" in SRC)
+    # One signing flow, two entry points. Two copies of a wallet-signature sequence is two
+    # copies that drift, and the one that drifts is the one nobody clicks.
+    # Counted on the NODE endpoint, not on `personal_sign`: the wallet payout-address flow
+    # (`/wallet/payout/*`) is a separate binding with its own signature and legitimately has its
+    # own copy. A count over `personal_sign` conflated the two and demanded a merge that would
+    # have been wrong — these bind different things to different accounts.
+    check("the node claim's signature flow is shared, not duplicated",
+          "async function runNodeClaim(setStatus)" in SRC
+          and SRC.count('"/node/payout/bind"') == 1)
+    check("...still sending no wallet id, so it cannot record somebody else as the owner",
+          "No wallet id is sent" in SRC)
+    check("a declined signature is still a decline, not a failure",
+          "You declined the signature. Nothing changed" in SRC)
+    check("a failure re-enables the button rather than stranding the strip",
+          "btn.disabled = false;" in SRC)
+
     print("\n-- a node dying is NOT presented as a failure")
     # The load-bearing correction in this file. A node dying mid-answer is RECOVERED, token
     # for token: neuron_driver._reroute takes a fresh chain and replays the junction cache into

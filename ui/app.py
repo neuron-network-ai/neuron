@@ -272,12 +272,20 @@ def node_owner(request: Request):
     except requests.RequestException as e:
         return {"is_node": True, "node_id": NODE_ID, "logged_in": bool(wallet_id),
                 "error": str(e)}
+    owner = data.get("owner_wallet_id")
     return {"is_node": True, "node_id": NODE_ID, "logged_in": bool(wallet_id),
             "payout_address": data.get("payout_address"),
-            "owner_wallet_id": data.get("owner_wallet_id"),
+            "owner_wallet_id": owner,
             # The prompt is worth showing only when there is something to record AND somebody
             # to record it against.
-            "needs_owner": bool(wallet_id) and not data.get("owner_wallet_id")}
+            "needs_owner": bool(wallet_id) and not owner,
+            # `unclaimed` is the FACT; `needs_owner` is only "can be recorded right now".
+            # Conflating them hid the whole feature: the claim panel rendered on `needs_owner`,
+            # which is false while nobody is signed in, so a machine that was earning with its
+            # NRN tied to a file on disk displayed NOTHING -- and the prompt explaining why you
+            # should sign in was itself gated on being signed in. Zero nodes on the live network
+            # had an owner recorded, and this is why.
+            "unclaimed": not owner}
 
 
 @app.get("/node/payout/challenge")

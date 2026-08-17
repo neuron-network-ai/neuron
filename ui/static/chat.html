@@ -210,6 +210,18 @@
      is an invitation inside a notice, not a primary action competing with Send. */
   #lowbal a{color:var(--warn);font-weight:600;text-decoration:underline}
   #lowbal b{color:var(--warn)}
+  /* The unclaimed-earnings strip. Same shape as #lowbal and deliberately NOT the same colour:
+     this is not a warning about the account, it is an offer about this machine, and painting it
+     amber next to a real low-balance warning would make two different things look like one. */
+  #ownclaim{display:none;max-width:760px;width:100%;margin:0 auto .45rem;
+    background:var(--brand-soft,rgba(21,128,61,.10));color:var(--fg);border-radius:8px;
+    padding:.5rem .7rem;font-size:12.5px;text-align:center}
+  #ownclaim.show{display:block}
+  #ownclaim a{color:var(--brand);font-weight:600;text-decoration:underline}
+  #ownclaim button{font:inherit;font-size:12.5px;font-weight:600;cursor:pointer;
+    border:0;border-radius:6px;padding:.25rem .6rem;margin-left:.35rem;
+    background:var(--brand);color:var(--on-brand)}
+  #ownclaim button:disabled{opacity:.55;cursor:not-allowed}
 </style>
 </head>
 <body>
@@ -258,6 +270,11 @@
         <!-- role=status, not alert: it appears on load for an out-of-credit account, and an
              assertive live region would interrupt a screen reader every time refreshAuth runs. -->
         <div id="lowbal" role="status"></div>
+        <!-- Above the composer, not inside the wallet panel. The claim flow existed and was
+             unreachable: it rendered only after signing in AND clicking "Wallet ID", so a
+             volunteer whose machine was earning never saw it. Zero nodes on the live network
+             had an owner recorded. -->
+        <div id="ownclaim" role="status"></div>
         <div class="bar">
           <textarea id="input" rows="1" aria-label="Message"
                     placeholder="Type a message and press Enter…"></textarea>
@@ -449,6 +466,7 @@ async function refreshAuth(){
       hideWallet();
       currentConversationId = null;
       refreshAuth();
+      refreshOwnClaim();          // signing out puts the strip back to its explain-and-invite form
     });
     loadSidebar();
   }catch(e){
@@ -456,6 +474,10 @@ async function refreshAuth(){
   }
 }
 refreshAuth();
+// Driven separately from refreshAuth rather than inside it: refreshAuth returns early on the
+// logged-out path, which is precisely the state this strip has to render — folding it in there
+// would reproduce, in the client, the exact gate that hid this feature on the server.
+refreshOwnClaim();
 
 // ---- wallet id reveal -------------------------------------------------------
 // /auth/me already carries the wallet id; all this decides is when it is on screen. It has to
@@ -628,46 +650,120 @@ function buildNodeOwnerSection(){
     wrap.append(btn, stat);
   }).catch(() => { /* the chat must not care that this failed */ });
 
+  // The flow itself lives in runNodeClaim, shared with the strip above the composer. Two copies
+  // of a wallet-signature sequence is two copies that drift, and the one that drifts is the one
+  // nobody clicks.
   btn.addEventListener("click", async () => {
-    if(!window.ethereum){
-      stat.textContent = "No wallet extension in this browser. Open NEURON in the browser that "
-        + "holds your wallet, or use tools/sign_payout.html.";
-      return;
-    }
     btn.disabled = true;
-    try{
-      stat.textContent = "Connecting…";
-      const accounts = await window.ethereum.request({method: "eth_requestAccounts"});
-      const from = accounts[0];
-      stat.textContent = "Preparing a challenge for " + from + " …";
-      const ch = await (await fetch("/node/payout/challenge?address="
-                                    + encodeURIComponent(from))).json();
-      if(ch.error){ stat.textContent = ch.error; btn.disabled = false; return; }
-      stat.textContent = "Approve the signature in your wallet — it moves no funds.";
-      const signature = await window.ethereum.request({
-        method: "personal_sign", params: [ch.message, from]
-      });
-      // No wallet id is sent: ui/app.py takes it from the session, so this cannot record
-      // somebody else as the owner of this machine's earnings.
-      const res = await (await fetch("/node/payout/bind", {
-        method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({address: ch.address, nonce: ch.nonce, signature})
-      })).json();
-      if(res.error){ stat.textContent = res.error; btn.disabled = false; return; }
-      val.textContent = res.payout_address;
+    const addr = await runNodeClaim((t) => { stat.textContent = t; });
+    if(addr){
+      val.textContent = addr;
       val.className = "pval";
       btn.remove();
       stat.textContent = "Claimed. These earnings are now recorded as yours, and survive "
         + "losing this machine.";
-    }catch(err){
-      const denied = err && (err.code === 4001 || /reject|denied/i.test(err.message || ""));
-      stat.textContent = denied
-        ? "You declined the signature. Nothing changed — you can do this any time."
-        : ("Could not claim: " + (err && err.message ? err.message : err));
+    } else {
       btn.disabled = false;
     }
   });
   return wrap;
+}
+
+// The claim, as one function, because it now has two entry points and a signing flow that
+// exists twice is a signing flow that diverges. `setStatus` is how each caller shows progress;
+// it returns the bound address, or null if nothing was recorded.
+async function runNodeClaim(setStatus){
+  if(!window.ethereum){
+    setStatus("No wallet extension in this browser. Open NEURON in the browser that holds "
+              + "your wallet, or use tools/sign_payout.html.");
+    return null;
+  }
+  try{
+    setStatus("Connecting…");
+    const accounts = await window.ethereum.request({method: "eth_requestAccounts"});
+    const from = accounts[0];
+    setStatus("Preparing a challenge for " + from + " …");
+    const ch = await (await fetch("/node/payout/challenge?address="
+                                  + encodeURIComponent(from))).json();
+    if(ch.error){ setStatus(ch.error); return null; }
+    setStatus("Approve the signature in your wallet — it moves no funds.");
+    const signature = await window.ethereum.request({
+      method: "personal_sign", params: [ch.message, from]
+    });
+    // No wallet id is sent: ui/app.py takes it from the session, so this cannot record
+    // somebody else as the owner of this machine's earnings.
+    const res = await (await fetch("/node/payout/bind", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({address: ch.address, nonce: ch.nonce, signature})
+    })).json();
+    if(res.error){ setStatus(res.error); return null; }
+    return res.payout_address;
+  }catch(err){
+    const denied = err && (err.code === 4001 || /reject|denied/i.test(err.message || ""));
+    setStatus(denied
+      ? "You declined the signature. Nothing changed — you can do this any time."
+      : ("Could not claim: " + (err && err.message ? err.message : err)));
+    return null;
+  }
+}
+
+// THE STRIP THAT MAKES ANY OF THIS REACHABLE.
+//
+// The claim flow was built in Session 61 and, on the live network, had never once been used:
+// zero of three nodes had an owner recorded. Not because it was broken — because it rendered
+// only inside the wallet panel, which needs you to be signed in AND to click "Wallet ID". And
+// the server's `needs_owner` was `logged_in AND not owned`, so a logged-OUT operator got false
+// and saw nothing at all. The message telling you why to sign in was gated on being signed in.
+//
+// So this reads `unclaimed`, which is the fact rather than the readiness, and it sits above the
+// composer where the low-balance strip already proved a person will read it. Logged out it
+// explains and offers sign-in; logged in it claims. It disappears for good once an owner
+// exists, and a machine that serves no node never sees it.
+async function refreshOwnClaim(){
+  const el = $("#ownclaim");
+  if(!el) return;
+  let d;
+  try{ d = await (await fetch("/node/owner")).json(); }
+  catch(err){ return; }              // the chat must not care that this failed
+  if(!d.is_node || !d.unclaimed){ el.className = ""; el.innerHTML = ""; return; }
+  el.className = "show";
+  el.innerHTML = "";
+  const msg = document.createElement("span");
+  if(!d.logged_in){
+    // Says what is at stake in one sentence, because the cost is not obvious: the earnings are
+    // real and the thing holding them is a file. [P50] is that file being rotated by accident.
+    msg.textContent = "This computer is earning NRN. Sign in to record the earnings as yours — "
+      + "until you do they are tied to a file on this disk, and are lost with it. ";
+    el.append(msg);
+    fetch("/auth/me").then(r => r.json()).then(me => {
+      const providers = me.providers_configured || [];
+      providers.forEach((p, i) => {
+        const a = document.createElement("a");
+        a.href = "/auth/login/" + p;
+        a.textContent = "Sign in with " + p.charAt(0).toUpperCase() + p.slice(1);
+        if(i) el.append(document.createTextNode(" · "));
+        el.append(a);
+      });
+    }).catch(() => {});
+    return;
+  }
+  msg.textContent = "This computer's NRN is held under " + d.node_id
+    + ", not under your account. Claim it so it survives losing this machine. ";
+  const btn = document.createElement("button");
+  btn.textContent = "Claim these earnings";
+  const say = (t) => { msg.textContent = t + " "; };
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    const addr = await runNodeClaim(say);
+    if(addr){
+      btn.remove();
+      msg.textContent = "Claimed — these earnings are recorded as yours and survive losing "
+        + "this machine.";
+    } else {
+      btn.disabled = false;
+    }
+  });
+  el.append(msg, btn);
 }
 
 // Escape, or a click anywhere else, puts it away again: a revealed credential should not
