@@ -246,6 +246,73 @@ mistake wearing different clothes.**
 Related: [P46] (a build that was self-consistent in the repo and broken once installed),
 [P39] (the claim panel, on the same unswapped route).
 
+### [P51] 🔴 The agent went mute: alive, listening, answering challenges — and unregistered for 81 minutes with nothing saying so (2026-08-18)
+
+**Found by asking "is it OK?" and looking, not by any alarm.** The Windows PC slept overnight
+and woke around 07:37. Everything auto-started: the growth bot (07:37), `neuron-agent.exe`
+(07:38:30), `verify_service.py` (07:40). Then:
+
+| | |
+|---|---|
+| process | alive, `Responding=True`, 46 threads, 278s CPU and climbing, 7.1 GB resident |
+| port 50999 | listening, and answering a probe correctly — `{"ok": true, "holds": [0, 9]}` |
+| Chat UI :8080 | up, serving |
+| `agent.log` | **last line 07:33:09, from the PREVIOUS process. Zero lines in 81 minutes.** |
+| coordinator | `status=offline`, `placement_drift=true` |
+
+So the node was doing real work and was invisible. `auto_repair` reacted correctly to what it
+could see and re-placed `node-c-pavilion` onto all 28 layers; `neuron_doctor` now reports the
+whole network `NOT HEALTHY — no model tier is in a serving state`.
+
+**What is proven, and it is a real defect on its own: the Chat UI cached a rotated token.**
+`/node/owner` answered `401 Client Error: Unauthorized` for this machine's own node while
+`node_server` on the same box authenticated fine. Two snapshots of a value the agent rotates —
+`local_chat.start_local_chat` does `os.environ.setdefault("NEURON_NODE_TOKEN", …)` once at
+startup, and `ui/app.py` read that env var once at import. `register()` issues a fresh token on
+a relay-ticket refresh, on stale-token recovery, and on any re-registration (`agent.py:1103`),
+and from that instant the UI carried a dead credential until the whole process restarted.
+`config.json` holds a token ending `c1d311`; the one the UI was using is older.
+
+That matters beyond a status endpoint: **`/node/owner` is what the claim panel reads.** A token
+rotation silently switched off the feature [P39] exists to offer — the same blank panel, reached
+by a different road. **Fixed:** identity is resolved WHEN USED, from `config.json` (which is what
+`_save()` writes on rotation), with the environment kept as a fallback for a dev override and
+for a driver-only machine that has neither. `ui/test_node_identity_is_current.py`: 14, including
+a rotation mid-process with no restart.
+
+**What is NOT explained, and this entry says so rather than inventing a cause.** Why the process
+writes nothing at all. `agent.log` is writable — verified by opening it for append while the
+agent held it. Logging is configured on the `neuron` PARENT logger and `_setup_logging` is
+idempotent. And the Chat UI came up with `NEURON_NODE_ID` set, which means `start_local_chat`
+ran with an identity, which means `setup()` completed and *should* have logged
+`registered as …`. So the evidence says the agent got further than its log admits. Until that is
+understood, the mute state is a live risk and not a fixed one.
+
+**Also unexplained and suspicious:** `config.json` now reads `layer_end: 27` while the running
+`node_server` answers `holds: [0, 9]` and the coordinator assigns `0-9`. The config was rewritten
+after the server was built. That is [P49]'s shape returning, exactly as the handoff predicted it
+would — *"it will recur on the next re-placement, silently, on whichever machine is least able to
+notice"*.
+
+**Guarded now, because the cost here was entirely in nobody knowing.** `neuron_doctor` gained
+`check_agent`: `agent.log` untouched for 30 minutes is reported as BAD with the remedy. It keys
+on the log's mtime rather than on the process list on purpose — a running process proves nothing
+here, and that is the whole point. It reports FAIL on this machine right now, which is what a
+check firing on the incident that produced it should do.
+
+**Still open, cheapest first:**
+  1. **Explain the silence.** Until then every other guard is downstream of a mute agent.
+  2. **A heartbeat watchdog inside the agent**, reporting through `crash_log` rather than
+     `logging` — because in this incident `logging` is precisely what appears to have failed,
+     and a watchdog that reports through the broken channel reports nothing.
+  3. **The coordinator already knows.** A node that was online and stops beating is detectable
+     centrally and nothing acts on it beyond dropping it from routing. On a two-node network
+     that is the difference between a degraded chain and none.
+
+Related: [P24] (a service up, silent, and dead — the same class, one process over), [P50] (the
+identity in one file), [P49] and [P37] (the range that drifts back because nothing tells the
+node), [P39] (the claim panel this took offline).
+
 ### [P50] 🔴 One PC held two node identities in one config file, and a restart picked the wrong one — 5.26 NRN was one overwrite from orphaned (2026-08-17)
 
 **Lived, not theorised.** Restarting the agent to clear [P49]'s stale range brought it back as

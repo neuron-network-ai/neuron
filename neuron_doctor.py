@@ -56,6 +56,20 @@ MARK = {OK: "  OK  ", WARN: " WARN ", BAD: " FAIL "}
 # The operator's verifier writes an "alive" line every ~30 minutes (verify_service.ALIVE_EVERY).
 # Three missed heartbeats is dead, not slow.
 VERIFIER_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "verify_service.log")
+
+# The AGENT's log, on the machine that runs a node. Same idea as VERIFIER_LOG one line below and
+# the same incident shape: a process that is up, holding its port, and writing nothing looks
+# exactly like a healthy one. Live 2026-08-18 — the agent restarted after a wake, went on
+# answering proof-of-compute challenges on port 50999, served its Chat UI, and did not write a
+# single log line or heartbeat for 81 minutes. The coordinator read it as offline and
+# auto-repair collapsed the network onto the other machine. Nothing on the box said so.
+#
+# A node beats every PING_INTERVAL_S (~30s) and logs "heartbeat ok" periodically, so a log
+# untouched for half an hour is not a quiet agent, it is a stopped one.
+_AGENT_BASE = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"),
+                                                             ".local", "share")
+AGENT_LOG = os.path.join(_AGENT_BASE, "NEURON", "agent.log")
+AGENT_STALE_S = 30 * 60
 VERIFIER_STALE_S = 90 * 60
 
 
@@ -204,6 +218,31 @@ def check_serving_model(base, rep):
                 "not enough nodes or RAM for any tier; see the dashboard")
 
 
+def check_agent(rep):
+    """Is the LOCAL agent still writing anything? Skipped where there is no agent.log.
+
+    Deliberately a check on the log's MTIME rather than on the process list: a running process
+    proves nothing here, and that is the whole point — the failure being guarded is a process
+    that is alive, listening, and mute. It also costs nothing on a machine that only runs the
+    Chat UI, where the file simply does not exist.
+    """
+    if not os.path.exists(AGENT_LOG):
+        return
+    age = time.time() - os.path.getmtime(AGENT_LOG)
+    mins = int(age // 60)
+    if age > AGENT_STALE_S:
+        rep.add(BAD, "agent alive",
+                f"agent.log has not been written for {mins} minutes — this node is almost "
+                f"certainly not heartbeating, even if the process is still running",
+                "check the coordinator's node list: if it reads `offline` while the process is "
+                "up, the agent is mute rather than stopped. Restart it. A node that stops "
+                "beating is dropped from routing and earns nothing, and on a small network "
+                "auto-repair will re-place its layers onto whoever is left. See PROBLEMS.md "
+                "[P51].")
+    else:
+        rep.add(OK, "agent alive", f"last wrote {mins} minute(s) ago")
+
+
 def check_verifier(rep):
     """Is the OPERATOR's verifier still alive? Local check, skipped where it does not apply.
 
@@ -260,6 +299,7 @@ def main():
     if check_network(args.coordinator, rep) is not None:
         check_serving_model(args.coordinator, rep)
     check_verifier(rep)
+    check_agent(rep)
 
     if args.json:
         print(json.dumps({"healthy": not rep.failed, "checks": rep.rows}, indent=1))

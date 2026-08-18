@@ -331,8 +331,39 @@ def payout_bind_proxy(body: PayoutBindBody, request: Request):
 # wallet id either -- that comes from the session, so this cannot be used to bind somebody
 # else's wallet as the owner.
 # --------------------------------------------------------------------------- #
-NODE_ID = os.environ.get("NEURON_NODE_ID") or None
-NODE_TOKEN = os.environ.get("NEURON_NODE_TOKEN") or None
+# Resolved PER CALL, not once at import, and that distinction is a live bug rather than a
+# nicety. `local_chat.start_local_chat` does `os.environ.setdefault("NEURON_NODE_TOKEN", …)`
+# once at agent startup and this module read it once at import — two snapshots of a value the
+# agent ROTATES. `register()` issues a fresh token on a relay-ticket refresh, on stale-token
+# recovery, or on any re-registration (agent.py:1103), and from that moment every call here
+# carried a dead credential.
+#
+# Observed 2026-08-18: /node/owner answering `401 Client Error` for the machine's own node
+# while `node_server` on the same box answered challenges correctly. The claim panel reads
+# that endpoint, so a token rotation silently switched off the one feature this UI exists to
+# offer — the same blank panel as before, reached by a different road.
+#
+# The agent's config.json is the authority (it is what `_save()` writes on rotation); the
+# environment stays a fallback so a dev shell override still works and a driver-only machine,
+# which has neither, still reports `is_node: false`.
+def _node_identity():
+    """(node_id, node_token) as they are NOW. Never raises — a missing or half-written config
+    is 'this machine serves no node', which is a state the UI already renders correctly."""
+    env_id = os.environ.get("NEURON_NODE_ID") or None
+    env_tok = os.environ.get("NEURON_NODE_TOKEN") or None
+    try:
+        base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"),
+                                                              ".local", "share")
+        for path in (Path(base) / "NEURON" / "config.json",
+                     Path(__file__).resolve().parent.parent / "agent" / "config.json"):
+            if path.exists():
+                cfg = json.loads(path.read_text(encoding="utf-8"))
+                nid, tok = cfg.get("node_id"), cfg.get("node_token")
+                if nid and tok:
+                    return nid, tok
+    except (OSError, ValueError):
+        pass
+    return env_id, env_tok
 
 
 class NodeBindBody(BaseModel):
@@ -350,6 +381,7 @@ def node_owner(request: Request):
     gets `is_node: false` — there is nothing to own, and asking would be noise.
     """
     wallet_id = request.session.get("wallet_id")
+    NODE_ID, NODE_TOKEN = _node_identity()
     if not (NODE_ID and NODE_TOKEN):
         return {"is_node": False, "logged_in": bool(wallet_id)}
     try:
@@ -379,6 +411,7 @@ def node_owner(request: Request):
 @app.get("/node/payout/challenge")
 def node_payout_challenge(address: str, request: Request):
     """The nonce and exact text this MACHINE's node must sign, for `address`."""
+    NODE_ID, NODE_TOKEN = _node_identity()
     if not (NODE_ID and NODE_TOKEN):
         return JSONResponse({"error": "this machine does not serve a node"}, status_code=404)
     if not request.session.get("wallet_id"):
@@ -406,6 +439,7 @@ def node_payout_bind(body: NodeBindBody, request: Request):
     only if the signature verifies, which is what makes a copied node_token insufficient to
     move ownership later.
     """
+    NODE_ID, NODE_TOKEN = _node_identity()
     if not (NODE_ID and NODE_TOKEN):
         return JSONResponse({"error": "this machine does not serve a node"}, status_code=404)
     wallet_id = request.session.get("wallet_id")
