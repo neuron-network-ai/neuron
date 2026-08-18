@@ -23,7 +23,10 @@ On Linux or macOS, see [For developers](#for-developers-source-install) below.
 
 ## What you get
 
-- **A private AI chat** at `localhost:8080`. Nothing you type leaves your computer.
+- **A private AI chat** at `localhost:8080`. By default nothing you type leaves your computer —
+  the answer is computed on your own machine. Two exceptions, both named in
+  [PRIVACY.md](PRIVACY.md): switching on web search sends that query to a search engine, and a
+  prompt blocked by the safety filter reports its category (never the text).
 - **A 7B model at ~7.8 tokens/second** on your own CPU, if your machine has the RAM for it
   (~14 GB free). Smaller machines run a 1.5B model at ~28 tok/s instead.
 - **Your machine earns NRN** while it sits idle, for helping run the shared network.

@@ -55,11 +55,32 @@ What genuinely mitigates it today, none of which is a solution:
   * **reputation and flagging** give a deterrent against a node that misbehaves in ways the
     verifier can see — which does not include quietly logging what it computes.
 
-**This is the honest limit of a decentralised inference network**, and it is the reason
-`docs/index.html` says *private on your own machine* rather than claiming privacy outright: when
-the model fits locally nothing leaves the machine at all, and that IS complete privacy. When the
-network is used, the guarantee is confidentiality in transit — not confidentiality from the
-volunteers doing the work.
+**This is the honest limit of a decentralised inference network**, and it is why
+`docs/index.html` says *private on your own machine* rather than claiming privacy outright. Over
+the network the guarantee is confidentiality in transit — not confidentiality from the volunteers
+doing the work.
+
+### And "local" is not absolute either — two things still leave
+
+The first draft of this section said that when the model fits locally *"nothing leaves the machine
+at all, and that IS complete privacy"*. That was wrong, and it was written one paragraph after
+warning that a future document must not round this up. Checked against the code:
+
+  1. **Optional web search leaves the machine entirely.** `use_rag` calls `rag/retriever.search`,
+     which queries DuckDuckGo — a third party, not the coordinator. **Off by default**
+     (`use_rag: bool = False`), so it is the user's own choice, and it has to be described as one
+     rather than omitted.
+  2. **A blocked prompt reports its category.** `moderation.report_violation` sends the wallet id,
+     the direction and the category label so repeated attempts can escalate. It sends **no
+     text** — `safety/moderation.py` is explicit about that and the snippet stays in a local log
+     — but a category tied to an identity is still derived from what someone typed.
+
+Ordinary coordinator traffic (balance, status, the update check, login) reveals usage rather than
+content. Conversations stay local, in a SQLite file beside `ui/conversations.py`.
+
+**The accurate claim, which is the one the product now makes:** by default nothing you type leaves
+your computer, the answer is computed on your own machine, and the two exceptions are named. The
+user-facing version is [PRIVACY.md](PRIVACY.md).
 
 Do not let a future document round this up. Overstating it is [P31]'s mistake pointed at the one
 property users cannot verify for themselves.

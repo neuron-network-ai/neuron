@@ -1,4 +1,4 @@
-Before you install NEURON, three honest things:
+Before you install NEURON, four honest things:
 
 1. NRN HAS NO CASH VALUE.
    NRN is a contribution credit, not money. It records the compute you gave the
@@ -21,5 +21,22 @@ Before you install NEURON, three honest things:
    the coordinator only a node ID, the layer range it serves, and CPU/RAM
    counts — no personal data. Uninstalling removes everything, including the
    downloaded model slice.
+
+4. PRIVACY, AND IT GOES BOTH WAYS.
+   Your machine sends only a node ID, its layer range and CPU/RAM counts. Never
+   your files, your browsing or your screen.
+
+   It RECEIVES numbers made from other people's prompts, and computes on them.
+   You cannot read those: your machine holds a middle slice of the model, not
+   the parts that turn text into numbers or back again. The same is true of
+   everyone else's machine holding a slice of yours.
+
+   If you also use the chat: when the model fits on your PC the answer is
+   computed here and your text never leaves. Over the network every link is
+   encrypted — including from NEURON's own coordinator. Two exceptions, both
+   named: switching on web search sends that query to DuckDuckGo, and a prompt
+   blocked by the safety filter reports its category (never the text).
+
+   Full detail, naming the file behind each claim: PRIVACY.md
 
 Click Next only if you're comfortable with the above.
