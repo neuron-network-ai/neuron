@@ -72,10 +72,35 @@ const OK_ROUTES = {
 
 describe('fetchNodeOwner — the gate on whether the panel exists at all', () => {
   it('reports a node that needs an owner', async () => {
-    serve({ '/node/owner': { is_node: true, needs_owner: true, node_id: 'node-c-pavilion' } });
+    serve({ '/node/owner': { is_node: true, needs_owner: true, unclaimed: true,
+                             logged_in: true, node_id: 'node-c-pavilion' } });
     expect(await fetchNodeOwner()).toEqual({
-      isNode: true, needsOwner: true, nodeId: 'node-c-pavilion',
+      isNode: true, needsOwner: true, unclaimed: true, loggedIn: true,
+      nodeId: 'node-c-pavilion',
     });
+  });
+
+  it('a LOGGED-OUT operator still sees that the earnings are unclaimed', async () => {
+    // The bug this field exists for. `needs_owner` is `logged_in AND not owned`, so it is false
+    // exactly when nobody is signed in — and the panel keyed on it, so the person who most
+    // needed the prompt got a blank sidebar. Zero of three live nodes had ever been claimed.
+    serve({ '/node/owner': { is_node: true, needs_owner: false, unclaimed: true,
+                             logged_in: false, node_id: 'agent-optinovate-6ff49d' } });
+    const s = await fetchNodeOwner();
+    expect(s.unclaimed).toBe(true);
+    expect(s.needsOwner).toBe(false);
+    expect(s.loggedIn).toBe(false);
+  });
+
+  it('an OWNED node is not unclaimed, so nobody is nagged twice', async () => {
+    serve({ '/node/owner': { is_node: true, needs_owner: false, unclaimed: false,
+                             logged_in: true, node_id: 'n1' } });
+    expect((await fetchNodeOwner()).unclaimed).toBe(false);
+  });
+
+  it('a driver-only machine is never unclaimed, whatever the server says', async () => {
+    serve({ '/node/owner': { is_node: false, unclaimed: true, node_id: null } });
+    expect((await fetchNodeOwner()).unclaimed).toBe(false);
   });
 
   it('a node that ALREADY has an owner needs nothing — nobody is asked twice', async () => {

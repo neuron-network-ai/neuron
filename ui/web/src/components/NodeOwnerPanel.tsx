@@ -45,7 +45,37 @@ export const NodeOwnerPanel: React.FC = () => {
     if (res.phase === 'done' && res.address) setAddress(res.address);
   }, []);
 
-  if (!state.needsOwner && !address) return null;
+  // Keyed on `unclaimed`, the FACT, not on `needsOwner`, the readiness. needsOwner is
+  // `logged_in AND not owned`, so gating here meant a logged-OUT operator whose machine was
+  // earning saw nothing at all — and the message telling them to sign in was itself gated on
+  // being signed in. That is why zero nodes on the live network had ever been claimed.
+  if (!state.unclaimed && !address) return null;
+
+  // Logged out: explain and invite. There is nothing to claim against yet, so offering the
+  // wallet button would be a control that cannot succeed — [P37]'s "a check that cannot pass"
+  // as a feature.
+  if (!state.loggedIn && !address) {
+    return (
+      <div className="px-3 py-2.5 border-t border-line space-y-1.5">
+        <div className="label-mono text-ink-faint px-0.5">This computer&rsquo;s earnings</div>
+        <div className="text-[11px] leading-snug text-ink-muted">
+          This computer is earning NRN. Sign in to record the earnings as yours — until you do
+          they are tied to a file on this disk, and are lost with it.
+        </div>
+        <div className="flex gap-1.5">
+          {['github', 'google'].map(p => (
+            <a
+              key={p}
+              href={`/auth/login/${p}`}
+              className="flex-1 h-7 rounded-lg text-[12px] font-medium text-accent hover:bg-surface-2 transition flex items-center justify-center"
+            >
+              {p === 'github' ? 'GitHub' : 'Google'}
+            </a>
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   const busy = phase === 'connecting' || phase === 'challenging'
     || phase === 'signing' || phase === 'binding';

@@ -42,12 +42,29 @@ declare global {
 export interface NodeOwnerState {
   /** Does this machine serve a node at all? A driver-only install does not. */
   isNode: boolean;
-  /** True only when there is a node AND no owner recorded yet. Gates the whole panel. */
+  /**
+   * Can the claim be made RIGHT NOW — a node, no owner, and somebody signed in to record it
+   * against. Gates the claim button, and nothing else.
+   */
   needsOwner: boolean;
+  /**
+   * Are these earnings unclaimed? The FACT, independent of whether anyone is signed in.
+   *
+   * Gating the panel on `needsOwner` hid the entire feature: it is
+   * `logged_in AND not owned`, so a logged-OUT operator got false and saw nothing — and the
+   * message explaining why to sign in was itself gated on being signed in. Live on 2026-08-17,
+   * zero of three nodes had an owner recorded and the NRN sat in accounts whose only credential
+   * was a file on one disk ([P50] is that file being rotated by accident).
+   */
+  unclaimed: boolean;
+  /** Is anyone signed in? Decides whether the panel invites or claims. */
+  loggedIn: boolean;
   nodeId: string | null;
 }
 
-export const NO_NODE: NodeOwnerState = { isNode: false, needsOwner: false, nodeId: null };
+export const NO_NODE: NodeOwnerState = {
+  isNode: false, needsOwner: false, unclaimed: false, loggedIn: false, nodeId: null,
+};
 
 /**
  * Ask whether this machine has unclaimed node earnings.
@@ -64,6 +81,8 @@ export async function fetchNodeOwner(signal?: AbortSignal): Promise<NodeOwnerSta
     return {
       isNode: Boolean(d.is_node),
       needsOwner: Boolean(d.is_node) && Boolean(d.needs_owner),
+      unclaimed: Boolean(d.is_node) && Boolean(d.unclaimed),
+      loggedIn: Boolean(d.logged_in),
       nodeId: (d.node_id as string) ?? null,
     };
   } catch {
