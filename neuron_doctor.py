@@ -205,13 +205,25 @@ def check_serving_model(base, rep):
     except Exception:
         return  # optional endpoint; absence is not a failure
     entries = models if isinstance(models, list) else models.get("models", [])
-    serving = [m for m in entries
-               if str(m.get("state", m.get("status", ""))).lower() in ("serving", "ready")]
+    # `ready` is the field /models actually returns, and it is a BOOLEAN. This read only
+    # `state`/`status`, which that payload has never carried, so `serving` was always empty and
+    # the check reported "no model tier is in a serving state" on a perfectly healthy network —
+    # observed 2026-08-18 with routable true, stage1_ok true and both nodes online.
+    #
+    # A check that cries wolf is worse than no check: it is the one people learn to scroll past,
+    # and then it cannot report the day a tier really has stopped. The string forms are kept
+    # because a future payload may use them, but `ready` is what is asked first.
+    def _is_serving(m):
+        if isinstance(m.get("ready"), bool):
+            return m["ready"]
+        return str(m.get("state", m.get("status", ""))).lower() in ("serving", "ready")
+
+    serving = [m for m in entries if _is_serving(m)]
     if not entries:
         return
     if serving:
-        names = ", ".join(str(m.get("model") or m.get("model_id") or m.get("tier"))
-                          for m in serving)
+        names = ", ".join(str(m.get("id") or m.get("model") or m.get("model_id")
+                                    or m.get("tier")) for m in serving)
         rep.add(OK, "a model is serving", names)
     else:
         rep.add(BAD, "a model is serving", "no model tier is in a serving state",
