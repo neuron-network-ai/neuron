@@ -2091,7 +2091,75 @@ wrong, because they all blamed the **absent test card** (a hardware gap, which r
 unverified" and "cannot execute in this binary" are different claims, and only the second one
 tells you not to size a volunteer's memory by it.
 
-### [P30] 🔴 The fast engine cannot reach the models NEURON exists to serve
+### [P30] 🔴 The fast engine cannot reach the models NEURON exists to serve — measured and routed (2026-08-18)
+
+**The prize, measured here rather than cited.** The entry below is filed on a quoted ~17×, and
+that number decides whether the network's engine is worth a C++ dependency on every volunteer's
+PC. `tools/bench_engines.py`, same model, same machine, decode only:
+
+| engine | rate |
+|---|---|
+| PyTorch fp32 — what the NETWORK runs (`node_server.py`) | **3.09 tok/s** |
+| llama.cpp q4_k_m — what the LOCAL engine runs (`local_gguf.py`) | **26.93 tok/s** |
+
+**8.7×**, half the quoted figure and still decisive. For scale the live two-machine chain
+measured **1.44 tok/s** the same day; the same chain on these kernels is roughly 12, which
+clears §11.6's "under 30s answers" gate that currently blocks any purchase path. The gap mixes
+kernel quality with memory bandwidth and the script says so — the question is not which matmul
+is better but how fast a volunteer's machine could answer.
+
+**The blocker re-checked, because it dated from 2026-08-07 and [P47] is what an unverified
+premise costs.** It holds, and is sharper than filed: `llama_supports_rpc()` returns **False**
+and the wheel ships `ggml-base`/`ggml-cpu`/`ggml`/`llama`/`mtmd` with **no `ggml-rpc` at all**.
+RPC is compiled OUT, so patching the Python wrapper cannot reach it — it needs a rebuild with
+`-DGGML_RPC=ON`. `llama_model_params` does now carry a `devices` field, which is the modern
+backend-device API that path goes through.
+
+**Route 1 is disqualified in its obvious form, and this is the finding that matters.**
+llama.cpp's own `tools/rpc/README.md`:
+
+> *"the RPC backend are currently in a proof-of-concept development stage. As such, the
+> functionality is fragile and insecure. **Never run the RPC server on an open network or in a
+> sensitive environment!**"*
+
+NEURON is, by definition, an open network of strangers' machines. Pointing volunteers at
+`rpc-server` would re-open [P19] — the pipeline wire that ran arbitrary code from any peer —
+deliberately, on upstream's explicit warning. **Route 1 as written is off the table.**
+
+**Route 1′, which the entry did not consider and which survives that objection.** The warning is
+about EXPOSURE, not about the kernels. NEURON already owns an authenticated transport: the relay
+with tickets (`relay_auth.py`), built precisely because volunteer machines sit behind NAT and
+cannot be trusted to face the internet. If `rpc-server` binds **localhost only** and its traffic
+rides the existing authenticated tunnel, nothing is ever on an open network — and the same
+README confirms the capability is real: `--rpc host:port,host:port` splits layers automatically
+by memory, with `--tensor-split` to override it, which is exactly where the coordinator's
+placement decision would be injected so economics stay NEURON's.
+
+Two frictions to answer before committing to it, and neither is fatal:
+  * **proof-of-compute is built on `node_server`'s own protocol.** An `rpc-server` node is a
+    dumb ggml backend; challenging it means either keeping a thin NEURON listener beside it, or
+    moving the challenge down to a tensor-level operation. Unsolved, and cheap to prototype.
+  * **the split must stay the coordinator's**, or the network cannot know who computed what,
+    and emission is priced on exactly that. `--tensor-split` is the hook.
+
+**Route 2 (embed ggml, speak NEURON's wire protocol) remains the coherent end state** and is
+unchanged by any of this. It keeps placement, economics and proof-of-compute where they are, and
+removes Python and PyTorch from volunteer machines. It is also a C++ component to build and ship
+per platform, which is why measuring 1′ first is worth a session and building 2 blind is not.
+
+**Next step is a SPIKE, not a commitment** — the shape [P2] already used here for int8. Isolated
+from this repo: build llama.cpp with `-DGGML_RPC=ON`, run two `rpc-server` instances on
+loopback, split one model across them, and measure. That answers the only question that decides
+between 1′ and 2 — whether ggml's RPC path is fast enough across a hop to be worth keeping —
+without touching a line of NEURON. No toolchain is installed here yet: cmake and ninja are
+absent, though Visual Studio is present.
+
+Do NOT write another matmul. This repo has measured a hand-written AVX2 int8 kernel at **1.44×**
+against llama.cpp's 8.7×, on the same CPU, in the same language.
+
+The original entry follows.
+
+### [P30-orig] 🔴 As first filed
 
 `agent/node_server.py` runs **PyTorch fp32** (`load_slice_model`). `llama_cpp` appears only on
 driver/local paths — `local_gguf.py`, `local_chat.py`, `openai_compat.py`, `node_a.py`,
