@@ -20,6 +20,7 @@ import {
 } from './utils/storage';
 import { streamChat, errorMessage } from './services/neuron';
 import { Wallet, NetworkState, EMPTY_WALLET, fetchWallet, fetchNetwork, blockReason, degradedNotice } from './services/wallet';
+import { UpdateState, NO_UPDATE, fetchUpdate, updateNotice, updateHref } from './services/update';
 import { Sidebar } from './components/Sidebar';
 import { ChatMessageList } from './components/ChatMessageList';
 import { ChatInput } from './components/ChatInput';
@@ -36,6 +37,7 @@ function AppContent() {
   const [network, setNetwork] = useState<NetworkState>(
     { reachable: false, onlineNodes: 0, localCapable: false, healthy: false, servingModel: null,
       statusKnown: false, layersCovered: null, totalLayers: null, uncoveredLayers: [] });
+  const [update, setUpdate] = useState<UpdateState>(NO_UPDATE);
   const [threads, setThreads] = useState<ChatThread[]>(loadThreads);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [personas, setPersonas] = useState<Persona[]>(loadPersonas);
@@ -76,6 +78,12 @@ function AppContent() {
   useEffect(() => {
     const controller = new AbortController();
     let timer: number | undefined;
+
+    // Asked once, deliberately. /app/update is cached server-side for an hour, so folding it
+    // into the 15s poll would spend 240 requests an hour to learn the same answer.
+    fetchUpdate(controller.signal).then(u => {
+      if (!controller.signal.aborted) setUpdate(u);
+    });
 
     const poll = async () => {
       const [w, n] = await Promise.all([
@@ -669,6 +677,8 @@ function AppContent() {
           setSystemPrompt={(val) => updateActiveThread(t => ({ ...t, systemPrompt: val }))}
           blockedReason={blockReason(network)}
           degradedNotice={degradedNotice(network)}
+          updateNotice={updateNotice(update)}
+          updateHref={updateHref(update)}
         />
       </main>
 

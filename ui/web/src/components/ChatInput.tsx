@@ -32,6 +32,10 @@ interface ChatInputProps {
   blockedReason?: string | null;
   /** The degraded-network explanation, naming the layers nobody is serving. */
   degradedNotice?: string | null;
+  /** "NEURON x.y.z is available…", or null. Quiet by design: an update is news, not an
+   *  emergency, and anything louder trains people to ignore the warning above it. */
+  updateNotice?: string | null;
+  updateHref?: string;
 }
 
 export const ChatInput: React.FC<ChatInputProps> = ({
@@ -46,6 +50,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   setSystemPrompt,
   blockedReason = null,
   degradedNotice = null,
+  updateNotice = null,
+  updateHref,
 }) => {
   const [inputText, setInputText] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -167,6 +173,23 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             className="mb-2 px-3 py-2 rounded-lg bg-warn-soft text-[12.5px] text-warn text-center"
           >
             {degradedNotice || blockedReason}
+          </div>
+        )}
+        {/* Deliberately NOT dismissible: a remembered dismissal is how a node stays on a bad
+            build forever. Quieter than the warning above it, and below it, so a degraded
+            network is read first. */}
+        {updateNotice && (
+          <div role="status" className="mb-2 px-3 py-1.5 rounded-lg bg-surface-2 text-[12px] text-ink-faint text-center">
+            {updateNotice}{' '}
+            <a
+              href={updateHref}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-accent font-semibold underline"
+            >
+              Get it
+            </a>
+            <span> — quit NEURON first, then run the installer.</span>
           </div>
         )}
         {/* Parameters drawer */}
