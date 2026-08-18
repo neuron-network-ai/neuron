@@ -209,9 +209,17 @@ reading proved nothing. Driven through the native value setter against a stub se
 state: **healthy + text → Send enabled, degraded + text → Send disabled**, with the banner
 reading *"19/28 model layers are online (missing 10–12, 27)"*.
 
-What remains before the routes are swapped is a decision rather than a defect: `/` and `/next`
-now differ mainly in that `chat.html` has the `#ownclaim` strip and React has personas,
-per-thread settings and speech. Porting the claim strip is the last item.
+**And the claim panel is reachable in React too (2026-08-18).** It had the identical gate one
+implementation over — `fetchNodeOwner` set `needsOwner = is_node && needs_owner`, which is false
+whenever nobody is signed in, so a logged-out operator got a blank sidebar. It now renders on
+`unclaimed`, states the stake and offers the sign-in links. Verified in the built bundle against
+the live shape: *"THIS COMPUTER'S EARNINGS — This computer is earning NRN. Sign in to…"*.
+
+**So the swap is no longer blocked by anything.** `/next` is at parity on everything that
+matters and ahead on personas, per-thread settings and speech. What is left is the decision to
+make it `/`, and porting the 59 source-text assertions in `ui/test_chat_ui.py` — which were
+never the blocker, only a bad proxy for one; the behaviours they defend are now covered by
+vitest against pure functions.
 
 The three gaps as they were:
 
