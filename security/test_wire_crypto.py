@@ -199,6 +199,51 @@ def main():
           W.open_grant(TOKEN_B, NODE_B, grant)[0] == REQ,
           "the grant still opens -- it is the SESSION that is unreachable")
 
+    print("\n-- a CHAIN, not a pair: every hop is its own sealed channel")
+    # The founder's question: does this only cover two machines? No -- "hop" is one LINK, and a
+    # chain of N machines has N-1 of them. Each hop gets its own grant, sealed to that node's
+    # own token, and its own session key. Nothing here is per-pair-of-machines or capped at two;
+    # the coordinator mints one grant per hop when it builds the plan, exactly as it already
+    # names one node per stage.
+    chain = [("node-1", "t1" * 24), ("node-2", "t2" * 24),
+             ("node-3", "t3" * 24), ("node-4", "t4" * 24)]
+    keys, opened = [], []
+    for node_id, token in chain:
+        g = W.mint_grant(token, REQ, node_id)
+        c, sv = _run(lambda so, gg=g, nn=node_id: W.client_handshake(so, gg, nn),
+                     lambda so, tt=token, nn=node_id: W.server_handshake(so, tt, nn))
+        opened.append(isinstance(c, W.Channel))
+        # The session key itself is private to the Channel; its ciphertext of a fixed plaintext
+        # is a sound proxy for "is this a different key".
+        keys.append(c.seal(b"same plaintext everywhere") if isinstance(c, W.Channel) else None)
+    check(f"all {len(chain)} hops establish independently", all(opened), str(opened))
+    check("...and every hop has a DIFFERENT key",
+          len(set(keys)) == len(keys),
+          "two hops sharing a key would mean one compromised machine reads its neighbours")
+
+    print("\n-- one compromised machine does not open the rest of the chain")
+    # The property that matters as the network grows: node-2 being hostile (or seized) must not
+    # give it anything it can use against node-3. It holds its own token and its own grant.
+    victim_id, victim_token = chain[2]
+    stolen_grant = W.mint_grant(chain[1][1], REQ, chain[1][0])     # node-2's own grant
+    _, srv = _run(lambda so: W.client_handshake(so, stolen_grant, victim_id),
+                  lambda so: W.server_handshake(so, victim_token, victim_id))
+    check("a hostile node cannot reuse its grant against the next machine",
+          isinstance(srv, W.HandshakeError), repr(srv))
+
+    print("\n-- the same pair on a later request gets a fresh key")
+    # Keys are per REQUEST, not per pair, so a machine that serves the same neighbour a
+    # thousand times does not reuse one key a thousand times.
+    n_id, n_tok = chain[0]
+    seals = []
+    for req in ("req-1", "req-2"):
+        g = W.mint_grant(n_tok, req, n_id)
+        c, _ = _run(lambda so, gg=g: W.client_handshake(so, gg, n_id),
+                    lambda so: W.server_handshake(so, n_tok, n_id))
+        seals.append(c.seal(b"identical") if isinstance(c, W.Channel) else None)
+    check("two requests over the same pair do not share a key",
+          seals[0] is not None and seals[0] != seals[1])
+
     print("\n-- junk on the port")
     for name, payload in (("random bytes", os.urandom(64)),
                           ("an HTTP request", b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"),
