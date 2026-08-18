@@ -59,6 +59,35 @@ nothing was ever sent.
 not the network. Judging them as production inflates the severity of "no replica" and
 "single point of failure".
 
+## [P30] speed — where the phases actually stand
+
+The whole point of the engine work is making NEURON fast. Status, so a fresh window does not
+have to reconstruct it:
+
+| phase | state | what it produced / what it needs |
+|---|---|---|
+| **1 — measure a real hop** | ✅ **DONE** | median **22.6 ms** to the Pavilion through the real relay. Compute is 324 ms/token today, so the network is **7%** and the ENGINE is the bottleneck. The gate that could have cancelled everything, passed. `tools/bench_hop.py` |
+| **2 — one node, fast** | ✅ **BUILT** | `agent/rpc_engine.py` — a localhost-only `ggml-rpc-server` reachable only through the [P52] channel. Measured **28.07 tok/s** through it, against 1.44 live. 14 tests. |
+| **3 — two nodes** | ❌ **NOT STARTED** | needs a SECOND machine running the engine, and a decision (below). Everything so far is loopback on one PC plus arithmetic. |
+| **4 — packaging** | ❌ **NOT STARTED** | ship the binary with the installer; [P41]'s CPU floor becomes a dispatch table. |
+
+**Phase 3 is blocked on two things, and only one of them is code:**
+
+  1. **A second machine to run the engine on.** The Pavilion is reachable only through the relay
+     from here. Putting `ggml-rpc-server` on any machine is the founder's call and must be asked
+     for, not assumed.
+  2. **A design decision that changes what a driver IS.** In ggml's RPC design the CLIENT reads
+     the model file and uploads tensors; the server holds no model (`-c` caches what it is sent).
+     With mmap the driver does not need it in RAM, but it does need **the whole model on disk** —
+     where today it downloads only its own slice. For a 1.5B that is nothing; for the big models
+     this project exists for it is ~100 GB on whoever drives. Decide before building.
+
+**Projected end state, and it is a projection, not a measurement:** ~37 ms compute + 23 ms hop
+≈ **16.7 tok/s**, against 1.44 today. That clears TOKENOMICS §11.6's "answers under 30 s" gate,
+which is what currently blocks any purchase path. Treat 16.7 as the direction — when the same
+arithmetic was checked against the live chain it was ~2x optimistic, because it omits per-token
+framing, the driver's own embed/`lm_head`, batching and Python overhead.
+
 ## Do these first
 
 1. **Install 0.20.5.** Built and sitting in `dist/installer/`. Everything user-facing from
@@ -127,7 +156,18 @@ FIRST: install 0.20.5, then sign in and claim this machine's node through the
 UI. Everything user-facing from two sessions is invisible until that installer
 runs, and the claim is the first real execution of connect → sign → bind.
 
-THEN DECIDE, because this is a direction question and not mine to settle:
+THEN [P30] PHASES 3 AND 4, which is the speed work and the reason the engine
+plan exists. Phase 1 is DONE (22.6 ms real hop; the engine is 93% of a token's
+cost) and phase 2 is BUILT (agent/rpc_engine.py, 28 tok/s through the encrypted
+channel). Phase 3 needs a SECOND machine running ggml-rpc-server — ASK which
+machine, do not pick one — and a decision first: in ggml's RPC design the driver
+needs the whole model file on DISK, where today it downloads only its slice.
+That changes what a driver is, so settle it before writing code. Phase 4 is
+packaging the binary with the installer, which also retires [P41]'s CPU floor.
+Projected ~16.7 tok/s against 1.44 today; treat that as a direction, since the
+same arithmetic ran ~2x optimistic against the live chain.
+
+AND DECIDE, because this is a direction question and not mine to settle:
 ROADMAP.md's One Rule is "build the agent, get the first stranger, everything
 else follows" and after 63 sessions no stranger has ever run a node — the roster
 is two of the founder's own machines, which are a TESTBED, not the network.
