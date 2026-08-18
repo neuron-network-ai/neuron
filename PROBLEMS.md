@@ -319,6 +319,69 @@ mistake wearing different clothes.**
 Related: [P46] (a build that was self-consistent in the repo and broken once installed),
 [P39] (the claim panel, on the same unswapped route).
 
+### [P52] 🔴 The site advertises "privacy by architecture" and the pipeline wire is plaintext across strangers' machines (2026-08-18)
+
+**Found by the founder asking a one-line question — "so are we making every machine encrypted or
+not?" — and then checking what the product already promises.**
+
+`docs/index.html` says **"privacy-preserving"**, and puts a **tick against "Privacy by
+architecture"** in a comparison table where ChatGPT, Claude and Gemini all get a cross. The
+pitch quote reads *"private by architecture, no single operator can withdraw access"*.
+
+**What is actually true, split cleanly in two:**
+
+  * **Local inference is genuinely private.** When the machine can hold the model it answers
+    itself (`engine/local_gguf.py`) and nothing leaves it. `README.md`'s *"Nothing you type
+    leaves your computer"* is scoped to that case one line later, and it is honest.
+  * **Networked inference is not.** The driver tokenises and embeds the prompt, then hidden
+    states cross the internet as **plaintext** — a JSON header plus raw tensor bytes
+    (`wire_codec.py`) — through a **public relay** and into **strangers' machines**. There is no
+    TLS on that path, and `node_server.py` does not authenticate the caller, so a node cannot
+    even tell the difference between the driver and anyone who dialled its published port.
+
+And networked inference is *the product*: running models too large for one machine is the
+sentence the site leads with.
+
+**The hazard is not "someone sees numbers".** Hidden states are derived from the prompt and must
+not be treated as opaque — inverting embeddings and intermediate activations back to text is an
+active and productive research area, and the honest engineering posture is that anything derived
+from user text carries user text until proven otherwise. This entry does not claim a specific
+inversion attack has been demonstrated against this wire; it claims the opposite of what the
+site does — that **plaintext prompt-derived data crossing untrusted machines cannot be sold as
+privacy by architecture.**
+
+**Who is exposed, concretely:** every operator whose machine sits in a chain, anyone able to
+observe the relay (today the founder's own VM, tomorrow whoever runs one), and any network
+between them. `SECURITY.md` already argues the wire is safe to EXPOSE — it carries nothing
+executable and is size-capped — and that argument is about *the node's* safety, not *the user's*
+confidentiality. Those are different properties and the site claims the second.
+
+**Why 🔴.** It is the one class of defect this project has repeatedly caught in itself
+([P31]: a capability shipped, documented, never executed) and it is worse here because it is
+advertised competitively, against named products, to recruit strangers. A volunteer joining on
+that promise is also a person whose own prompts travel this way.
+
+**What would close it, cheapest first:**
+
+  1. **Say what is true, today.** The tick becomes a qualified claim: private when the model runs
+     on your machine, and in transit across the network it is not yet encrypted. One edit,
+     removes the false part immediately, and costs nothing but the sentence.
+  2. **Encrypt the node wire.** The transport already frames messages (`wire_codec.py`), so this
+     is a session key and an AEAD around the existing frame rather than a redesign. The
+     coordinator already issues per-node tokens and mints relay tickets, so there is a key
+     distribution point that exists.
+  3. **Authenticate the caller.** Encryption without knowing who is on the other end still lets
+     anyone with the published port open a session. This is the same gap that makes ggml-rpc
+     unusable on the relay (see the 2026-08-18 engine decision), so both wants converge on one
+     piece of work.
+  4. **Then, and only then, the architectural claim is defensible** — and a stronger version
+     becomes available, because no single node ever holds the whole model or the whole
+     conversation, which is a real structural privacy argument that today's plaintext wire
+     undercuts.
+
+Related: [P19] (the same wire, the node's safety rather than the user's), [P31] (documented and
+never executed), the 2026-08-18 engine decision (which needs items 2 and 3 for its own reasons).
+
 ### [P51] 🔴 The agent went mute: alive, listening, answering challenges — and unregistered for 81 minutes with nothing saying so (2026-08-18)
 
 **Found by asking "is it OK?" and looking, not by any alarm.** The Windows PC slept overnight

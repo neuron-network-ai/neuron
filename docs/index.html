@@ -141,6 +141,7 @@ footer a{color:#15803d}
   .steps{grid-template-columns:1fr}
   .stats{grid-template-columns:repeat(2,1fr)}
 }
+  .note-sm{display:block;font-size:11px;font-weight:400;opacity:.72;margin-top:.15rem;line-height:1.35}
 </style>
 </head>
 <body>
@@ -180,7 +181,7 @@ footer a{color:#15803d}
     <span class="logo-name">NEURON</span>
   </div>
   <h1>Distributed AI inference across idle machines</h1>
-  <p class="hero-sub">Open source, privacy-preserving, CPU and GPU nodes, no special setup required. Consumer hardware collectively runs models too large for any single machine.</p>
+  <p class="hero-sub">Open source, private on your own machine, CPU and GPU nodes, no special setup required. Consumer hardware collectively runs models too large for any single machine.</p>
   <div class="btn-row">
     <a class="btn-primary" href="https://github.com/neuron-network-ai/neuron/releases/download/v0.20.3/NEURON-Setup-0.20.3.exe">⬇ Download for Windows — v0.20.3</a>
     <a class="btn-secondary" href="https://github.com/neuron-network-ai/neuron/blob/main-full/INSTALL.md">Source install (Linux / macOS)</a>
@@ -274,7 +275,7 @@ footer a{color:#15803d}
         <tr><td>No technical setup</td><td class="cross">✗</td><td class="cross">✗</td><td class="cross">✗</td><td class="cross">✗</td><td class="tick neuron-col">✓</td></tr>
         <tr><td>Auto slice download</td><td class="cross">✗</td><td class="cross">✗</td><td class="cross">✗</td><td class="cross">✗</td><td class="tick neuron-col">✓</td></tr>
         <tr><td>NAT traversal built-in</td><td class="cross">✗</td><td class="cross">✗</td><td class="cross">✗</td><td class="cross">✗</td><td class="tick neuron-col">✓</td></tr>
-        <tr><td>Privacy by architecture</td><td class="cross">✗</td><td class="cross">✗</td><td class="cross">✗</td><td class="partial">partial</td><td class="tick neuron-col">✓</td></tr>
+        <tr><td>Privacy by architecture<br><span class="note-sm">local answers never leave your machine; network traffic is not yet encrypted</span></td><td class="cross">✗</td><td class="cross">✗</td><td class="cross">✗</td><td class="partial">partial</td><td class="partial neuron-col">partial</td></tr>
         <tr><td>Proof of compute</td><td class="cross">✗</td><td class="cross">✗</td><td class="cross">✗</td><td class="cross">✗</td><td class="tick neuron-col">✓</td></tr>
       </tbody>
     </table>
@@ -362,7 +363,7 @@ footer a{color:#15803d}
 </section>
 
 <section class="quote-section">
-  <blockquote>"AI is concentrating into three companies. NEURON is the alternative — private by architecture, no single operator can withdraw access, open by principle."</blockquote>
+  <blockquote>"AI is concentrating into three companies. NEURON is the alternative — no single operator can withdraw access, open by principle."</blockquote>
 </section>
 
 <section class="dash-section">
