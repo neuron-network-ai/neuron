@@ -56,7 +56,7 @@ def main():
     # ---- three stages: unchanged behaviour ----------------------------------- #
     three = [hop("a", "10.0.0.1", 0, 9), hop("c", "10.0.0.2", 10, 18),
              hop("b", "10.0.0.3", 19, 27)]
-    nh, np_, hb, pb, s2, ids, rid, tok, hold = get_chain(three, 10)
+    (nh, np_, hb, pb, s2, ids, rid, tok, hold, _g, _nc, _nb) = get_chain(three, 10)
     check("3-stage: next hop is the middle", (nh, np_) == ("10.0.0.2", 50999))
     check("3-stage: host_b is the final stage", (hb, pb) == ("10.0.0.3", 50999))
     check("3-stage: s2 is where the last stage begins", s2 == 19)
@@ -64,7 +64,7 @@ def main():
 
     # ---- two stages: the case that broke the live network -------------------- #
     two = [hop("a", "10.0.0.1", 0, 13), hop("b", "10.0.0.3", 14, 27)]
-    nh, np_, hb, pb, s2, ids, rid, tok, hold = get_chain(two, 14)
+    (nh, np_, hb, pb, s2, ids, rid, tok, hold, _g, _nc, _nb) = get_chain(two, 14)
     check("2-stage: accepted at all (was: expected a 3-node chain, got 2)", True)
     check("2-stage: next hop is the last stage", (nh, np_) == ("10.0.0.3", 50999))
     check("2-stage: NO host_b, so that hop plays the last-stage role", (hb, pb) == (None, None))

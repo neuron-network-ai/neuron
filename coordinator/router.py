@@ -10,11 +10,13 @@ a machine that lifts throughput rather than deepening the pipeline (PROBLEMS.md 
 assembled chain is still the usual driver -> middle -> last shape, so the drivers are
 unchanged; only which node fills a slot varies per request.
 """
+import base64
 import collections
 import random
 import time
 
 from coordinator import balancer, config, model_tiers, models
+from security import wire_crypto
 
 # What we assume about a node that has never self-measured (`ms_per_layer` is NULL until the
 # node runs benchmark.py). Deliberately pessimistic-but-not-crippling: an unmeasured node
@@ -509,17 +511,32 @@ def suggest_placement(now=None, total=None, exclude=None):
                       f"current bottleneck"}
 
 
-def chain_public(chain):
-    """Client-facing view of the chain (node_id + address + layer range)."""
-    return [
-        {
+def chain_public(chain, request_id=None):
+    """Client-facing view of the chain (node_id + address + layer range).
+
+    With `request_id`, each entry also carries a `grant` ([P52]): a blob sealed to THAT node's
+    own token, authorising this one request to open an encrypted session with it. The driver
+    cannot read or retarget a grant -- the destination node id is authenticated inside it -- so
+    handing them all to the caller is safe, and it is what lets the caller set up each hop
+    without the nodes needing any new conversation with the coordinator.
+
+    Minted here rather than in `/infer` because this is the one function that already knows
+    both the chain order and each node's row, and a grant that named the wrong node would be a
+    silent routing failure rather than an error.
+    """
+    out = []
+    for n in chain:
+        entry = {
             "node_id": n["node_id"],
             "ip": n["tailscale_ip"],
             "port": n["port"],
             "layers": [n["layer_start"], n["layer_end"]],
         }
-        for n in chain
-    ]
+        if request_id and n.get("node_token"):
+            entry["grant"] = base64.b64encode(
+                wire_crypto.mint_grant(n["node_token"], request_id, n["node_id"])).decode()
+        out.append(entry)
+    return out
 
 
 def missing_str(missing):

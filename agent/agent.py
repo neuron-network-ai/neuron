@@ -1144,6 +1144,12 @@ class Agent:
                     self.server = NodeServer(slice_dir, info["layer_start"], info["layer_end"],
                                              info.get("total_layers", 28),
                                              paused_flag=self.user_paused)
+                # [P52]: the node needs its own identity to OPEN a grant, and there is no other
+                # place that has both. Set every time through, not only on construction: a
+                # re-registration rotates the token ([P51]), and a server still holding the old
+                # one would refuse every encrypted connection while looking perfectly healthy.
+                self.server.node_token = self.cfg.get("node_token")
+                self.server.node_id = self.cfg.get("node_id")
                 threading.Thread(target=self.server.run, args=("0.0.0.0", port),
                                  daemon=True).start()
                 # Do not proceed until the listener is genuinely accepting. run() reports a

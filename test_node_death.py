@@ -114,9 +114,14 @@ class ChainStub:
         i = min(self.calls, len(self.chains) - 1)
         self.calls += 1
         host_c, port_c = self.chains[i]
+        # No grants: this harness runs real NodeServers with no coordinator behind them, so
+        # there is nothing to mint against. The driver then dials plaintext, which is exactly
+        # the rolling-upgrade path a 0.20.5 node still takes -- so this doubles as the
+        # regression test that [P52] did not break an un-granted chain.
         return (host_c, port_c, "127.0.0.1", PORT_B, S2,
                 [f"node_c@{port_c}", f"node_b@{PORT_B}"],
-                f"req-{self.calls}", "tok", 1.0)
+                f"req-{self.calls}", "tok", 1.0,
+                {}, f"node_c@{port_c}", f"node_b@{PORT_B}")
 
 
 def run_stream(driver, stub, kill_at=None, proc=None):

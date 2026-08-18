@@ -22,6 +22,7 @@ common's stage primitives — nothing in common.py / node_*.py is modified.
 """
 import logging
 import os
+import base64
 import socket
 import threading
 import time
@@ -210,7 +211,8 @@ class _Driver:
         # 1) ask the coordinator for a chain matching our shard (layers 0..self.s1-1)
         try:
             (host_c, port_c, host_b, port_b, s2, node_ids, request_id, complete_token,
-             hold_amount) = node_a.coord_get_chain(coordinator, router_prompt, max_new,
+             hold_amount, grants, node_c, node_b) = node_a.coord_get_chain(
+                coordinator, router_prompt, max_new,
                                                    self.s1, wallet_id,
                                                    prompt_tokens_estimate=prompt_tokens)
         except node_a.InsufficientFunds as e:
@@ -231,6 +233,10 @@ class _Driver:
         chain = {"host_c": host_c, "port_c": port_c, "host_b": host_b, "port_b": port_b,
                  "s2": s2, "node_ids": node_ids, "request_id": request_id,
                  "complete_token": complete_token, "hold_amount": hold_amount,
+                 # [P52]: per-hop grants, and which node sits at each hop, so a reroute can
+                 # look up the replacement node's own grant rather than reusing one minted
+                 # for the machine that just died.
+                 "grants": grants, "node_c": node_c, "node_b": node_b,
                  "tokens_billed_elsewhere": 0}
         jcache = junction_cache.JunctionCache()
         reroutes = []
@@ -239,6 +245,22 @@ class _Driver:
             """Open + configure a connection to the current chain. Returns (sock, codec)."""
             s = socket.create_connection((chain["host_c"], chain["port_c"]),
                                         timeout=common.COLD_CONNECT_TIMEOUT_S)
+            # [P52]: encrypt this hop before a single byte of the user's prompt moves. A
+            # coordinator too old to mint grants sends none, and the dial stays plaintext --
+            # the same rolling-upgrade direction node_server takes, because refusing would
+            # partition the network rather than secure it.
+            _g = (chain.get("grants") or {}).get(chain.get("node_c"))
+            if _g:
+                try:
+                    ch = wire_crypto.client_handshake(
+                        s, base64.b64decode(_g), chain["node_c"])
+                    common.attach_channel(s, ch)
+                except wire_crypto.HandshakeError as e:
+                    # The node could not prove it is who the coordinator named. That is a
+                    # routing/identity failure, not a slow peer, so it must not be retried
+                    # into silently -- reroute to a different replica instead.
+                    s.close()
+                    raise PeerUnavailable(f"{chain.get('node_c')}: {e}") from e
             # The config goes out in the legacy format -- it is the one message whose reader
             # might predate wire_codec -- and offers the codecs we can decode. The ack names
             # the peer's pick, or omits it, in which case codec stays None and this
@@ -251,6 +273,12 @@ class _Driver:
             # looking for a hop that does not exist, so the keys are omitted, not nulled.
             if chain["host_b"]:
                 cfg["host_b"], cfg["port_b"] = chain["host_b"], chain["port_b"]
+                # The middle node cannot mint its own grant for the last hop -- it does not
+                # hold that node's token -- so the driver carries it down. Sealed to the last
+                # node, so the middle one cannot read or retarget it either.
+                _gb = (chain.get("grants") or {}).get(chain.get("node_b"))
+                if _gb:
+                    cfg["grant_b"], cfg["node_b"] = _gb, chain["node_b"]
             common.send_msg(s, cfg)
             a = common.recv_msg(s)
             if not a.get("ok"):
@@ -304,11 +332,16 @@ class _Driver:
                 raise RuntimeError(f"{why}; cannot recover (junction cache incomplete after "
                                    f"{jcache.tokens} tokens)")
             _settle_current(tokens_now)
-            (hc, pc, hb, pb, s2b, nids, rid, ctok, hold) = node_a.coord_get_chain(
+            (hc, pc, hb, pb, s2b, nids, rid, ctok, hold,
+             grants2, node_c2, node_b2) = node_a.coord_get_chain(
                 coordinator, router_prompt, max_new, self.s1, wallet_id,
                 prompt_tokens_estimate=prompt_tokens)
+            # The grants come with the NEW chain and must replace the old ones: a reroute
+            # happens because a machine died, and a grant minted for the dead node is useless
+            # against its replacement -- it is sealed to a different token.
             chain.update(host_c=hc, port_c=pc, host_b=hb, port_b=pb, s2=s2b, node_ids=nids,
                          request_id=rid, complete_token=ctok, hold_amount=hold,
+                         grants=grants2, node_c=node_c2, node_b=node_b2,
                          tokens_billed_elsewhere=tokens_now)
             sock, codec = _connect()
             # Rebuild the fresh chain's K/V from the one junction we cache. Sent as a single

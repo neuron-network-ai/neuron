@@ -133,9 +133,13 @@ def coord_get_chain(base, prompt, max_tokens, expected_s1, wallet_id, prompt_tok
     # Only a 3-stage chain has a hop beyond the next one. `s2` is where the LAST stage begins
     # either way, which is what both roles slice on.
     host_b, port_b = (last["ip"], last["port"]) if len(rest) == 2 else (None, None)
+    # [P52] grants, keyed by node id. Absent from a coordinator too old to mint them, in which
+    # case the driver falls back to a plaintext dial -- the same rolling-upgrade direction
+    # node_server takes, and for the same reason: refusing would partition the network.
+    grants = {n["node_id"]: n["grant"] for n in chain if n.get("grant")}
     return nxt["ip"], nxt["port"], host_b, port_b, last["layers"][0], \
         [n["node_id"] for n in chain], request_id, data.get("complete_token"), \
-        data.get("hold_amount")
+        data.get("hold_amount"), grants, nxt["node_id"], last["node_id"]
 
 
 def coord_complete(base, request_id, tokens, duration_ms, node_ids, complete_token=None,

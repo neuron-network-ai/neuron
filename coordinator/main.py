@@ -1018,7 +1018,8 @@ def infer(body: InferBody):
                                    f"{hold_amount} NRN held")
     models.create_request(request_id, len(body.prompt), body.max_tokens, plan_node_ids,
                           complete_token, wallet_id=body.wallet_id, hold_amount=hold_amount)
-    return {"chain": router.chain_public(chain), "request_id": request_id,
+    return {"chain": router.chain_public(chain, request_id=request_id),
+            "request_id": request_id,
             "complete_token": complete_token, "hold_amount": hold_amount}
 
 

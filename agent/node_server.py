@@ -17,6 +17,7 @@ Usage (normally launched by agent.py):
   python node_server.py --slice-dir ./model_slice --layer-start 10 --layer-end 18 --port 50999
 """
 import argparse
+import base64
 import gc
 import os
 import socket
@@ -451,6 +452,20 @@ class NodeServer:
                         role, s1, s2 = "middle", msg["s1"], msg["s2"]
                         bconn = socket.create_connection((msg["host_b"], msg["port_b"]),
                                                          timeout=common.COLD_CONNECT_TIMEOUT_S)
+                        # [P52] encrypt the onward hop as well, with the grant the driver
+                        # carried down. Without this the chain is private only as far as the
+                        # first machine, which is a privacy claim that is true of one link and
+                        # false of the request.
+                        _gb = msg.get("grant_b")
+                        if _gb:
+                            try:
+                                _ch = wire_crypto.client_handshake(
+                                    bconn, base64.b64decode(_gb), msg.get("node_b", ""))
+                                common.attach_channel(bconn, _ch)
+                            except wire_crypto.HandshakeError as e:
+                                bconn.close()
+                                raise ConnectionError(
+                                    f"next hop {msg.get('node_b')} failed the handshake: {e}")
                         common.send_msg(bconn, {"type": "config", "s2": s2, "n": msg.get("n", self.n),
                                                 "wire": wire_codec.preference(self.model.config.hidden_size)})
                         back = common.recv_msg(bconn)

@@ -64,7 +64,10 @@ def main():
         return FakeResp(200, {"payout_address": "0xabc", "owner_wallet_id": "w_alice"})
 
     uiapp.requests.get, uiapp.requests.post = fake_get, fake_post
-    uiapp.NODE_ID, uiapp.NODE_TOKEN = "node-x", "tok-secret"
+    # Identity is resolved PER CALL now ([P51]: a token the agent rotates cannot be cached at
+    # import), so the test overrides the resolver rather than two module constants. Setting
+    # globals here would have gone on passing while the app read something else entirely.
+    uiapp._node_identity = lambda: ("node-x", "tok-secret")
 
     class Req:
         def __init__(self, session):
@@ -80,11 +83,11 @@ def main():
     check("a signed-out user is not prompted", uiapp.node_owner(anon)["needs_owner"] is False)
 
     calls.clear()
-    uiapp.NODE_ID = None
+    uiapp._node_identity = lambda: (None, None)
     out = uiapp.node_owner(signed_in)
     check("a driver-only machine reports is_node false", out["is_node"] is False)
     check("...and asks the coordinator nothing", calls == [])
-    uiapp.NODE_ID = "node-x"
+    uiapp._node_identity = lambda: ("node-x", "tok-secret")
 
     print("\n-- the node token stays server-side")
     calls.clear()
