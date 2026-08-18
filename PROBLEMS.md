@@ -280,7 +280,44 @@ by a different road. **Fixed:** identity is resolved WHEN USED, from `config.jso
 for a driver-only machine that has neither. `ui/test_node_identity_is_current.py`: 14, including
 a rotation mid-process with no restart.
 
-**What is NOT explained, and this entry says so rather than inventing a cause.** Why the process
+**MECHANISM FOUND AND CLOSED (2026-08-18).** `Tray.run` was:
+
+```python
+threading.Thread(target=self.agent.run, daemon=True).start()
+```
+
+No wrapper. An exception in that thread goes to `threading.excepthook`, which writes to
+`sys.stderr` — and tray mode is a **frozen windowed app whose console `_hide_console()` has
+already hidden**, so stderr goes nowhere at all. The agent loop could therefore stop dead while
+the tray icon, the poll thread, the Chat UI and `node_server`'s listener all carried on: alive,
+holding its port, answering probes correctly, unregistered, and completely silent. That is the
+observed state, exactly, and it explains the one detail that made no sense — that a machine
+that had clearly completed `setup()` wrote no line about it.
+
+Corroborating: **no `[CRASH]` marker has ever been written to `agent.log`**, on a machine that
+has crashed before. `neuron_app_entry` records its own death, and `tray.main` catches around
+`Tray().run()` — but neither can see inside a daemon thread that has already been handed off.
+
+**Honest about what this does and does not prove.** The restart destroyed the evidence, so
+whether *this* is what happened on 18 August cannot be established after the fact. What is
+established is that it is a path to precisely that symptom, that the path existed, and that it
+is now closed.
+
+**Fixed, in two halves, because the loop can fail two ways:**
+  1. `_supervise_agent` wraps the thread. A raise **or a plain return** — an endless loop
+     reaching its end is a stop too, and the quieter one — is logged, sent through `crash_log`
+     (stdlib only, because this is the failure class where the logging config is itself a
+     suspect), and turns the tray red with the remedy rather than a traceback.
+  2. `_watch_heartbeat` covers the case no exception handler could: a loop still running and no
+     longer reaching anybody. `agent.state["last_beat_at"]` is stamped after `ping()` RETURNS,
+     so it records that the coordinator answered rather than that we tried; five minutes stale
+     is reported once, with recovery announced when beats resume. Once, not every 30s — an
+     alarm that repeats forever is one people silence, and then it cannot report the next thing.
+
+`agent/test_agent_death_is_loud.py`: 17, driving all three failure shapes.
+
+**Still unexplained, and smaller:** why the process
+
 writes nothing at all. `agent.log` is writable — verified by opening it for append while the
 agent held it. Logging is configured on the `neuron` PARENT logger and `_setup_logging` is
 idempotent. And the Chat UI came up with `NEURON_NODE_ID` set, which means `start_local_chat`

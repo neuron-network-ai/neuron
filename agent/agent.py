@@ -1434,6 +1434,11 @@ class Agent:
                     beat_log("paused (%s) — not advertising availability", "; ".join(reasons))
                 else:
                     self.ping()
+                    # The instant of the last SUCCESSFUL beat, so a watchdog can tell a healthy
+                    # agent from one that is still looping but no longer reaching anybody
+                    # ([P51]). Set after ping() returns, never before: the point is to record
+                    # that the coordinator answered, not that we tried.
+                    self.state["last_beat_at"] = time.time()
                     if self.standing == "probationary":
                         # "active" would be a lie here: the coordinator excludes probationary
                         # nodes from routing, so this beat advertises availability nobody can

@@ -270,6 +270,39 @@ class Tray:
         self.agent.stop()
         icon.stop()
 
+    # A beat every PING_SECONDS (~30s); three missed rounds is stopped, not slow. Deliberately
+    # generous — a laptop waking from sleep, or a home connection dropping for a minute, must
+    # not paint the tray red for something that fixes itself on the next beat.
+    BEAT_STALE_S = 5 * 60
+
+    def _watch_heartbeat(self):
+        """Is the agent still REACHING the coordinator? ([P51])
+
+        `_supervise_agent` catches a loop that dies. This catches the other half: a loop that is
+        still running and no longer getting through — the state that cost 81 minutes on
+        2026-08-18, where the process was alive, the port was open, probes were answered
+        correctly, and the coordinator had the node down as offline.
+
+        Keyed on the last SUCCESSFUL beat rather than on the loop being alive, because those are
+        exactly the two things that came apart. Logged once per transition, not every 30s: an
+        alarm that repeats forever is one people silence.
+        """
+        last = self.agent.state.get("last_beat_at")
+        if not last:
+            return                      # never beaten yet — startup, not a stall
+        stale = (time.time() - last) > self.BEAT_STALE_S
+        if stale and not getattr(self, "_beat_warned", False):
+            mins = int((time.time() - last) // 60)
+            log.error("no successful heartbeat for %d minutes — the coordinator has almost "
+                      "certainly dropped this node from routing, and it is earning nothing "
+                      "even though this process is still running. See PROBLEMS.md [P51].",
+                      mins)
+            crash_log(f"no successful heartbeat for {mins} minutes")
+            self._beat_warned = True
+        elif not stale and getattr(self, "_beat_warned", False):
+            log.info("heartbeats are getting through again")
+            self._beat_warned = False
+
     def _poll(self):
         while True:
             nid, tok = self._creds()
@@ -296,6 +329,7 @@ class Tray:
                             self._last_logged_ledger_error = r.status_code
                 except requests.RequestException:
                     pass
+            self._watch_heartbeat()
             self.icon.icon = icon_image(COLORS.get(self._effective_status(), COLORS["idle"]))
             self.icon.update_menu()
             self._maybe_notify()
@@ -351,8 +385,47 @@ class Tray:
             # doing its actual job.
             pass
 
+    def _supervise_agent(self):
+        """Run the agent loop and make sure its death can never be silent ([P51]).
+
+        This was `threading.Thread(target=self.agent.run)` with no wrapper. An exception in
+        that thread goes to `threading.excepthook`, which writes to `sys.stderr` — and tray
+        mode is a FROZEN WINDOWED app whose console `_hide_console()` has already hidden, so
+        stderr goes nowhere at all. The agent loop could therefore stop dead while the tray
+        icon, the poll thread, the Chat UI and `node_server`'s listener all carried on: a
+        process that is alive, holding its port, answering probes correctly, and not
+        registered — with nothing written anywhere to say so.
+
+        Observed live 2026-08-18: 81 minutes in exactly that state, the coordinator reading
+        the node as offline and auto-repair collapsing the network onto the other machine.
+        `agent.log` had no line from that process and no `[CRASH]` marker has ever been
+        written, which is what a swallowed thread exception looks like from the outside.
+
+        `crash_log` as well as `log.exception`, deliberately: this is the failure class where
+        the logging config itself is a suspect, and crash_log writes with the stdlib alone.
+        The tray goes red with a reason, because the person watching the icon is the only one
+        who can act.
+        """
+        try:
+            self.agent.run()
+        except BaseException as e:                     # noqa: BLE001 - nothing may escape here
+            log.exception("the agent loop STOPPED: %s", e)
+            crash_log(f"the agent loop stopped: {e.__class__.__name__}: {e}")
+            self.agent.state.update(
+                status="error",
+                detail=f"agent stopped ({e.__class__.__name__}) — restart NEURON")
+            return
+        # Returning is also a stop. `run()` is an endless loop, so reaching here at all means
+        # something broke out of it -- and a silent return would be indistinguishable from a
+        # healthy agent, which is the whole defect this method exists to close.
+        log.error("the agent loop RETURNED without raising — it is no longer heartbeating, "
+                  "so this node has stopped earning. Restart NEURON.")
+        crash_log("the agent loop returned without raising")
+        self.agent.state.update(status="error",
+                                detail="agent stopped — restart NEURON")
+
     def run(self):
-        threading.Thread(target=self.agent.run, daemon=True).start()
+        threading.Thread(target=self._supervise_agent, daemon=True).start()
         threading.Thread(target=self._poll, daemon=True).start()
         self.icon.run()
 
