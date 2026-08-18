@@ -120,6 +120,79 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
   shown as an Inno Setup `InfoBeforeFile` page) — a friend who only runs the exe and never
   reads `INSTALL.md` still sees it.
 
+- **2026-08-18 - The engine switch: Route 2, not Route 1-prime, and the transport is the reason.**
+  The [P30] spike measured ggml-rpc splitting a model across two machines at **32 tok/s against
+  NEURON's live 1.44**, with `--tensor-split` leaving placement under the coordinator's control.
+  That made "tunnel ggml-rpc over the relay" look like the cheap answer. **It is not, and the
+  founder's question about the tunnel is what exposed why.**
+
+  **The relay is NAT traversal, not security.** `relay_auth.py` mints an HMAC ticket so a node
+  cannot register a tunnel on *another* node's public port - that is the whole of it. The relay
+  then "splices raw bytes", and `node_server.py` has **no caller authentication of any kind**.
+  Each node's port is published on a public host and anyone may dial it. So NEURON has no
+  private channel between machines today, and Route 1-prime was written as though it did.
+
+  That is survivable for NEURON's own wire and deliberately so: `SECURITY.md` argues the wire is
+  **safe to expose** - a JSON header plus raw tensor bytes (`wire_codec.py`), nothing executable
+  after [P19], size-capped so a scanner cannot make a node allocate arbitrarily. A public port
+  speaking that protocol is an acceptable risk.
+
+  **None of that is true of ggml-rpc.** It is a *memory* protocol - allocate a buffer, write
+  bytes into it, execute a graph - which is why upstream says never run it on an open network.
+  Putting it on the relay would hand every scanner on the internet a memory-write primitive into
+  a volunteer's PC. It would undo [P19] on purpose, with a worse payload than the one [P19]
+  fixed.
+
+  **So the decision inverts.** Route 1-prime requires building an authenticated, encrypted
+  transport BEFORE it can be tried - a real project on its own, and one that must hold against a
+  hostile *participant*, not merely an eavesdropper, because a volunteer network contains both.
+  Route 2 - embed ggml behind NEURON's existing safe wire - keeps the exposed surface exactly as
+  it is today and changes only what happens *inside* the process. **The fast kernels are wanted;
+  the fast transport is not.**
+
+  What the spike still bought, and it is most of the value: ggml-rpc is proven to split layers
+  correctly, `--tensor-split` is proven to keep placement with the coordinator, the prebuilt
+  binaries remove the toolchain problem, and the per-microarchitecture kernels retire [P41] and
+  the load-bearing `torch` pin. Route 2 inherits all four.
+
+  **Phases, each with a gate that can stop the project:**
+  1. **Measure a real hop.** `rpc-server` on the Pavilion, driven from here over the relay,
+     against the 8% loopback floor. If a real round trip per token is ruinous, pipelining across
+     machines is the wrong shape at any engine speed, and the answer is replication rather than
+     stages. Cheap, and it is the only number that can invalidate everything after it.
+  2. **One node, fast, alone.** Make `node_server` compute its layer range with ggml instead of
+     PyTorch, wire protocol untouched, on ONE machine. `selftest_shard.py` already demands
+     bit-exactness against a full local forward pass; that becomes the acceptance test.
+  3. **Two nodes.** The existing chain, one node on each engine, then both. Proof-of-compute
+     must still pass - the challenge is at the transformer-layer level, and ggml must answer it
+     identically or the reputation system silently stops working.
+  4. **Only then packaging.** A C++ dependency per platform, and [P41]'s CPU floor becomes a
+     dispatch table rather than a refusal.
+
+  **Not decided, deliberately:** whether the driver's embedding and `lm_head` move too, and
+  whether quantized weights change what a node must download ([P36] provenance, [P43] sizing).
+  Both are downstream of phase 1 and neither is worth designing before that number exists.
+
+- **2026-08-18 - Place chain neighbours by MEASURED latency, not by IP geography.**
+  The founder's proposal: read a node's IP, infer its region, and build chains from machines
+  near each other. The instinct is right - decode is sequential, so every token pays every hop,
+  and that cost is the product's latency. Two corrections to the mechanism.
+
+  **Measure, do not infer.** IP geolocation is unreliable (VPNs, carrier-grade NAT, mobile) and
+  it answers the wrong question: what matters is round-trip time between two specific machines,
+  which is directly measurable and nearly free - nodes already heartbeat, and the coordinator
+  already stores `ms_per_layer` measured that same way. An RTT matrix between candidate
+  neighbours is the honest version of this idea, and it degrades gracefully: an unmeasured pair
+  scores at a default prior, exactly as a never-measured node already does.
+
+  **And today the relay dominates geography.** Both live machines could sit in one room and
+  their traffic would still cross an Oracle VM in another country, because that is how a NAT'd
+  node is reachable at all. Grouping by region cannot help while every hop is relayed. So the
+  ordering is: **direct connections first** (LAN, or the Tailscale path the agent already
+  reports), relay only as the fallback it was built to be - and *then* latency-aware placement,
+  which is where the founder's idea pays off, and which needs the roster size they correctly
+  identified.
+
 ---
 
 ## Problems & risks
