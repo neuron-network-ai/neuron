@@ -30,6 +30,11 @@ import batching                                  # noqa: E402
 import common                                    # noqa: E402
 import wire_codec                                # noqa: E402
 from slice_downloader import load_slice_model    # noqa: E402
+from security import wire_crypto                # noqa: E402  [P52] encrypted hop
+
+# Accept ONLY encrypted connections. Off by default through the rolling upgrade: flipping it
+# while 0.20.5 nodes are still on the network would partition the chain rather than secure it.
+REQUIRE_SECURE = os.environ.get("NEURON_REQUIRE_SECURE") == "1"
 
 # Held only for swapping the model pointer during a migration reload. It used to wrap every
 # forward pass too, which meant a machine served exactly ONE request at a time no matter how
@@ -336,10 +341,70 @@ class NodeServer:
                 self._batchers[key] = b
             return b
 
+    # Set by the agent once it knows its identity. Without it this node cannot open a grant,
+    # so it cannot accept a secure connection -- and it says so rather than silently falling
+    # back to plaintext, because a node that quietly downgrades is the whole reason [P52]
+    # could be true while the site claimed otherwise.
+    node_token = None
+    node_id = None
+    # Grants already used, so one cannot be replayed inside its TTL. Bounded
+    # by clearing wholesale: every entry older than GRANT_TTL_S is already
+    # unusable, so forgetting them costs nothing and an unbounded set on a
+    # node that runs for months does not.
+
+    _grants_seen = None
+    _grants_since = 0.0
+
+    def _grants(self):
+        now = time.time()
+        if self._grants_seen is None or now - self._grants_since > wire_crypto.GRANT_TTL_S:
+            type(self)._grants_seen = set()
+            type(self)._grants_since = now
+        return self._grants_seen
+
+    def _maybe_secure(self, conn):
+        """Establish the [P52] channel if the caller asked for one. Returns True if secure.
+
+        THE ROLLING UPGRADE LIVES HERE. A legacy driver opens with `common.send_msg`'s 8-byte
+        length, whose first four bytes are always zero for any real message; a secure driver
+        leads with `NRNS`. Four bytes decide, and a legacy sender loses nothing because those
+        four bytes are still its own length prefix, pushed back for `recv_msg` to read.
+
+        Refusing plaintext outright would strand every 0.20.5 node on the network mid-upgrade,
+        which is why this accepts both for now. `REQUIRE_SECURE` flips that once the fleet has
+        moved -- one deliberate line, with evidence, the same shape as
+        STAGE1_FAILURES_ARE_SCORED.
+        """
+        first = common._recv_all(conn, 4)
+        if not wire_crypto.peek_is_secure(first):
+            # Not secure. Hand those four bytes back so recv_msg sees an intact stream.
+            common.pushback(conn, first)
+            if REQUIRE_SECURE:
+                raise wire_crypto.HandshakeError(
+                    "this node accepts only encrypted connections (NEURON_REQUIRE_SECURE=1)")
+            return False
+        if not (self.node_token and self.node_id):
+            raise wire_crypto.HandshakeError(
+                "a secure connection was offered but this node has no identity to open it with")
+        ch, request_id = wire_crypto.server_handshake(
+            conn, self.node_token, self.node_id, seen=self._grants(), magic_consumed=True)
+        del request_id
+        common.attach_channel(conn, ch)
+        return True
+
     def serve(self, conn, addr):
         cache, past, role, s1, s2, bconn = None, 0, None, None, None, None
         codec = bcodec = None
         try:
+            try:
+                self._maybe_secure(conn)
+            except wire_crypto.HandshakeError as e:
+                # A failed handshake is not a node fault and must not look like one. Log it and
+                # drop the connection: there is nothing to reply WITH, since we have no key.
+                # print, not logging: this module reports through print everywhere else, and
+                # a refused connection must be visible in the same place as everything else.
+                print(f"[node] refused a connection from {addr}: {e}")
+                return
             while True:
                 msg = common.recv_msg(conn)
                 mtype = msg.get("type")

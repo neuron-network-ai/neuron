@@ -191,6 +191,20 @@ def _send(sock, blob: bytes):
     sock.sendall(struct.pack(">I", len(blob)) + blob)
 
 
+def peek_is_secure(first4: bytes) -> bool:
+    """Does this connection want the secure handshake? ([P52] rolling upgrade)
+
+    A legacy connection opens with `common.send_msg`'s 8-byte big-endian length, and any real
+    message is far under 4 GiB, so its first four bytes are always `\x00\x00\x00\x00`. The
+    secure client therefore leads with MAGIC in the clear, which cannot collide, and a node can
+    decide from four bytes without consuming anything a legacy sender needs.
+
+    Deliberately a pure function on bytes the caller already has: peeking on a socket differs
+    across platforms, and a node must not have to guess.
+    """
+    return first4 == MAGIC
+
+
 def _recv(sock, limit=MAX_FRAME) -> bytes:
     head = _recv_exact(sock, 4)
     (n,) = struct.unpack(">I", head)
@@ -215,7 +229,10 @@ def client_handshake(sock, grant: bytes, node_id: str) -> Channel:
     eph = X25519PrivateKey.generate()
     pub = eph.public_key().public_bytes(serialization.Encoding.Raw,
                                         serialization.PublicFormat.Raw)
-    _send(sock, MAGIC + bytes([VERSION]) + struct.pack(">I", len(grant)) + grant + pub)
+    # MAGIC goes on the wire RAW and first, outside the length frame, so a node can tell a
+    # secure connection from a legacy one by reading four bytes (see peek_is_secure).
+    sock.sendall(MAGIC)
+    _send(sock, bytes([VERSION]) + struct.pack(">I", len(grant)) + grant + pub)
     reply = _recv(sock)
     if len(reply) != 32 + 32:
         raise HandshakeError("malformed server hello")
@@ -232,19 +249,25 @@ def client_handshake(sock, grant: bytes, node_id: str) -> Channel:
     return Channel(send_key=_dir_key(base, b"c2s"), recv_key=_dir_key(base, b"s2c"))
 
 
-def server_handshake(sock, node_token: str, node_id: str, seen=None) -> tuple[Channel, str]:
+def server_handshake(sock, node_token: str, node_id: str, seen=None,
+                     magic_consumed: bool = False) -> tuple[Channel, str]:
     """NODE SIDE. Returns (channel, request_id).
 
     `seen` is an optional set of already-used grants; passing one makes a replayed grant fail
     even inside its TTL. Kept as a caller-owned set rather than module state so a long-running
     node can bound it however it likes.
     """
+    # MAGIC has already been consumed by the caller's peek (node_server reads it to decide
+    # which protocol this is), so `magic_consumed` says whether we still need to eat it.
+    if not magic_consumed:
+        if _recv_exact(sock, len(MAGIC)) != MAGIC:
+            raise HandshakeError("not a NEURON secure hello")
     hello = _recv(sock)
-    if not hello.startswith(MAGIC) or len(hello) < len(MAGIC) + 1 + 4 + 32:
+    if len(hello) < 1 + 4 + 32:
         raise HandshakeError("not a NEURON secure hello")
-    if hello[len(MAGIC)] != VERSION:
+    if hello[0] != VERSION:
         raise HandshakeError("unsupported wire version")
-    off = len(MAGIC) + 1
+    off = 1
     (glen,) = struct.unpack_from(">I", hello, off)
     off += 4
     grant, peer_pub = hello[off:off + glen], hello[off + glen:]

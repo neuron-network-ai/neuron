@@ -33,6 +33,7 @@ model (proved bit-exact by selftest.py).
 import io
 import os
 import struct
+import weakref
 
 import torch
 
@@ -483,6 +484,29 @@ def apply_lm_head(model, hidden):
 MAX_MSG_BYTES = 512 << 20
 
 
+# Sockets that have completed the [P52] secure handshake, and the Channel to use for them.
+# A WeakKeyDictionary rather than an attribute because `socket.socket` refuses attribute
+# assignment, and rather than an explicit argument because every call site in the pipeline
+# already passes a bare socket -- threading a channel through all of them is a large diff for
+# no gain, and one missed call site would silently send a frame in the clear.
+_CHANNELS = weakref.WeakKeyDictionary()
+
+
+def attach_channel(sock, channel):
+    """Bind a secure Channel to this socket. Everything sent afterwards is sealed."""
+    _CHANNELS[sock] = channel
+
+
+def channel_for(sock):
+    return _CHANNELS.get(sock)
+
+
+def is_secure(sock) -> bool:
+    """Whether this connection is encrypted. Read by anything that must not claim privacy it
+    does not have -- the same discipline [P52] was filed over."""
+    return sock in _CHANNELS
+
+
 def send_msg(sock, obj, codec=None):
     if codec:
         data = wire_codec.encode(obj, codec)
@@ -490,12 +514,37 @@ def send_msg(sock, obj, codec=None):
         buf = io.BytesIO()
         torch.save(obj, buf)
         data = buf.getvalue()
+    # Sealed as ONE frame, so the existing length prefix and every reader of it are unchanged;
+    # only the bytes between the prefix and the next message differ.
+    ch = _CHANNELS.get(sock)
+    if ch is not None:
+        data = ch.seal(data)
     sock.sendall(struct.pack(">Q", len(data)))
     sock.sendall(data)
 
 
+# Bytes read off a socket before we knew which protocol this was, waiting to be handed back.
+# The [P52] handshake decides from the first four bytes; when they turn out to be a legacy
+# length prefix the stream must look untouched to `recv_msg`, or every existing node breaks the
+# moment a new one is deployed.
+_PUSHBACK = weakref.WeakKeyDictionary()
+
+
+def pushback(sock, data: bytes):
+    """Return bytes to the front of this socket's stream."""
+    if data:
+        _PUSHBACK[sock] = _PUSHBACK.get(sock, b"") + data
+
+
 def _recv_all(sock, n):
     chunks, got = [], 0
+    held = _PUSHBACK.pop(sock, b"")
+    if held:
+        take, rest = held[:n], held[n:]
+        chunks.append(take)
+        got += len(take)
+        if rest:
+            _PUSHBACK[sock] = rest
     while got < n:
         b = sock.recv(min(n - got, 1 << 20))
         if not b:
@@ -510,6 +559,9 @@ def recv_msg(sock):
     if n > MAX_MSG_BYTES:
         raise ConnectionError(f"declared message size {n} exceeds {MAX_MSG_BYTES} -- refusing")
     data = _recv_all(sock, n)
+    ch = _CHANNELS.get(sock)
+    if ch is not None:
+        data = ch.open(data)
     if wire_codec.is_frame(data):
         return wire_codec.decode(data)
     # weights_only=True is the security fix, not a tidy-up: this used to be False, which
