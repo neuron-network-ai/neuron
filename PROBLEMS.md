@@ -173,6 +173,46 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
   whether quantized weights change what a node must download ([P36] provenance, [P43] sizing).
   Both are downstream of phase 1 and neither is worth designing before that number exists.
 
+- **2026-08-18 (later) - Route 1-prime is back, because the objection that killed it was
+  BUILT.** Earlier the same day this log rejected tunnelling ggml-rpc and chose route 2
+  (embed ggml behind NEURON's wire), for one reason: llama.cpp says *"never run the RPC server
+  on an open network"*, NEURON had no private channel, and creating one was "a real project on
+  its own". [P52] then built that project for an unrelated reason -- the site was advertising
+  privacy the wire did not provide -- and the premise expired the moment it shipped.
+
+  **Measured, not assumed.** llama.cpp driven through NEURON's own authenticated, encrypted
+  channel, with `ggml-rpc-server` bound to 127.0.0.1 and never on a public port:
+
+  | configuration | rate |
+  |---|---|
+  | no RPC at all, plain local CPU (control) | 34.97 tok/s |
+  | ggml-rpc, plaintext loopback | 32.11 tok/s |
+  | **ggml-rpc through the [P52] channel** (grant + X25519 + AES-GCM) | **28.07 tok/s** |
+  | NEURON's live chain today (PyTorch fp32, relayed) | **1.44 tok/s** |
+
+  18,542 frames and 1.02 GB of plaintext sealed in a 6-second run. Encryption costs ~12% on
+  top of RPC and ~20% against the no-RPC control -- and the result is still **~19x what the
+  network does today**.
+
+  **Why this changes the plan.** Route 2 means writing and shipping a C++ component per
+  platform. Route 1-prime is now: run a prebuilt `ggml-rpc-server` on localhost, and carry its
+  traffic over a channel that already exists, is already tested, and a scanner cannot open.
+  Phases 2-4 shrink from "embed ggml" to "supervise a local process and point the driver at
+  it", and [P41]'s CPU floor plus the `torch` pin still retire with it.
+
+  **The residual risk, stated rather than buried.** The channel authenticates the CALLER, so a
+  stranger who dialled the port cannot speak ggml-rpc. It does not make ggml-rpc safe against
+  an authenticated PEER -- a chain member is coordinator-selected, not trusted, and ggml-rpc is
+  a memory protocol. The surface shrinks from "anyone on the internet" to "a machine the
+  coordinator put in this chain", which is a large reduction and not an elimination. Whether
+  that is acceptable is a decision about who is allowed into a chain, and it belongs with the
+  open-join question in `SECURITY.md`, not with this measurement.
+
+  **This is the second reversal in one day, and the reasoning is sound both times.** Route
+  1-prime was rejected on a true premise that a later commit falsified. Recording it that way
+  rather than quietly switching, because the next person needs to know the decision is
+  contingent on [P52] shipping -- if the channel is ever removed, the objection returns intact.
+
 - **2026-08-18 - Place chain neighbours by MEASURED latency, not by IP geography.**
   The founder's proposal: read a node's IP, infer its region, and build chains from machines
   near each other. The instinct is right - decode is sequential, so every token pays every hop,
