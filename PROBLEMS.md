@@ -2147,6 +2147,50 @@ unchanged by any of this. It keeps placement, economics and proof-of-compute whe
 removes Python and PyTorch from volunteer machines. It is also a C++ component to build and ship
 per platform, which is why measuring 1′ first is worth a session and building 2 blind is not.
 
+**SPIKE RUN, 2026-08-18, and it lands better than the entry assumed.** Isolated from this repo
+entirely — downloaded to a scratch directory, `git status` clean throughout.
+
+**The toolchain problem evaporated: RPC ships prebuilt.** The official
+`llama-b10485-bin-win-cpu-x64.zip` (17 MB) contains **`ggml-rpc-server.exe` and `ggml-rpc.dll`**.
+No cmake, no MSVC, no build. The wheel installed in this venv has RPC compiled out; the released
+binaries do not.
+
+Two `ggml-rpc-server.exe` on loopback, one Qwen2.5-1.5B q4_k_m split across them:
+
+| configuration | rate |
+|---|---|
+| NEURON's live two-machine chain (PyTorch fp32, real relay) | **1.44 tok/s** |
+| PyTorch fp32, one machine | 3.09 tok/s |
+| llama.cpp, no RPC, plain local CPU — the control | **34.97 tok/s** |
+| llama.cpp split across **two** RPC servers on loopback | **32.11 tok/s** |
+
+**The RPC hop costs ~8%** against its own control. That is the protocol floor with zero network
+latency, not a prediction about the real path.
+
+**Four things the spike established, each of which was an open question:**
+  1. **It binds `127.0.0.1` by default.** The posture Route 1′ needs is the default, not a
+     precaution to remember.
+  2. **Layers really do split** — 15 to the first device, 14 to the second, listed per layer in
+     the load log.
+  3. **`--tensor-split` controls placement exactly**: `25/75` → 8/21, `75/25` → 22/7. This is the
+     answer to the friction above — **the coordinator keeps placement authority**, computing the
+     split as it does today and passing it through. The economics do not have to move.
+  4. Its default split for two devices put **layers 0-9 on the first**, which is NEURON's own
+     stage-1 shard arrived at independently.
+
+**One unknown left, and it is now the only one that matters:** what ggml-rpc costs over
+NEURON's *actual* path — a relay through an Oracle VM, not loopback. Decode is sequential, so
+every token pays the round trip; 8% is a floor and the real figure could be much worse. That
+needs `rpc-server` on the Pavilion and a measurement through the relay, and it is the last thing
+standing between Route 1′ and a decision.
+
+**A second finding, unrelated to speed and worth its own line.** The release ships
+per-microarchitecture CPU kernels — `ggml-cpu-ivybridge.dll`, `sse42`, `haswell`, `zen4`,
+`sandybridge` and more — and dispatches at runtime. That is **[P41] solved as a side effect**:
+the AVX2 illegal-instruction crash on an old volunteer machine is a PyTorch-wheel problem, and
+llama.cpp simply picks a kernel the CPU can run. It would also remove the load-bearing
+`torch==2.4.1` pin, since nodes would no longer exchange pickled tensors.
+
 **Next step is a SPIKE, not a commitment** — the shape [P2] already used here for int8. Isolated
 from this repo: build llama.cpp with `-DGGML_RPC=ON`, run two `rpc-server` instances on
 loopback, split one model across them, and measure. That answers the only question that decides
