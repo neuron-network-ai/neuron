@@ -6,6 +6,66 @@ agent and users trust the answers.
 > This document covers node trust — is a node computing honestly? For what's prohibited to
 > generate *through* NEURON (a different, content-focused question), see `SAFETY.md`.
 
+## Who is protected from whom
+
+**NEURON has TWO kinds of user, and this document used to say "user" as though it had one.**
+That ambiguity is not cosmetic: the two classes have different things to lose, and the hardest
+open question in the system is one class being exposed to the other.
+
+| | who they are | what they have to lose |
+|---|---|---|
+| **Chat users** | send prompts, read answers, spend NRN | the content of their conversation |
+| **Node operators** (donors) | donate a machine's idle time, earn NRN | their machine, and their fair earnings |
+
+A node operator is also a chat user whenever they type into their own app, so the same person is
+often both — but the exposures are different and must be reasoned about separately.
+
+### The matrix
+
+| threat | protected? | by what |
+|---|---|---|
+| chat user ← an eavesdropper on the internet | **yes** | the encrypted hop ([P52]) |
+| chat user ← whoever runs the relay | **yes** | the relay splices ciphertext it has no key for |
+| chat user ← **the coordinator itself** | **yes** | ephemeral X25519: it introduces the two parties and cannot decrypt what follows, even from a recording |
+| chat user ← **a node operator in their own chain** | **NO** | *nothing. See below — this is the open frontier.* |
+| node operator ← a malicious chat user | partial | the wire carries no executable content ([P19]), message size is capped, `resource_guard` caps CPU/RAM |
+| node operator ← another node operator | partial | one key per hop, and a grant cannot be retargeted at a different node ([P52]) |
+| node operator ← the coordinator | **no, by design** | it assigns work, issues tokens and can flag — the network trusts it for placement and payment |
+| chat user ← another chat user | partial | separate sessions and keys; the same node still serves many people in turn |
+
+### The open frontier, stated plainly
+
+**A node in the chain computes on the activations it receives.** That is what a node is for. So
+the machine belonging to a stranger, in a chain the coordinator chose, sees data derived from
+another person's prompt in the clear — inside its own process, after decryption.
+
+Encryption fixed the network, the relay and the coordinator. It does not and cannot fix this,
+and no amount of transport security will: the work requires the plaintext.
+
+What genuinely mitigates it today, none of which is a solution:
+
+  * **no single node holds the whole model**, so no node can decode what it is passed into text
+    on its own — it has one contiguous slice of the layers and neither the embedding nor the
+    `lm_head` unless it is the driver;
+  * **no single node holds the whole conversation** — replicas mean consecutive requests from
+    one person may traverse different machines;
+  * **activations are not text**, but they must not be treated as opaque either: recovering
+    input from embeddings and intermediate states is an active research area, and the safe
+    assumption is that anything derived from a person's words still carries them;
+  * **reputation and flagging** give a deterrent against a node that misbehaves in ways the
+    verifier can see — which does not include quietly logging what it computes.
+
+**This is the honest limit of a decentralised inference network**, and it is the reason
+`docs/index.html` says *private on your own machine* rather than claiming privacy outright: when
+the model fits locally nothing leaves the machine at all, and that IS complete privacy. When the
+network is used, the guarantee is confidentiality in transit — not confidentiality from the
+volunteers doing the work.
+
+Do not let a future document round this up. Overstating it is [P31]'s mistake pointed at the one
+property users cannot verify for themselves.
+
+---
+
 ## Proof of Compute — a node must prove it did the work
 A lazy/malicious node could return garbage to farm NRN without computing. To catch that:
 - A verifier sends the node a **challenge** (a known input for its layer range); the node
