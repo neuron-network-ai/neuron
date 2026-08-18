@@ -200,7 +200,20 @@ as a strip. It has a token cap and a **better** one (`maxTokens` per thread, adj
 constant). It also has personas, per-thread settings and speech input, none of which chat.html
 has.
 
-Three real gaps, and only the first can hurt somebody:
+**All three closed (2026-08-18), and the swap is now unblocked.** `blockReason` and
+`degradedNotice` are pure functions in `services/wallet.ts`, so the rule is testable without a
+DOM; `services/update.ts` renders what `/app/update` decides. Verified against the built bundle
+rather than only in tests — and the first attempt at that was wrong, which is worth recording:
+setting `textarea.value` directly does not reach React's state, so an early "Send is disabled"
+reading proved nothing. Driven through the native value setter against a stub serving each
+state: **healthy + text → Send enabled, degraded + text → Send disabled**, with the banner
+reading *"19/28 model layers are online (missing 10–12, 27)"*.
+
+What remains before the routes are swapped is a decision rather than a defect: `/` and `/next`
+now differ mainly in that `chat.html` has the `#ownclaim` strip and React has personas,
+per-thread settings and speech. Porting the claim strip is the last item.
+
+The three gaps as they were:
 
   1. **It will send into a chain that cannot answer.** `canSend` in `ChatInput.tsx` is
      `(text || attachments) && !isGenerating` — no health term at all, while chat.html has

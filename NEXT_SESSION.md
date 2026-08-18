@@ -75,15 +75,15 @@ The message explaining why to sign in was gated on being signed in. There is now
 strip above the composer driven by `unclaimed`. **It does not reach the live UI until the app is
 rebuilt** — the agent serves its own packaged copy.
 
-**The `/next` swap is a THREE-ITEM job, not a rewrite.** An audit that grepped for chat.html's
-identifiers rather than for behaviours badly overstated the gap; corrected in [P48]. React
-already has the wallet-id reveal, the node-owner claim, payout binding, insufficient_funds,
-reroute, partial-answer survival, `localCapable`, low balance (as `≈ N network answers left`)
-and a better token cap — plus personas, per-thread settings and speech, which chat.html lacks.
-What is missing: **it will send into a chain that cannot answer** (`canSend` has no health
-term, while chat.html blocks on `!healthy && !localCapable`) — that is the one that can hurt
-somebody — plus the degraded banner's uncovered-layer detail and the new update notice. Also:
-the claim panel is on `/` already, so the note saying it lives only on `/next` was wrong.
+**The `/next` swap's three gaps are CLOSED (2026-08-18).** React now refuses to send into a
+chain that cannot answer, names the uncovered layers, and shows the update notice. Verified
+against the built bundle: healthy + text → Send enabled, degraded + text → Send disabled. Note
+the first verification attempt was wrong — setting `textarea.value` does not reach React's
+state, so it has to be driven through the native value setter.
+
+**What is left before the routes swap is one item, not a rewrite:** `chat.html` has the
+`#ownclaim` strip and React does not. Port that, then swap. (The claim panel was always on `/`;
+the old note saying it lives only on `/next` was wrong.)
 
 ## Do these first
 
