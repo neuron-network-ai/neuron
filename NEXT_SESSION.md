@@ -145,6 +145,15 @@ Continue NEURON. Read PROBLEMS.md [P30] [P52] [P51] [P43], ROADMAP.md, and
 NEXT_SESSION.md — that has the handoff. Read ROADMAP.md properly: build rule 1
 says every session, and Session 64 skipped it until asked.
 
+HARD BOUNDARY, read this first. Work with EXACTLY TWO MACHINES and no others:
+this Windows PC (agent-optinovate-6ff49d) and node-c-pavilion. They are a
+TESTBED, not the network — treat them as test hardware, not production. Do NOT
+touch, log into, install onto, or copy files to any other machine, including
+optiplex-server / nuc / 192.168.1.10 even though the SSH key reaches it. Session
+64 downloaded llama.cpp onto the OptiPlex without asking; that was wrong and the
+founder said so. If a task seems to need a third machine, STOP AND ASK — do not
+pick one.
+
 STATE: the wire is encrypted and authenticated end to end ([P52]) — per hop,
 different key each hop, and the coordinator itself cannot decrypt a recording.
 [P30] phase 1 passed (a real relayed hop is 22.6 ms, so the ENGINE is 93% of a
