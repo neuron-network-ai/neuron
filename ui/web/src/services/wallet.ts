@@ -35,6 +35,20 @@ export interface NetworkState {
   localCapable: boolean;
   healthy: boolean;
   servingModel: string | null;
+  /**
+   * Did the poll itself succeed? NOT the same as `healthy`, and conflating them is a real
+   * outage: on a failed fetch every other field falls back to its pessimistic default, so a
+   * network that is merely unpolled looks exactly like one that is down. Anything that REFUSES
+   * to act — see `blockReason` — must key on this first, or a flaky status endpoint takes chat
+   * away from a user whose chain is perfectly fine.
+   */
+  statusKnown: boolean;
+  /** Layers of the serving model currently covered by online nodes, and the total. */
+  layersCovered: number | null;
+  totalLayers: number | null;
+  /** Inclusive [lo, hi] ranges with no node behind them. Named rather than counted, because
+   *  "3 layers missing" is not something an operator can act on and "missing 10–12" is. */
+  uncoveredLayers: [number, number][];
 }
 
 export const EMPTY_WALLET: Wallet = {
@@ -79,11 +93,56 @@ export async function fetchNetwork(signal?: AbortSignal): Promise<NetworkState> 
       localCapable: Boolean(d.local_capable),
       healthy: Boolean(d.healthy ?? d.network_healthy),
       servingModel: (d.model_id as string) ?? null,
+      statusKnown: true,
+      layersCovered: typeof d.layers_covered === 'number' ? d.layers_covered : null,
+      totalLayers: typeof d.total_layers === 'number' ? d.total_layers : null,
+      uncoveredLayers: Array.isArray(d.uncovered_layers) ? d.uncovered_layers : [],
     };
   } catch {
-    return { reachable: false, onlineNodes: 0, localCapable: false,
-             healthy: false, servingModel: null };
+    // statusKnown:false is the whole point of this branch. Every other field is a pessimistic
+    // default and must not be read as evidence about the network.
+    return { reachable: false, onlineNodes: 0, localCapable: false, healthy: false,
+             servingModel: null, statusKnown: false, layersCovered: null,
+             totalLayers: null, uncoveredLayers: [] };
   }
+}
+
+/**
+ * Why sending is refused right now, or null when it is not.
+ *
+ * A prompt sent into an incomplete chain cannot be answered, so it costs the user a wait and
+ * then an error — when the page already knew. chat.html has refused this since Session 55;
+ * React did not, and `canSend` was `(text || attachments) && !isGenerating` with no network
+ * term at all.
+ *
+ * Two conditions it deliberately does NOT block on:
+ *   * a failed status poll (`statusKnown` false). That says nothing about /chat, and refusing
+ *     on it turns a monitoring blip into an outage.
+ *   * a machine that can serve the model itself. An incomplete chain means the NETWORK is
+ *     short of nodes; local inference does not care.
+ */
+export function blockReason(n: NetworkState): string | null {
+  if (!n.statusKnown) return null;
+  if (n.localCapable) return null;
+  if (!n.healthy) {
+    return 'The network is short of nodes right now, so there is nothing to send this to.';
+  }
+  return null;
+}
+
+/** The degraded banner's text, or null. Names the missing layers rather than counting them,
+ *  and takes the total from the coordinator instead of a hardcoded 28 that goes stale on the
+ *  next model tier. */
+export function degradedNotice(n: NetworkState): string | null {
+  if (!n.statusKnown || n.localCapable || n.healthy) return null;
+  const total = n.totalLayers ?? 28;
+  const where = n.uncoveredLayers
+    .map(r => (r[0] === r[1] ? String(r[0]) : `${r[0]}–${r[1]}`))
+    .join(', ');
+  return `Network degraded — ${n.layersCovered ?? 0}/${total} model layers are online`
+    + (where ? ` (missing ${where})` : '')
+    + ', and this machine cannot run the model on its own yet. '
+    + 'Sending is paused until the chain is complete.';
 }
 
 /** NRN as shown to a person. Four decimals: a single answer can cost ~0.0120. */

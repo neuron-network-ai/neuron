@@ -24,6 +24,14 @@ interface ChatInputProps {
   setUseRag: (val: boolean) => void;
   systemPrompt: string;
   setSystemPrompt: (val: string) => void;
+  /**
+   * Why sending is refused, or null. A prompt sent into an incomplete chain cannot be
+   * answered, so it costs the user a wait and then an error when the page already knew.
+   * Computed by `blockReason` — which deliberately does NOT block on a failed status poll.
+   */
+  blockedReason?: string | null;
+  /** The degraded-network explanation, naming the layers nobody is serving. */
+  degradedNotice?: string | null;
 }
 
 export const ChatInput: React.FC<ChatInputProps> = ({
@@ -36,6 +44,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   setUseRag,
   systemPrompt,
   setSystemPrompt,
+  blockedReason = null,
+  degradedNotice = null,
 }) => {
   const [inputText, setInputText] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -139,11 +149,26 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     }
   };
 
-  const canSend = (inputText.trim() || attachments.length > 0) && !isGenerating;
+  // `!blockedReason` is the term this was missing. Note it is only consulted here, on the SEND
+  // button: while `isGenerating` the control is Stop, and taking that away would strand a
+  // running generation with no way to cancel it — the same reasoning as chat.html's
+  // `disabled = !!blockedReason && !busy`.
+  const canSend = (inputText.trim() || attachments.length > 0) && !isGenerating && !blockedReason;
 
   return (
     <footer className="flex-shrink-0 px-4 sm:px-8 pb-5 pt-2 bg-canvas">
       <div className="max-w-3xl mx-auto">
+        {/* Say WHY before the user types, not after they send. role=status rather than alert:
+            it re-renders on every network poll, and an assertive region would interrupt a
+            screen reader each time. */}
+        {(degradedNotice || blockedReason) && (
+          <div
+            role="status"
+            className="mb-2 px-3 py-2 rounded-lg bg-warn-soft text-[12.5px] text-warn text-center"
+          >
+            {degradedNotice || blockedReason}
+          </div>
+        )}
         {/* Parameters drawer */}
         {showParams && (
           <div className="mb-2 p-3.5 rounded-xl border border-line bg-surface rise-in">

@@ -19,7 +19,7 @@ import {
   saveFolders,
 } from './utils/storage';
 import { streamChat, errorMessage } from './services/neuron';
-import { Wallet, NetworkState, EMPTY_WALLET, fetchWallet, fetchNetwork } from './services/wallet';
+import { Wallet, NetworkState, EMPTY_WALLET, fetchWallet, fetchNetwork, blockReason, degradedNotice } from './services/wallet';
 import { Sidebar } from './components/Sidebar';
 import { ChatMessageList } from './components/ChatMessageList';
 import { ChatInput } from './components/ChatInput';
@@ -31,8 +31,11 @@ function AppContent() {
   const { theme, setTheme } = useTheme();
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [wallet, setWallet] = useState<Wallet>(EMPTY_WALLET);
+  // statusKnown starts FALSE: nothing has been polled yet, and the initial state must not
+  // read as "the network is down" — that would block the very first message on every load.
   const [network, setNetwork] = useState<NetworkState>(
-    { reachable: false, onlineNodes: 0, localCapable: false, healthy: false, servingModel: null });
+    { reachable: false, onlineNodes: 0, localCapable: false, healthy: false, servingModel: null,
+      statusKnown: false, layersCovered: null, totalLayers: null, uncoveredLayers: [] });
   const [threads, setThreads] = useState<ChatThread[]>(loadThreads);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [personas, setPersonas] = useState<Persona[]>(loadPersonas);
@@ -664,6 +667,8 @@ function AppContent() {
           setUseRag={(val) => updateActiveThread(t => ({ ...t, useRag: val }))}
           systemPrompt={activeThread?.systemPrompt ?? ''}
           setSystemPrompt={(val) => updateActiveThread(t => ({ ...t, systemPrompt: val }))}
+          blockedReason={blockReason(network)}
+          degradedNotice={degradedNotice(network)}
         />
       </main>
 
