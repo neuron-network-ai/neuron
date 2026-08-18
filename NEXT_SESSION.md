@@ -1,212 +1,154 @@
-# Handoff — start of Session 64
+# Handoff — start of Session 65
 
 Paste the block at the bottom into a new window.
 
 ---
 
-## What happened in Session 63
+## What Session 64 did
 
-**The verifier restart was the whole session, because of what it showed.** It had already been
-restarted (21:25) with Session 62's stage-1 change, so the driver was challenged for the first
-time in six days — and it **failed**, at `max_err 28.5958`, every two minutes, deterministically.
-That is the 2026-08-11 figure [P47] filed as *"never explained"*.
+**Security was the session's aim and it was met.** [P52]: the pipeline wire is now encrypted and
+authenticated end to end. The coordinator mints a per-hop grant sealed to each node's own token,
+the two peers do an ephemeral X25519 exchange, and every frame after that is AES-GCM. Proved
+against a real byte-recording relay: the prompt is not in the bytes. Proved per-hop across four
+nodes: different key each hop, and a hostile node cannot reuse its grant against its neighbour.
+Forward secrecy is deliberate — **the coordinator itself cannot decrypt a recording.**
 
-**[P49] filed and fixed — the 28.6 is explained.** Speaking the protocol to the driver directly:
+**[P30] measured, routed, and phase 2 built.** llama.cpp is 8.7x PyTorch on this machine
+(26.93 vs 3.09 tok/s). A real relayed hop to the Pavilion is **22.6 ms**, so the network is 7% of
+a token's cost today and the ENGINE is the bottleneck — phase 1's gate passed. `agent/rpc_engine.py`
+supervises a localhost-only `ggml-rpc-server` reachable only through the encrypted channel;
+measured 28.07 tok/s through it, ~19x the live chain.
 
-```
-sent {"type": "config", "s1": 0, "s2": 10}
-ACK  {"ok": true, "layers": 28, "s2": 10, "holds": [0, 27]}
-```
+**Route reversed twice in one day, honestly both times.** ggml-rpc was rejected because llama.cpp
+says never put it on an open network and NEURON had none — then [P52] built the private channel
+that objection required, and the route came back. If the channel is ever removed, the objection
+returns intact.
 
-It holds **0-27**, the whole model, while the coordinator assigns it 0-9. `node_server` picks its
-role with `is_true_last = (self.hi == self.n - 1)`, so a node holding through the final layer is
-"true last" for *every* question — it ran `layers[10:]` + the final norm for a probe about 0-9.
-The right answer to a question nobody asked. `holds` was in the ack the whole time and
-`challenge_middle_node` ignored it, which is [P37] verbatim one function over. Fixed both sides:
-the `holds` check works against today's agents with no release, and `node_server` now uses
-`"s1" not in msg` to tell a probe from pipeline traffic. **Serving was never affected** — real
-traffic carries `host_b` and takes the middle role — so the driver has been computing 0-9
-correctly for every actual request and simply could not prove it.
+**[P51] found and closed.** The agent thread ran unsupervised, so an exception went to a `stderr`
+that does not exist in a windowed app — alive, listening, unregistered, silent for 81 minutes.
+Now supervised, with a heartbeat watchdog for the case no exception handler can catch.
 
-**[P47] causes 2 and 3 fixed.** `verify_service.log` says the verifier was **not running for 207
-of the 390 hours of its own history (53%)**, and 57 of the Pavilion's 64 unpaid hours are hours
-in which the coordinator could not have challenged anybody. Emission now pays for **proven** work
-rather than **observed** work: a pass carries for `EMISSION_POC_VALID_SLOTS`, a slot with no
-verifier heartbeat is the coordinator's failure and is paid for up to
-`EMISSION_MAX_UNAUDITED_SLOTS`, and past that the payout log says nobody knows. `peer-attest`
-now calls `mark_slot_poc`. Details and the farming analysis are in [P47]; the parts deliberately
-NOT excused (`ChallengeRefused`, `RangeMismatch`) are argued there rather than left silent.
+**[P50], [P46], [P39], [P48], [P49] all closed or guarded.** Install verification, the update
+notice, the reachable claim strip, React parity, the node identity that nearly orphaned 5.26 NRN.
 
-**`STAGE1_FAILURES_ARE_SCORED` stays `False`.** That was the session's first instruction and the
-answer is no: the evidence it was waiting for arrived and pointed the other way. Flipping it
-would have flagged the driver on its very next sweep.
+**PRIVACY.md written, and a claim of mine corrected.** Two things leave even on the local path:
+optional web search (off by default) and a blocked prompt's category (never the text). Both now
+disclosed in PRIVACY.md, DISCLOSURE.txt and README.
 
-Commits: `6a30df0`, `c9c9e1b` on `main-full`, on top of Session 62's five. **Still nothing
-pushed** — pushing is also what publishes the corrected download links to the GitHub Pages site.
+**0.20.5 built** — `dist/installer/NEURON-Setup-0.20.5.exe`, its packaged bundle verified
+coherent by [P46]'s own guard.
 
-## Then the session kept going, and most of it is now live
+## Read this before planning
 
-**Deployed twice, verified, and the network is healthy.** The verifier was restarted, the
-coordinator deployed (`audit_slots`, `/verifier/heartbeat`, `poc_excused`, `last_poc_at`, then
-`retired_nodes` + the funded-delete guard), and the reconciliation runs **clean with zero
-warnings**: 347.415369 NRN across 329 settled rows, three legs agreeing, replay matching.
+**ROADMAP.md is ~47 sessions stale** (last updated Session 16; it still lists Session 8 as
+active). Its *rules* and its One Rule are not stale and are still binding — build rule 1 says
+read it every session, and Session 64 did not until asked.
 
-**The driver earns again — 38 → 40 passes.** [P49]'s verifier-side fix turned the 28.6 into an
-honest `PLACEMENT MISMATCH`, and restarting the agent made it adopt the coordinator's 0-9. Its
-ack now reads `{"s1": 0, "s2": 10, "holds": [0, 9]}` and its attendance rows carry `poc_ok=1`.
+**It disagrees with PROBLEMS.md and the disagreement matters.** ROADMAP lists *"not faster than a
+single machine for one user"* under What NEURON Is Not; PROBLEMS ranks single-user speed
+**HIGHEST** ([P1]). Both were written honestly and they diverged. **Reconcile them, or every
+session works from whichever file it happens to open.**
 
-**[P50] filed 🔴 — the restart nearly cost the node.** It came back as `agent-optinovate`, the
-dead Aug-7 identity, because this one PC holds two identities in one config file; the fresh start
-then overwrote `config.json.prev` and destroyed the only on-disk copy of the live token. Recovered
-from `nodes.node_token` on the coordinator. Read that entry before touching an agent config.
+**And the One Rule is unmet after 63 sessions:** *"Build the agent. Get the first stranger.
+Everything else follows."* The live roster is two machines, both the founder's. No stranger has
+ever run a node. `FIRST_STRANGER.md` says the plumbing is done and what is missing is the front
+door — which is now largely built, so what remains is **outreach**, and `OUTREACH.md` shows
+nothing was ever sent.
 
-**Two nodes retired properly.** `delete_node` now refuses a funded node (409) and leaves a
-tombstone; `agent-bhpc012104-82cbee` (work PC, gone) and the `agent-optinovate` ghost are both
-recorded, which is what cleared the last permanent warning.
-
-**391.441387 NRN swept to `w_d35c84…76a9`.** The Pavilion is at zero; 5.31 NRN remains in node
-accounts, almost all of it this PC's driver — and the driver is earning again, so that grows
-hourly until an owner is bound.
-
-**[P39]: the claim was built and unreachable, now fixed in the repo.** Zero nodes had ever been
-claimed — not because it was broken, but because it rendered only inside the wallet panel, and
-the server's `needs_owner` was `logged_in AND not owned`, so a logged-out operator saw nothing.
-The message explaining why to sign in was gated on being signed in. There is now an `#ownclaim`
-strip above the composer driven by `unclaimed`. **It does not reach the live UI until the app is
-rebuilt** — the agent serves its own packaged copy.
-
-**The `/next` swap's three gaps are CLOSED (2026-08-18).** React now refuses to send into a
-chain that cannot answer, names the uncovered layers, and shows the update notice. Verified
-against the built bundle: healthy + text → Send enabled, degraded + text → Send disabled. Note
-the first verification attempt was wrong — setting `textarea.value` does not reach React's
-state, so it has to be driven through the native value setter.
-
-**What is left before the routes swap is one item, not a rewrite:** `chat.html` has the
-`#ownclaim` strip and React does not. Port that, then swap. (The claim panel was always on `/`;
-the old note saying it lives only on `/next` was wrong.)
+**The founder's own framing, which corrects a misreading:** those two machines are a **testbed**,
+not the network. Judging them as production inflates the severity of "no replica" and
+"single point of failure".
 
 ## Do these first
 
-1. **Rebuild and reinstall the agent.** It is the one thing everything else is now waiting on,
-   and it carries two separate fixes that cannot arrive any other way, because the live agent is
-   the packaged `neuron-agent.exe` in `%LOCALAPPDATA%\Programs\NEURON` and a restart just re-runs
-   installed 0.20.4:
-     * `node_server`'s probe/last-stage discrimination ([P49]) — currently carried entirely by
-       the verifier-side `holds` check, which was written for exactly this;
-     * the `#ownclaim` strip ([P39]) — until the rebuild, no operator can discover the claim,
-       which is the whole point of tonight's work. **The driver's node balance grows every hour
-       it stays unclaimed.**
-   `PACKAGING.md` is the runbook. Watch [P46]: a partial copy leaves last build's bundle beside
-   this build's `index.html`; run the installer properly rather than hand-copying.
-2. **Then claim this machine's node through the UI** — sign in, and the strip is there. It is
-   the first real use of the path, and it is what proves the new-user story end to end:
-   install, sign in, earnings are yours rather than the machine's. 5.26 NRN and rising is the
-   test case.
-3. **Watch `verify_service.log` after the rebuild.** The driver should pass quietly (a re-check
-   logs at DEBUG). What must NOT appear is `wrong answer (max_err 28.6)` — that would mean the
-   rebuild did not take.
-4. **Re-run the reconciliation** after anything touches the ledger. It is currently clean with
-   ZERO warnings, which is the state that makes [P40] item 2 (running it from cron) worth
-   doing — it will now only speak when something is actually wrong.
-   ```
-   ssh -i C:\Users\optin\.ssh\oracle_coordinator ubuntu@150.230.22.250 "python3 /tmp/reconcile_emission.py --db /home/ubuntu/neuron/coordinator/neuron.db --seed-from-backup --replay"
-   ```
+1. **Install 0.20.5.** Built and sitting in `dist/installer/`. Everything user-facing from
+   Sessions 63-64 is invisible until it runs — the claim strip, install verification, the update
+   notice, [P51]'s watchdog, [P49]'s `node_server` fix.
+2. **Then claim this machine's node through the UI.** Sign in and press the button. It is the
+   first real execution of connect → sign → bind, and the driver's balance is still tied to a
+   file on one disk until it happens.
+3. **Push, or decide not to.** 47 commits. Do NOT point the download links at 0.20.5 until a
+   release actually exists — `test_download_links.py` enforces that.
+4. **Re-run the reconciliation** after anything touches the ledger. It is clean with ZERO
+   warnings, which is what makes [P40] item 2 (a cron) worth doing.
 
 ## Open, roughly in order
 
-- **[P49]'s cause, still open even though the symptom is gone: auto-repair moves a node's range
-  and never tells the node.** Restarting the agent fixed today — `setup()` re-reads slice-info
-  and adopts the coordinator's answer (`agent.py:1135`), so it now serves 0-9, `placement_drift`
-  is False and it passes. But nothing pushed that change to it; a person did. That is [P37]'s
-  named open item, and it will recur on the next re-placement, silently, on whichever machine
-  is least able to notice. The migration path already has a prepare → download → ready → cut
-  over handshake that auto-repair does not use.
-- **Why is the driver serving the whole model at all?** `agent.log` shows *"this machine can run
-  Qwen/Qwen2.5-1.5B-Instruct itself — fetching quantized weights instead of the pipeline-driver
-  slice"*. A 64 GB machine that can run the model locally appears to end up with a NodeServer on
-  0-27 while registered for 0-9. That is one config decision away from being the answer.
-- **A ghost node is `eligible` with a 10-day-old `last_seen`.** `agent-optinovate` (no suffix,
-  port 9001) reads `standing: verified`, `eligible: true`, last seen 2026-08-07. Worth checking
-  what treats it as routable.
-- **[P48] item 3 — the `/next` → `/` swap is a SHIPPING blocker.** 0.20.4's headline wallet UI
-  (`≈ N network answers left`, `ui/web/src/components/Sidebar.tsx`) is served at `/next` while
-  `/` still serves `ui/static/chat.html`, so the feature the release exists for reaches no
-  default user. Blocked on porting 59 source-text assertions in `ui/test_chat_ui.py` — port them
-  as behaviour, the way Session 61 ported the claim panel. **Untouched this session.**
-- **[P40] item 2** — run the reconciliation as a standing assertion, not by hand. It is one cron
-  line; the script exits 1 on a discrepancy.
-- **[P39] item 5** — `delete_node` leaves a funded ledger row behind. Cheapest fix: refuse to
-  delete while the balance is non-zero.
-- **The capacity case has still never run a forward pass.** `NEURON_WEIGHT_DTYPE=fp16` on both
-  nodes, `donate_ram_gb: 8` on the Windows PC, pin `Qwen/Qwen3-4B-Instruct-2507`.
-  `CAPACITY_CASE.md` is the runbook. Needs you at both machines.
-- **[P39] phase 4** — sweep the Pavilion's ~213 NRN, but only after an owner is recorded through
-  the Chat UI. The panel is at `/next`, not `/`.
-- **Peer verification has never fired.** It now pays when it does — watch `peer_passes`.
-- **[P44]** — driver shard goes stale on a width change; needs a driver-side reload.
-- `coordinator_version` still reports 0.1.0, unwired since Session 58.
-- Router: the static DHCP row still maps the Pavilion's MAC to 192.168.1.10, which the OptiPlex
-  holds statically. Yours to do.
+- **The first stranger.** The roadmap's One Rule, unmet. Outreach is a human act; nothing in the
+  repo can do it.
+- **The capacity case has NEVER run.** [P43]: no forward pass has ever executed on the 4B. The
+  network serves a 1.5B, which fits on one machine — so *"models too large for any single
+  machine"*, the site's headline, has never been demonstrated. Run it once.
+- **[P30] phase 3** — two nodes on the new engine, and proof-of-compute must still pass. **Open
+  design question:** in ggml's RPC design the CLIENT reads the model file and uploads tensors, so
+  the driver needs the whole model on DISK (not RAM). Today it downloads only its slice. Decide
+  before this replaces anything.
+- **[P52] residual** — the channel authenticates the CALLER, not the PEER. A chain member is
+  coordinator-selected, not trusted, and ggml-rpc is a memory protocol. Belongs with the
+  open-join question in SECURITY.md.
+- **`NEURON_REQUIRE_SECURE=1`** — the end state for the encryption rollout. Flip it once the
+  fleet has moved; until then plaintext is accepted so an upgrade does not partition the network.
+- **[P1] / [P30] speed** — 1.44 tok/s live. Phases 3-4 are the fix.
+- **TERMS.md** — deliberately NOT written. Legal document; TOKENOMICS §12.7's reasoning applies.
+- **[P37]'s open item** — auto-repair moves a node's range and never tells it. Recurred twice;
+  a person fixed it by hand both times.
+- **No replica** — one machine per stage. Real, and a testbed property rather than a defect.
 
-## Environment (all hit for real)
+## Environment gotchas
 
-- **The verifier runs on the WINDOWS PC, not the VM** — `verify_service.py`, log at the repo
-  root, started via `.venv\Scripts\pythonw.exe`. That venv launcher spawns the real interpreter
-  as a child, so **two `verify_service.py` processes in the task list is one verifier**, not two.
-- **You cannot SSH to the coordinator VM from the agent side.** The deploy key carries a
-  passphrase and `~/.ssh/neuron-agent.sock` had no identities loaded. Deploys are yours.
-- `bash` from cmd.exe is **WSL**, not Git Bash. Use `"C:\Program Files\Git\bin\bash.exe"` for
-  anything using the SSH keys.
-- cmd.exe has no inline `VAR=value cmd`.
-- Absolute paths in anything handed over — you are usually in `C:\Users\optin`.
-- Python is `.venv\Scripts\python.exe`; PATH python is 3.14 with no torch.
-- Tests run as `python -m coordinator.test_<name>`, or `python test_<name>.py` at the root.
-- `agent.log` and `verify_service.log` need `errors="replace"` — they contain cp1252-hostile
-  bytes and a bare `open()` raises `UnicodeEncodeError` on print.
-- `gh` is installed and authed but must run from inside the repo.
-- The live DB is at `/home/ubuntu/neuron/coordinator/neuron.db`, no `NEURON_DB` override.
-
----
+- **Bash from cmd.exe is WSL, not Git Bash.** Use `"C:\Program Files\Git\bin\bash.exe"` for
+  anything touching the SSH keys.
+- **The VM deploy key carries a passphrase.** Load it into the agent socket first:
+  `SSH_AUTH_SOCK=/c/Users/optin/.ssh/neuron-agent.sock ssh-add /c/Users/optin/.ssh/oracle_coordinator`
+  It drops when the PC sleeps.
+- **Python is `.venv\Scripts\python.exe`.** PATH python has no torch.
+- **`packaging/test_app_entry.py` runs by PATH, not `-m`** — a local `packaging/__init__.py`
+  would shadow the PyPI package for the whole repo.
+- **The desktop app serves its own packaged copy.** Repo edits to the UI are invisible until a
+  rebuild — this has caught three sessions running.
+- **`good-state-0.20.5`** is a tag. `git reset --hard good-state-0.20.5` returns to a known-good
+  point.
 
 ## Prompt for the next window
 
 ```
-Continue NEURON. Read PROBLEMS.md [P50] [P49] [P47] [P39] [P48] and
-NEXT_SESSION.md — that has the handoff.
+Continue NEURON. Read PROBLEMS.md [P30] [P52] [P51] [P43], ROADMAP.md, and
+NEXT_SESSION.md — that has the handoff. Read ROADMAP.md properly: build rule 1
+says every session, and Session 64 skipped it until asked.
 
-STATE: most of Session 63 is deployed and live. The coordinator carries
-audit_slots, /verifier/heartbeat, poc_excused, last_poc_at, retired_nodes and
-the funded-delete guard. The reconciliation runs CLEAN with zero warnings
-(347.415369 NRN, 329 rows, replay matching). The driver passes challenges again
-(38 -> 40) after [P49] and an agent restart. 391.441387 NRN was swept to
-w_d35c84...76a9; 5.31 NRN remains in node accounts and grows hourly.
+STATE: the wire is encrypted and authenticated end to end ([P52]) — per hop,
+different key each hop, and the coordinator itself cannot decrypt a recording.
+[P30] phase 1 passed (a real relayed hop is 22.6 ms, so the ENGINE is 93% of a
+token's cost) and phase 2 is built (agent/rpc_engine.py, 28 tok/s through the
+encrypted channel vs 1.44 live). NEURON-Setup-0.20.5.exe is built and unpushed
+along with 47 commits.
 
-FIRST: rebuild and reinstall the agent. Everything now waits on it — the live
-agent is the packaged neuron-agent.exe, so a restart re-runs installed 0.20.4.
-It carries two fixes that cannot arrive any other way: node_server's probe vs
-last-stage discrimination ([P49], currently carried by the verifier-side holds
-check alone), and the #ownclaim strip ([P39]). Then sign in and claim this
-machine's node through the UI — that is the first real use of the path and the
-proof of the new-user story.
+FIRST: install 0.20.5, then sign in and claim this machine's node through the
+UI. Everything user-facing from two sessions is invisible until that installer
+runs, and the claim is the first real execution of connect → sign → bind.
 
-WATCH OUT — [P50], read it before touching an agent config. This one PC holds
-two node identities in one config file. Restarting the agent brought back the
-dead one, and the fresh start overwrote config.json.prev, destroying the only
-on-disk copy of the live token. It was recovered from nodes.node_token on the
-coordinator.
+THEN DECIDE, because this is a direction question and not mine to settle:
+ROADMAP.md's One Rule is "build the agent, get the first stranger, everything
+else follows" and after 63 sessions no stranger has ever run a node — the roster
+is two of the founder's own machines, which are a TESTBED, not the network.
+Meanwhile ROADMAP says "not faster than a single machine for one user" is what
+NEURON is NOT, while PROBLEMS ranks single-user speed HIGHEST. Those two
+documents disagree. Reconcile them before building, or each session works from
+whichever one it opens.
 
-THEN: [P49]'s cause. The driver was registering 0-27 while assigned 0-9 because
-auto-repair moves a range and never tells the node ([P37]'s open item). The
-restart fixed today; the handshake is the real repair.
+ALSO NEVER DEMONSTRATED: [P43] says no forward pass has ever run on the 4B. The
+site's headline is "models too large for any single machine" and the network
+serves a 1.5B that fits on one. Running that once is worth more than another
+optimisation.
 
-DO NOT assume the /next swap is a tidy-up OR that it is close. Checked
-directly: the React app has no low-balance strip, no wallet-ID panel, no
-degraded banner, no token cap and no local-vs-network header, so swapping today
-REGRESSES every user. The blocker is feature parity, not the 59 assertions. The
-claim panel is already on /, so the note saying otherwise was wrong.
+WATCH OUT: [P50] before touching an agent config (one PC, two identities, one
+file). The desktop app serves its own packaged UI, so repo edits are invisible
+until a rebuild. And [P30] phase 3 has an open design question — in ggml's RPC
+design the DRIVER needs the whole model file on disk, where today it downloads
+only its slice.
 
-Nothing is pushed — 18 commits on main-full. Pushing also publishes the
-corrected download links to the GitHub Pages site.
+Nothing is pushed. Pushing also publishes the corrected download links and
+PRIVACY.md to the GitHub Pages site.
 
 Environment gotchas and the rest of the open list are in NEXT_SESSION.md.
 ```
