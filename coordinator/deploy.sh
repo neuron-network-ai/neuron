@@ -118,7 +118,12 @@ say "shipping code"
 # tar-over-ssh rather than rsync: this is normally run from the founder's Windows box, where
 # Git Bash ships ssh/scp/tar but NOT rsync -- so an rsync-based deploy fails at the one moment
 # it matters. tar needs nothing that isn't already there on both ends.
-FILES=(coordinator relay_auth.py common.py logtail.py)
+# `security` is NOT optional and its absence is not a soft failure: [P52] made router.py do
+# `from security import wire_crypto` at import time, so a deploy without it takes the whole
+# coordinator down in a systemd restart loop with ModuleNotFoundError — the network becomes
+# unroutable while `systemctl is-active` still says "activating". That happened on 2026-08-19.
+# Anything the coordinator imports at module scope belongs in this list.
+FILES=(coordinator security relay_auth.py common.py logtail.py)
 EXCLUDES=(--exclude='__pycache__' --exclude='*.pyc' --exclude='neuron.db*'
           --exclude='test_*.py' --exclude='*.sh')
 if [ -n "$DRY" ]; then

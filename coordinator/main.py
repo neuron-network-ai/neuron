@@ -1176,6 +1176,42 @@ def wallet_activity(wallet_id: str, x_wallet_link_secret: str = Header(default=N
     return data
 
 
+@app.get("/wallet/{wallet_id}/nodes")
+def wallet_nodes(wallet_id: str):
+    """Every machine this account owns, and what they add up to.
+
+    **The gap this closes.** One person contributing several computers is the ordinary case, not
+    an exotic one — a desktop, a laptop, an old machine in a cupboard — and `owner_wallet_id` on
+    the `nodes` table has always allowed it. What did not exist was the inverse query, so a
+    person could claim every machine they owned and still see them only one at a time, from
+    whichever machine they happened to be sitting at. There is no cap on how many; there never
+    was one to remove.
+
+    **Auth deliberately matches `/wallet/{wallet_id}` (balance), not the link-secret endpoints.**
+    The link secret gates actions only a trusted driver may take — minting a wallet, a faucet
+    grant, a ban. This is a wallet READING ITS OWN facts, where the convention already in place
+    is that knowing the wallet id is the credential. Requiring the link secret here would have
+    been security theatre with a real cost: the Chat UI runs on every volunteer's machine, so
+    the only way it could send that secret is if every volunteer had a copy of it.
+
+    It exposes strictly less than the balance endpoint beside it: anyone holding this wallet id
+    can already spend its NRN. That the id travels in a path segment at all is a pre-existing
+    weakness shared with `/wallet/{wallet_id}` — worth fixing for both together, and not
+    something this endpoint should diverge on alone.
+
+    `total_earned` is lifetime and only ever grows; `balance` is what is still on the node's own
+    row rather than in the wallet. On a claimed node that should be 0.
+    """
+    nodes = models.nodes_for_owner(wallet_id)
+    return {"wallet_id": wallet_id,
+            "node_count": len(nodes),
+            "total_earned": round(sum(n["total_earned"] for n in nodes), 6),
+            # Unswept NRN still sitting on node rows. Surfaced rather than summed away: it
+            # should be zero on a claimed node, so anything here is a signal, not a detail.
+            "unswept_on_nodes": round(sum(n["balance"] for n in nodes), 6),
+            "nodes": nodes}
+
+
 @app.get("/admin/identities")
 def admin_identities(banned_only: bool = False, limit: int = 200,
                      x_wallet_link_secret: str = Header(default=None)):

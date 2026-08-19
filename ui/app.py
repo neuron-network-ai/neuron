@@ -244,6 +244,36 @@ def wallet_balance_proxy(request: Request):
         return {"logged_in": True, "wallet_id": wallet_id, "error": str(e)}
 
 
+@app.get("/wallet/nodes")
+def wallet_nodes_proxy(request: Request):
+    """Every machine on the signed-in account, and what they add up to.
+
+    One person contributing several computers is the ordinary case — a desktop, a laptop, an old
+    machine in a cupboard — and the coordinator has always allowed it, because `owner_wallet_id`
+    is just a column on `nodes` with no cap on how many rows carry the same value. What was
+    missing was any way to SEE it: the only query was node -> owner, so you could claim every
+    machine you owned and still only ever see the one you were sitting at.
+
+    The wallet id comes from the SESSION and is never accepted from the page, same rule as every
+    other wallet route here — otherwise this would be an endpoint for reading somebody else's
+    machine list.
+    """
+    wallet_id = request.session.get("wallet_id")
+    if not wallet_id:
+        return {"logged_in": False, "nodes": []}
+    try:
+        r = requests.get(f"{COORDINATOR}/wallet/{wallet_id}/nodes", timeout=8)
+        r.raise_for_status()
+        data = r.json()
+        # wallet_id is echoed by the coordinator; drop it rather than hand a spendable
+        # credential back to the browser that already knows better than to need it.
+        data.pop("wallet_id", None)
+        return {"logged_in": True, **data}
+    except requests.RequestException as e:
+        log.warning("wallet nodes proxy failed: %s", e)
+        return {"logged_in": True, "error": str(e), "nodes": []}
+
+
 class PayoutBindBody(BaseModel):
     address: str
     nonce: str

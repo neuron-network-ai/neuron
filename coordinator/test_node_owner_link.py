@@ -187,6 +187,39 @@ def main():
           open("coordinator/emission.py", encoding="utf-8").read(),
           "settling elsewhere would let one owner's two nodes settle each other's hours")
 
+    # ------------------------------------------------------------------
+    # One account, MANY machines. The founder's requirement, in their words: a person with
+    # several computers installs the agent on each with their one ID and collects from all of
+    # them in that account. `owner_wallet_id` always allowed it — nothing caps how many rows
+    # carry the same value — but the only query was node -> owner, so a person could claim
+    # every machine they owned and never see them together.
+    print("\n-- one wallet, many machines")
+    for i, nid in enumerate(("mm-node-a", "mm-node-b", "mm-node-c", "mm-other")):
+        models.register_node(nid, "127.0.0.1", 51100 + i, 0, 9, 4, 8.0, f"tok-{nid}")
+    models.set_node_owner("mm-node-a", wallet)
+    models.set_node_owner("mm-node-b", wallet)
+    # mm-node-c is left unclaimed and mm-other belongs to a second wallet, so the query is
+    # shown to FILTER rather than to return everything it can see.
+    models.set_node_owner("mm-other", other)
+
+    mine = models.nodes_for_owner(wallet)
+    ids = {n["node_id"] for n in mine}
+    check("both of this wallet's machines come back", {"mm-node-a", "mm-node-b"} <= ids, ids)
+    check("...an unclaimed machine does not", "mm-node-c" not in ids, ids)
+    check("...and another wallet's machine does not", "mm-other" not in ids, ids)
+    check("every row carries what that machine earned",
+          all("total_earned" in n and "balance" in n for n in mine), mine[:1])
+    check("an unknown wallet gets an empty list, not an error",
+          models.nodes_for_owner("w_nobody") == [])
+    check("no wallet id at all gets an empty list", models.nodes_for_owner(None) == [])
+
+    src = open("coordinator/models.py", encoding="utf-8").read()
+    body = src[src.index("def nodes_for_owner"):]
+    body = body[:body.index("\ndef ", 1)]
+    check("there is no cap on how many machines one account may own",
+          "LIMIT" not in body.upper(),
+          "a LIMIT here would silently truncate somebody's fleet")
+
     print(f"\n{ok} passed, {fail} failed")
     return 1 if fail else 0
 

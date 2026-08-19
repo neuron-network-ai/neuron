@@ -540,6 +540,7 @@ function wireWalletReveal(walletId){
     box.appendChild(code); box.appendChild(note); box.appendChild(copy);
     box.appendChild(buildPayoutSection());
     box.appendChild(buildNodeOwnerSection());
+    box.appendChild(buildMyMachinesSection());
     box.classList.add("show");
   });
 }
@@ -550,6 +551,53 @@ function wireWalletReveal(walletId){
 //
 // Every coordinator call is proxied through ui/app.py, which takes the wallet id from the
 // SESSION -- the page never sends one, so this cannot be pointed at another person's wallet.
+// EVERY MACHINE ON THIS ACCOUNT, not just the one you are sitting at.
+//
+// Contributing several computers is the ordinary case — a desktop, a laptop, an old machine in
+// a cupboard — and the coordinator has always allowed it: `owner_wallet_id` is a column on
+// `nodes` and nothing caps how many rows share a value. But the only query was node -> owner,
+// so a person could claim every machine they owned and still see them one at a time, from
+// whichever one they happened to be at. There was no number for "what do my machines earn".
+//
+// Shown only when there is more than nothing to show. A single-machine operator already sees
+// that machine in the section above, and repeating it as a list of one is noise.
+function buildMyMachinesSection(){
+  const wrap = document.createElement("div");
+  wrap.className = "payout";
+  wrap.style.display = "none";
+  const label = document.createElement("div");
+  label.className = "plabel";
+  label.textContent = "My machines";
+  const list = document.createElement("div");
+  const stat = document.createElement("div");
+  stat.className = "note";
+  wrap.append(label, list, stat);
+
+  fetch("/wallet/nodes").then(r => r.json()).then(d => {
+    if(!d.logged_in || d.error || !d.nodes || !d.nodes.length) return;
+    wrap.style.display = "";
+    d.nodes.forEach(n => {
+      const row = document.createElement("div");
+      row.className = "pval";
+      const live = n.status === "online" ? "● " : "○ ";
+      row.textContent = live + n.node_id + " — layers " + n.layer_start + "-" + n.layer_end
+        + " · " + (n.total_earned || 0).toFixed(2) + " NRN earned";
+      list.appendChild(row);
+    });
+    let msg = d.node_count + " machine(s) on this account · "
+      + (d.total_earned || 0).toFixed(2) + " NRN earned in total.";
+    // Unswept NRN is surfaced, not summed away. A claimed node credits its owner's wallet
+    // directly, so this should be 0.00 — anything else means that path stopped working, and
+    // hiding it would turn a silent fault into a slowly growing loss.
+    if(d.unswept_on_nodes > 0){
+      msg += " " + d.unswept_on_nodes.toFixed(2) + " NRN is still sitting on node accounts "
+           + "rather than in your wallet.";
+    }
+    stat.textContent = msg;
+  }).catch(() => { /* the wallet panel must not break because this failed */ });
+  return wrap;
+}
+
 function buildPayoutSection(){
   const wrap = document.createElement("div");
   wrap.className = "payout";

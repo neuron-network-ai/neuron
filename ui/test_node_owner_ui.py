@@ -166,6 +166,36 @@ def main():
           uiapp.node_claim(signed_in).status_code == 409)
     uiapp._local_payout_key = lambda create=False: ("0xMINE", "pk")
 
+    print("\n-- every machine on one account, however many there are")
+    def nodes_get(url, **kw):
+        calls.append(("GET", url, kw))
+        return FakeResp(200, {"wallet_id": "w_alice", "node_count": 3,
+                              "total_earned": 162.5, "unswept_on_nodes": 0.0,
+                              "nodes": [{"node_id": "a", "total_earned": 100.0},
+                                        {"node_id": "b", "total_earned": 60.0},
+                                        {"node_id": "c", "total_earned": 2.5}]})
+
+    uiapp.requests.get = nodes_get
+    calls.clear()
+    out = uiapp.wallet_nodes_proxy(signed_in)
+    check("it returns every machine, not just this one", out["node_count"] == 3)
+    check("...with the combined total", out["total_earned"] == 162.5)
+    check("...asking the coordinator for the SESSION's wallet",
+          "/wallet/w_alice/nodes" in calls[-1][1], calls[-1][1])
+    check("...and never handing the wallet id back to the browser",
+          "wallet_id" not in out, out)
+    check("a signed-out visitor gets no machine list",
+          uiapp.wallet_nodes_proxy(anon) == {"logged_in": False, "nodes": []})
+
+    SRC = open("ui/static/chat.html", encoding="utf-8").read()
+    check("the page has a My machines panel",
+          "buildMyMachinesSection" in SRC and '"/wallet/nodes"' in SRC)
+    check("...which the page never passes a wallet id to",
+          "/wallet/nodes?" not in SRC,
+          "a query string here would mean the page chose whose machines to show")
+    check("...and which stays hidden rather than rendering an empty list",
+          "if(!d.logged_in || d.error || !d.nodes || !d.nodes.length) return;" in SRC)
+
     print("\n-- a coordinator outage does not take the chat down")
     import requests as real_requests
 

@@ -1090,6 +1090,38 @@ def get_node_owner(node_id):
     return row["owner_wallet_id"] if row else None
 
 
+def nodes_for_owner(wallet_id):
+    """Every node this wallet owns, with what each has earned. The inverse of get_node_owner().
+
+    **Why the inverse direction was missing and why it matters.** `owner_wallet_id` is a column
+    on `nodes`, so one wallet owning many nodes has always been representable — nothing caps it,
+    and nothing ever needed to. But the only query was node -> owner, which answers "who owns
+    this machine" and cannot answer "which machines are mine". So somebody running the agent on
+    several computers could claim each one and still had no way to see them together, or to see
+    what they add up to. That is the whole point of contributing more than one machine.
+
+    Returns a list ordered by earnings, biggest first. `balance` is what is still sitting on the
+    node's own ledger row; on a claimed node that should stay at 0 because emission credits the
+    owner's wallet directly ([P39]), so a non-zero balance here is worth showing rather than
+    hiding — it is the visible symptom if that crediting path ever stops working.
+    """
+    if not wallet_id:
+        return []
+    with _db() as c:
+        rows = c.execute(
+            """SELECT n.node_id, n.layer_start, n.layer_end, n.status, n.last_seen,
+                      n.cores, n.ram_gb, n.challenges_passed, n.challenges_failed,
+                      COALESCE(l.balance, 0)         AS balance,
+                      COALESCE(l.total_earned, 0)    AS total_earned,
+                      COALESCE(l.requests_served, 0) AS requests_served
+                 FROM nodes n
+                 LEFT JOIN ledger l ON l.node_id = n.node_id
+                WHERE n.owner_wallet_id = ?
+                ORDER BY l.total_earned DESC, n.node_id""",
+            (wallet_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_payout_address(account_id):
     with _db() as c:
         row = c.execute("SELECT payout_address, payout_bound_at FROM ledger WHERE node_id=?",
