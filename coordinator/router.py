@@ -351,11 +351,60 @@ def canonical_assignment(nodes, total, s1=None, max_stages=None, serving_model_i
 
     rest = sorted([n for n in elig if n["node_id"] != driver["node_id"]],
                   key=lambda n: (n["layer_start"], n["node_id"]))
-    n_stages = min(max_stages - 1, len(rest))
     remaining = total - s1
-    base, extra = divmod(remaining, n_stages)
+    avail = min(max_stages - 1, len(rest))
+    all_caps = [balancer.max_layers_for(rest[i], gpl) if gpl else None for i in range(avail)]
 
-    caps = [balancer.max_layers_for(rest[i], gpl) if gpl else None for i in range(n_stages)]
+    # THE FEWEST STAGES THAT ACTUALLY FIT, not the most the roster allows.
+    #
+    # This was `min(max_stages - 1, len(rest))` — depth driven by how many machines EXIST
+    # rather than how many are NEEDED. On a roster where one node can hold every remaining
+    # layer, a second joining node still became a second stage and the model was split across
+    # both. That is the worst possible use of a new machine: decode is sequential, so every
+    # token then pays an extra round trip, while the throughput the machine could have added
+    # as a REPLICA is not added at all.
+    #
+    # Measured 2026-08-19 on the two live machines: the same model is 32.11 tok/s on one and
+    # 3.97 tok/s split across two. Splitting costs 8x. It is worth paying only when the model
+    # genuinely does not fit, which is the entire reason this network exists — and worth
+    # refusing every other time.
+    #
+    # This is what makes the design survive scale. With depth pinned to the minimum, machine
+    # number 10 and machine number 10,000,000 both become replicas: chains stay short, per-user
+    # latency stays flat, and total throughput rises linearly with the roster instead of every
+    # user's answer getting slower each time somebody joins.
+    #
+    # An unknown footprint (`gpl` None -> cap None) means unknown, i.e. no constraint, so one
+    # stage suffices — the same reading of None as everywhere else in this function.
+    n_stages = avail
+    if remaining > 0:
+        room = 0
+        for k, cap in enumerate(all_caps, start=1):
+            if cap is None:
+                n_stages = k
+                break
+            room += int(cap)
+            if room >= remaining:
+                n_stages = k
+                break
+
+    # ...but never SHRINK a chain that is already working. Minimising depth is about refusing
+    # to grow one, not about tearing up a healthy roster to save a hop: re-splitting moves real
+    # slices on real disks, and a node whose range changes under it is [P37] — the failure that
+    # flagged three honest machines for the coordinator's own bookkeeping. A chain that already
+    # routes has already paid for its shape.
+    #
+    # So the rule is one-directional: a joining machine becomes a replica rather than a stage,
+    # and an existing stage keeps its layers until something is actually broken.
+    # Depth is read off the ROUTABLE CHAIN, never off the distinct ranges of every eligible
+    # node. A machine that has just joined still carries a placeholder range it does not serve,
+    # and counting that as a live stage is how "do not shrink a working chain" turns into "let
+    # the joiner deepen it" — precisely the bug this whole change exists to remove.
+    _shape = chain_shape(nodes, total, serving_model_id=serving_model_id)
+    if _shape.get("routable"):
+        n_stages = max(n_stages, min(int(_shape.get("stages") or 1) - 1, avail))
+    base, extra = divmod(remaining, n_stages)
+    caps = all_caps[:n_stages]
 
     out = [{"node_id": driver["node_id"], "layer_start": 0, "layer_end": s1 - 1}]
     segments, cur = [], s1
