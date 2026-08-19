@@ -422,6 +422,43 @@ the Pavilion re-downloaded its slice during a model migration and now serves 10-
 tensors are present. A node serving a sub-range out of a superset slice is the one condition
 that changed and is not covered by any test.
 
+**BISECTED, 2026-08-19. Every component is correct and the whole is wrong, which narrows it
+to one place.** Measured, in this order, each ruling out a suspect:
+
+  * **the sharding math is bit-exact.** `selftest_shard.py`: `max|delta| = 0.000e+00` and it
+    decodes *"Hello! How can I assist you today"*. Layer splitting, norm placement, `lm_head`
+    and the KV cache are all correct IN PROCESS.
+  * **the chain shapes are correct.** `test_short_chain.py`, 13 pass, including that a 2-stage
+    chain routes and that `s2` marks where the last stage begins.
+  * **the config on the wire is correct.** Captured live: `{'s1': 10, 's2': 10}`, and the last
+    stage runs `layers[s2:]` = 10-27. Not the empty range it looks like.
+  * **the wire codec is irrelevant.** Forcing `f32`, `f16` and `i8h` in turn produced
+    byte-identical garbage — so the corruption is deterministic and upstream of quantization.
+  * **the remote weights are identical.** Layer-10 tensor sums match the reference to four
+    decimals (`1416.5790`, `41.1904`, `-264.7318`).
+  * **the remote COMPUTE is correct in isolation.** Running layers 10-27 + norm on a fixed
+    seeded input, on the Pavilion with its own slice and its own loader: `sum=-314.9242`
+    against the reference's `-314.9192`. A 1.6e-5 relative difference — bf16 rounding, nothing
+    more.
+
+**And then the measurement that matters.** Captured the hidden state the driver actually put on
+the wire for a real request, captured what came back, and computed locally what that reply
+should have been from that exact input:
+
+| | sum of the returned hidden |
+|---|---|
+| what the node returned | **2358.6965** |
+| what `layers[10:]` + norm produce from the same input | **1145.9401** |
+| `max|difference|` | **247.09** |
+
+**So the node returns the wrong thing on the LIVE path while computing correctly in process.**
+The remaining difference between the two is that serving goes through the BATCHED
+implementation — `batching.last_stage_batched` / `run_layers_batched` with a padded batch cache
+— rather than `common.last_stage`. That is where to look, and it is the only place left.
+
+It also explains why proof-of-compute never noticed: whatever the challenge exercises, it is not
+the batched serve path that real requests take.
+
 **The next step is a bisect, not more inspection.** Point the driver at a `node_server` running
 locally on the driver's own machine for layers 10-27, and compare:
   * coherent -> the Pavilion's slice/compute is at fault, and the full-model-slice path is the
