@@ -213,6 +213,11 @@ class NodeServer:
     def __init__(self, slice_dir, layer_start, layer_end, total_layers, paused_flag=None):
         self.lo = self.hi = self.n = None
         self.model = None
+        # [P30] phase 3. Created on first use, not at startup: a node that never receives an
+        # rpc-bridge request must not pay for a process it will not use, and a machine with no
+        # engine binary must keep serving with PyTorch rather than failing to start.
+        self._rpc = None
+        self._rpc_lock = threading.Lock()
         self._batchers = {}
         self._batcher_lock = threading.Lock()
         self.paused = paused_flag if paused_flag is not None else threading.Event()  # set = paused
@@ -599,6 +604,13 @@ class NodeServer:
                         common.send_msg(conn, {"hidden": common._to_cpu(out),
                                                "b_compute_ms": b_ms}, codec=codec)
 
+                elif mtype == "rpc-bridge":
+                    # [P30] phase 3: hand this connection to the local ggml engine and stop
+                    # speaking NEURON on it. Everything after the ack is raw ggml-rpc, sealed
+                    # frame by frame, so this arm RETURNS rather than looping.
+                    self._serve_rpc_bridge(conn)
+                    return
+
                 elif mtype == "bye":
                     if bconn:
                         common.send_msg(bconn, {"type": "bye"})
@@ -609,6 +621,53 @@ class NodeServer:
                     bconn.close()
                 except OSError:
                     pass
+
+    def _serve_rpc_bridge(self, conn):
+        """Give an authenticated caller access to this machine's ggml engine ([P30] phase 3).
+
+        **The security argument, because this is the riskiest door in the product.** ggml-rpc is
+        a MEMORY protocol — allocate a buffer, write bytes into it, execute a graph — and
+        upstream says never to run it on an open network. So:
+
+          * the engine binds `127.0.0.1` and is never published (`rpc_engine.BIND_HOST`);
+          * this arm refuses anything but a [P52] channel, so the caller has already proved it
+            holds a grant only the coordinator can mint, sealed to THIS node's token;
+          * `rpc_engine.bridge` refuses again on its own, deliberately duplicating the check —
+            one door, checked at the door and at the threshold.
+
+        The residual risk is unchanged and stated in [P52]: this authenticates the CALLER, not
+        the PEER. A chain member is coordinator-selected, not trusted. The surface shrinks from
+        "anyone on the internet" to "a machine the coordinator put in this chain", which is a
+        large reduction and not an elimination.
+
+        A node that cannot start an engine answers so and keeps serving with PyTorch. Falling
+        back is the whole point: an optional accelerator that takes a node OFF the network when
+        it is missing would be worse than the slowness it exists to fix.
+        """
+        from agent import rpc_engine
+        if not common.is_secure(conn):
+            common.send_msg(conn, {"type": "rpc-error",
+                                   "detail": "rpc-bridge requires an encrypted channel"})
+            print("[node] refused an rpc-bridge on a plaintext connection")
+            return
+        with self._rpc_lock:
+            if self._rpc is None:
+                self._rpc = rpc_engine.RpcEngine()
+            eng = self._rpc
+            if not eng.healthy() and not eng.start():
+                common.send_msg(conn, {"type": "rpc-error",
+                                       "detail": "no ggml engine on this node"})
+                return
+            port = eng.port
+        # The ack is a NEURON message; everything after it is ggml's own protocol, so the
+        # caller must switch modes at exactly this point too.
+        common.send_msg(conn, {"type": "rpc-ready"})
+        try:
+            rpc_engine.bridge(conn, port=port)
+        except PermissionError as e:
+            print(f"[node] rpc-bridge refused: {e}")
+        except OSError as e:
+            print(f"[node] rpc-bridge ended: {e}")
 
     def run(self, host, port):
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
