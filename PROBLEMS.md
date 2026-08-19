@@ -466,6 +466,31 @@ locally on the driver's own machine for layers 10-27, and compare:
   * still garbage -> the driver's own half (embed, layers 0-9, `lm_head`, or the norm placement
     when there are exactly two stages) is at fault.
 
+**A COMPLETELY FRESH INSTALL REPRODUCES IT, which changes what this is.** The Pavilion was
+wiped and rebuilt from nothing on 2026-08-19: NEURON deleted entirely, a new venv
+(`torch 2.4.1+cpu`, `transformers 4.44.2`, `cryptography`), the current code, a brand-new node
+identity (`agent-raman-hp-pavilion-laptop-15-eh3xxx-e4920b`) and a freshly downloaded, correctly
+ranged slice. The output is **byte-identical garbage**: `'  1  2   3  '`.
+
+So it is NOT the stale full-model slice, NOT accumulated machine state, and NOT damage from a
+session's churn. **It is a code regression**, reproducible from a clean machine.
+
+**And the version correlation names the window.** Same driver build throughout the day:
+
+| the NODE's agent version | what the network returned |
+|---|---|
+| 0.20.3 | correct — *"Hello! How can I assist you today?"*, 1.26 tok/s |
+| 0.20.8 | `'  1  2   3  '` |
+
+So the regression is in `agent/node_server.py` between those two builds. The candidates, from
+`git log`, are [P52]'s two commits that rewired the serve path (`d03fbc4`, `15499ab`), [P49]'s
+full-model-node fix (`6a30df0`) and [P42]'s slice guards.
+
+**The obvious bisect does not work and that is worth recording** so nobody repeats it: dropping
+the pre-[P52] `node_server.py` onto a current checkout fails with *"socket closed mid-message"*
+— the old serve loop is not compatible with the current driver and `common.py`. Bisecting this
+needs matched pairs (driver and node from the same commit), not a single file swapped.
+
 **Containment while it is unfixed:** local-first is the default and the "Use the network"
 toggle is off unless ticked, so an ordinary user gets the correct local answer. Anyone who ticks
 it gets nonsense and is charged. That is not acceptable for longer than it takes to bisect.
