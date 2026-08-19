@@ -6122,6 +6122,145 @@ Three real gaps, one of which can hurt somebody: `ChatInput`'s `canSend` has no 
 React will send into a chain that cannot answer where chat.html refuses. A three-item job, not a
 rewrite — and the 59 assertions were never the blocker, they were a bad proxy for parity.
 
+## Session 65 (2026-08-19) — the claim asked for a crypto wallet, so nobody could claim
+
+### What this session was supposed to be, and what it turned into
+
+The plan was install 0.20.5, claim this machine's node, then [P30] phases 3 and 4. The install
+happened, phase 3 was measured, and then the claim — the first genuine execution of connect →
+sign → bind on the live network — **failed on the founder's own machine**, and everything after
+that was about why.
+
+### 0.20.5, and [P51]'s watchdog earning its place immediately
+
+Installed over 0.20.4. Before the install this PC was `offline` at the coordinator while the
+process had been up for an hour — alive, listening on 50999, serving nothing. That is [P51]'s
+exact shape, on the last build that did not have the fix. After 0.20.5 the node registered in
+8 seconds and the network was healthy for the first time that day.
+
+Then the new watchdog fired for real, unprompted, a few hours later:
+*"the agent loop RETURNED without raising — it is no longer heartbeating, so this node has
+stopped earning. Restart NEURON."* Exactly the failure that used to be silent, now saying so.
+
+**One thing the install taught that the updater already knew.** Running the installer by hand
+with `/VERYSILENT /SUPPRESSMSGBOXES` over a live agent ABORTS: RestartManager asks the app to
+close, the tray app does not, the suppressed message box defaults to Abort, and Inno rolls back.
+That is the [P24]/[P46] guard working — it refused rather than merging two builds. `updater.py`
+is not affected, because it launches the installer detached and then `os._exit(0)`s itself one
+second later, so by the time Inno enumerates files the agent is gone.
+
+### [P30] phase 3, on two real machines, and the number is not the one that was projected
+
+`ggml-rpc-server` on the Pavilion (authorised first — it is the founder's call and the boundary
+is two machines), bound to 127.0.0.1, reached through an authenticated tunnel. Same model, same
+engine, decode only:
+
+| configuration | rate |
+|---|---|
+| this PC alone, llama.cpp q4_k_m, no RPC | **32.11 tok/s** |
+| split across this PC + the Pavilion | **3.97 tok/s** |
+
+**Distribution costs 8x.** The projection was ~16.7; the measurement is 3.97, and the direction
+of the error is the interesting part — splitting a model that already fits is pure loss, because
+decode is sequential and the second machine adds a hop without removing work. It is still ~2.8x
+the live chain's 1.44, so phase 4 remains worth doing; it is simply not the win the arithmetic
+promised.
+
+Two corrections worth recording. `-ts 1,7` in `llama-bench` is not a split — it is two separate
+single-device configs, and the two rows it produced were nearly meaningless; the flag wants
+`1/7`. And `agent/rpc_engine.py`'s `find_binary()` looked for `rpc-server`, while the Ubuntu
+archive ships **`ggml-rpc-server`** — a Linux node would have found nothing and stayed on
+PyTorch forever, silently, because a missing engine is deliberately not an error. Found by
+unpacking b10485 on the Pavilion rather than by reading the code.
+
+**Phase 2 re-verified live**, not merely built: with `NEURON_RPC_SERVER` pointed at the real
+binary, the two tests that have always skipped now run — it starts, it binds loopback only, and
+real bytes cross the [P52] channel into it. 14/14.
+
+### The disagreement between ROADMAP and PROBLEMS, settled with that number
+
+ROADMAP lists *"not faster than a single machine for one user"* under What NEURON Is Not.
+PROBLEMS ranks single-user speed [P1] **HIGHEST**. Both were written honestly and every session
+since has worked from whichever file it opened first.
+
+They answer different questions, and 32.11 vs 3.97 is the proof: **ROADMAP governs the pitch**
+— NEURON must never be sold on latency, because distribution is 8x slower than not distributing
+— and **[P1] governs a floor**, because 1.44 tok/s is not "slower", it is unusable, and an
+unusable network delivers its capacity claim to nobody. The floor already exists in writing:
+TOKENOMICS §11.6's "answers under 30 s". Optimise to it, then stop. Written into the PROBLEMS
+decisions log; ROADMAP itself untouched, per build rule 2.
+
+Also settled there, because it blocks phase 3 from becoming real: **the driver holds the whole
+model on DISK.** ggml's RPC client reads the file and uploads tensors, so one machine per chain
+needs all of it. Disk is the cheap resource and RAM is the binding one, so the capacity claim
+survives in its true form — but Route 1-prime therefore cannot serve a model no single machine
+can hold on disk, and only Route 2 ever will. Two products, not one.
+
+### [P53] — the claim, and why zero nodes had ever been claimed
+
+The founder signed in and pressed the button:
+
+> *"this node already pays out to 0x2977…, changing it needs `old_signature`… If the key is
+> lost, the operator must rebind with the register secret."*
+
+**The key was not lost. It was in `payout_key.json` on the same disk, for exactly that address.**
+
+`agent/payout_key.py` mints a key and binds it on an early start. So by the time anybody signs
+in, an address is ALWAYS on file — which makes the claim a REBIND, which
+`require_rebind_authority` correctly refuses. Every self-hosted node reaches that state on its
+own, unprompted. Neither half is a bug; together they made the feature unreachable, and that is
+the honest reason zero nodes on the live network have an owner recorded.
+
+And beneath it, the founder's actual objection, which is the right one: **claiming demanded a
+browser wallet at all.** A person who signs in with Google and owns no crypto wallet could not
+claim anything. For everyone else the wallet signs a DIFFERENT address, which is what makes it a
+rebind in the first place.
+
+`POST /node/claim` re-binds the address already bound, signed locally by the key this machine
+holds, carrying `owner_wallet_id` from the session. `require_rebind_authority` exempts a
+same-address bind, so no `old_signature` and no register secret. The payout address never moves;
+only ownership is recorded.
+
+**Not relaxed, deliberately:** a bound address this machine has no key for is refused with a 409.
+That is a real address change, and it must keep needing the incumbent key — a claim endpoint
+able to override it would be precisely the bypass that control exists to prevent.
+
+**And the fix nearly missed the only page that mattered.** It went into the React app first;
+`/` serves `ui/static/chat.html`, which is what the founder was actually looking at. Both of
+chat.html's claim buttons share `runNodeClaim()`, so one change covered them.
+
+### The reinstall, and 33.49 NRN
+
+Mid-session the founder uninstalled and reinstalled. The machine came back as
+`agent-optinovate-7fc2ff`; `agent-optinovate-6ff49d` went offline holding **33.49 NRN across 41
+served requests**. `new_node_id()` mints a fresh random suffix whenever the config has no
+node_id, on purpose, and the uninstaller deletes the config.
+
+The uninstaller then printed *"Thank you for contributing 33.49 NRN total"* — a receipt for
+money it had just made unaddressable. It now reads the owner and balance BEFORE the DELETE kills
+the token, and either says plainly that claimed earnings survive the disk, or names the amount,
+names the node id, says reinstalling will not recover it, names the action that prevents it, and
+writes `unclaimed-earnings.json` with the node id a sweep needs. No token in that file:
+deregistration already killed it.
+
+A later reinstall came back as `6ff49d` again, so the 33.49 NRN is on the live node and one
+click settles it.
+
+### Tests
+
+115 `test_chat_ui`, 26 `test_node_owner_ui`, 33 `test_uninstall_deregister`, 69 vitest, 14
+`test_rpc_engine` including the two live ones that had never run.
+
+### Left open
+
+- **The claim itself is still unpressed** — it needs a human at the keyboard, and it is one
+  click. The button is live on this machine.
+- **The VM sweep** for anything stranded needs the deploy key's passphrase in the agent.
+- **[P30] phase 4** (ship the binary) and **[P43]** (no forward pass has ever run on the 4B —
+  `CAPACITY_CASE.md` is the runbook, and placement now needs no env var since the 4b tier
+  declares `stage1_layers: 18`).
+- **Nothing pushed.**
+
 ## Known limits / next steps
 - **The 3.2 / 4.6 / 6.2 tok/s scaling curve predates Ethernet** and was measured with
   54–109 ms of Wi-Fi power-save latency on every node_c hop (Session 59). The sub-linearity

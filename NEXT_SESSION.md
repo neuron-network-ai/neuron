@@ -1,203 +1,165 @@
-# Handoff — start of Session 65
+# Handoff — start of Session 66
 
 Paste the block at the bottom into a new window.
 
 ---
 
-## What Session 64 did
+## What Session 65 did
 
-**Security was the session's aim and it was met.** [P52]: the pipeline wire is now encrypted and
-authenticated end to end. The coordinator mints a per-hop grant sealed to each node's own token,
-the two peers do an ephemeral X25519 exchange, and every frame after that is AES-GCM. Proved
-against a real byte-recording relay: the prompt is not in the bytes. Proved per-hop across four
-nodes: different key each hop, and a hostile node cannot reuse its grant against its neighbour.
-Forward secrecy is deliberate — **the coordinator itself cannot decrypt a recording.**
+**The claim was the session.** The plan was install 0.20.5 then [P30] phases 3-4. Phase 3 got
+measured, and then the first genuine claim on the live network **failed on the founder's own
+machine** — and the reason turned out to be structural, so the rest of the session went there.
 
-**[P30] measured, routed, and phase 2 built.** llama.cpp is 8.7x PyTorch on this machine
-(26.93 vs 3.09 tok/s). A real relayed hop to the Pavilion is **22.6 ms**, so the network is 7% of
-a token's cost today and the ENGINE is the bottleneck — phase 1's gate passed. `agent/rpc_engine.py`
-supervises a localhost-only `ggml-rpc-server` reachable only through the encrypted channel;
-measured 28.07 tok/s through it, ~19x the live chain.
+**[P53], and it is the reason zero nodes have ever been claimed.** `agent/payout_key.py` mints
+a payout key and binds it on an early start. So by the time anybody signs in, an address is
+ALWAYS on file — which makes the claim a *rebind*, which `require_rebind_authority` correctly
+refuses without `old_signature`. Every self-hosted node reaches that state unprompted. And the
+error told the operator their key might be lost while it sat in `payout_key.json` on the same
+disk, for exactly the address named in the message.
 
-**Route reversed twice in one day, honestly both times.** ggml-rpc was rejected because llama.cpp
-says never put it on an open network and NEURON had none — then [P52] built the private channel
-that objection required, and the route came back. If the channel is ever removed, the objection
-returns intact.
+Under that was the founder's real objection: **claiming demanded a browser wallet at all.**
+Somebody who signs in with Google and owns no crypto wallet could not claim anything.
 
-**[P51] found and closed.** The agent thread ran unsupervised, so an exception went to a `stderr`
-that does not exist in a windowed app — alive, listening, unregistered, silent for 81 minutes.
-Now supervised, with a heartbeat watchdog for the case no exception handler can catch.
+`POST /node/claim` re-binds the address already bound, signed locally by the key this machine
+holds, carrying `owner_wallet_id` from the session. Same-address binds are exempt, so no
+`old_signature` and no register secret. The address never moves; only ownership is recorded.
+**Not relaxed:** a bound address this machine has no key for is refused with a 409 — that is a
+real address change and must keep needing the incumbent key.
 
-**[P50], [P46], [P39], [P48], [P49] all closed or guarded.** Install verification, the update
-notice, the reachable claim strip, React parity, the node identity that nearly orphaned 5.26 NRN.
+The fix nearly missed the only page that matters: it went into the React app first, but `/`
+serves `ui/static/chat.html`. Both its claim buttons share `runNodeClaim()`, so one change
+covered them. Verified live: a clean 0.20.6 install serves **"Claim with my account"**.
 
-**PRIVACY.md written, and a claim of mine corrected.** Two things leave even on the local path:
-optional web search (off by default) and a blocked prompt's category (never the text). Both now
-disclosed in PRIVACY.md, DISCLOSURE.txt and README.
+**The uninstaller stopped thanking people for money it had just destroyed.** Mid-session the
+founder uninstalled and reinstalled; the machine came back as `7fc2ff` and `6ff49d` was left
+holding **33.49 NRN**. `new_node_id()` mints a fresh suffix whenever config has no node_id, and
+the uninstaller deletes the config — then printed *"Thank you for contributing 33.49 NRN"*. It
+now reads owner and balance BEFORE the DELETE kills the token, says plainly when claimed
+earnings are safe, and when they are not it names the amount, the node id, that reinstalling
+will not recover it, and writes `unclaimed-earnings.json` with the id a sweep needs.
 
-**0.20.5 built** — `dist/installer/NEURON-Setup-0.20.5.exe`, its packaged bundle verified
-coherent by [P46]'s own guard.
+A later reinstall came back as `6ff49d`, so **the 33.49 NRN is on the live node and one click
+settles it.**
+
+**[P30] phase 3, measured on both machines** — `ggml-rpc-server` on the Pavilion (authorised),
+loopback-bound, through an authenticated tunnel:
+
+| configuration | rate |
+|---|---|
+| this PC alone, llama.cpp q4_k_m | **32.11 tok/s** |
+| split across this PC + the Pavilion | **3.97 tok/s** |
+
+Distribution costs **8x**. The projection was ~16.7. Splitting a model that already fits is
+pure loss — decode is sequential, so the second machine adds a hop without removing work. Still
+~2.8x the live chain's 1.44, so the engine is worth wiring; it is just not the win the
+arithmetic promised.
+
+**ROADMAP vs PROBLEMS, reconciled with that number.** ROADMAP governs the pitch (never sell on
+latency — distribution is 8x slower than not distributing); [P1] governs a floor (1.44 tok/s is
+not "slower", it is unusable). The floor is TOKENOMICS §11.6's "answers under 30 s". Optimise to
+it, then stop. In the PROBLEMS decisions log; ROADMAP untouched per build rule 2 — it needs one
+line of founder sign-off, since its bullet is right and now has a measurement behind it.
+
+**Also settled there:** the driver holds the whole model on DISK. Disk is cheap and RAM is the
+binding constraint, so the capacity claim survives — but Route 1-prime therefore cannot serve a
+model no single machine can hold on disk. Only Route 2 ever will. Two products, not one.
 
 ## Read this before planning
 
-**ROADMAP.md is ~47 sessions stale** (last updated Session 16; it still lists Session 8 as
-active). Its *rules* and its One Rule are not stale and are still binding — build rule 1 says
-read it every session, and Session 64 did not until asked.
+**Phase 2 is NOT wired.** `agent/rpc_engine.py` is imported by nothing except its own tests.
+`node_server` still computes with PyTorch. So **phase 4 (packaging the binary) is premature** —
+it would ship 17 MB that no code calls. The real next step is the wiring, and it is a session's
+work, because in ggml's design the *driver* holds the model and drives remote servers: it means
+`neuron_driver` opening a [P52] channel per chain member, bridging each to a local port, and
+running llama.cpp with `--rpc` plus the coordinator's `--tensor-split`.
 
-**It disagrees with PROBLEMS.md and the disagreement matters.** ROADMAP lists *"not faster than a
-single machine for one user"* under What NEURON Is Not; PROBLEMS ranks single-user speed
-**HIGHEST** ([P1]). Both were written honestly and they diverged. **Reconcile them, or every
-session works from whichever file it happens to open.**
-
-**And the One Rule is unmet after 63 sessions:** *"Build the agent. Get the first stranger.
-Everything else follows."* The live roster is two machines, both the founder's. No stranger has
-ever run a node. `FIRST_STRANGER.md` says the plumbing is done and what is missing is the front
-door — which is now largely built, so what remains is **outreach**, and `OUTREACH.md` shows
-nothing was ever sent.
-
-**The founder's own framing, which corrects a misreading:** those two machines are a **testbed**,
-not the network. Judging them as production inflates the severity of "no replica" and
-"single point of failure".
-
-## [P30] speed — where the phases actually stand
-
-The whole point of the engine work is making NEURON fast. Status, so a fresh window does not
-have to reconstruct it:
-
-| phase | state | what it produced / what it needs |
-|---|---|---|
-| **1 — measure a real hop** | ✅ **DONE** | median **22.6 ms** to the Pavilion through the real relay. Compute is 324 ms/token today, so the network is **7%** and the ENGINE is the bottleneck. The gate that could have cancelled everything, passed. `tools/bench_hop.py` |
-| **2 — one node, fast** | ✅ **BUILT** | `agent/rpc_engine.py` — a localhost-only `ggml-rpc-server` reachable only through the [P52] channel. Measured **28.07 tok/s** through it, against 1.44 live. 14 tests. |
-| **3 — two nodes** | ❌ **NOT STARTED** | needs a SECOND machine running the engine, and a decision (below). Everything so far is loopback on one PC plus arithmetic. |
-| **4 — packaging** | ❌ **NOT STARTED** | ship the binary with the installer; [P41]'s CPU floor becomes a dispatch table. |
-
-**Phase 3 is blocked on two things, and only one of them is code:**
-
-  1. **A second machine to run the engine on.** The Pavilion is reachable only through the relay
-     from here. Putting `ggml-rpc-server` on any machine is the founder's call and must be asked
-     for, not assumed.
-  2. **A design decision that changes what a driver IS.** In ggml's RPC design the CLIENT reads
-     the model file and uploads tensors; the server holds no model (`-c` caches what it is sent).
-     With mmap the driver does not need it in RAM, but it does need **the whole model on disk** —
-     where today it downloads only its own slice. For a 1.5B that is nothing; for the big models
-     this project exists for it is ~100 GB on whoever drives. Decide before building.
-
-**Projected end state, and it is a projection, not a measurement:** ~37 ms compute + 23 ms hop
-≈ **16.7 tok/s**, against 1.44 today. That clears TOKENOMICS §11.6's "answers under 30 s" gate,
-which is what currently blocks any purchase path. Treat 16.7 as the direction — when the same
-arithmetic was checked against the live chain it was ~2x optimistic, because it omits per-token
-framing, the driver's own embed/`lm_head`, batching and Python overhead.
+**Two small traps found the hard way.** `llama-bench`'s `-ts` wants `1/7`, not `1,7` — the comma
+form silently runs two single-device configs. And `rpc_engine.find_binary()` looked for
+`rpc-server` while the Ubuntu archive ships **`ggml-rpc-server`**; a Linux node would have found
+nothing and stayed on PyTorch forever, silently, because a missing engine is deliberately not an
+error. Both fixed.
 
 ## Do these first
 
-1. **Install 0.20.5.** Built and sitting in `dist/installer/`. Everything user-facing from
-   Sessions 63-64 is invisible until it runs — the claim strip, install verification, the update
-   notice, [P51]'s watchdog, [P49]'s `node_server` fix.
-2. **Then claim this machine's node through the UI.** Sign in and press the button. It is the
-   first real execution of connect → sign → bind, and the driver's balance is still tied to a
-   file on one disk until it happens.
-3. **Push, or decide not to.** 47 commits. Do NOT point the download links at 0.20.5 until a
-   release actually exists — `test_download_links.py` enforces that.
-4. **Re-run the reconciliation** after anything touches the ledger. It is clean with ZERO
-   warnings, which is what makes [P40] item 2 (a cron) worth doing.
+1. **Press "Claim with my account"** at http://127.0.0.1:8080 — signed in as the founder. It is
+   one click and it settles 33.49 NRN against a real account. Verify with
+   `GET /node/{id}/payout-address` → `owner_wallet_id` is no longer null.
+2. **Load the VM deploy key** if anything needs the coordinator:
+   `SSH_AUTH_SOCK=/c/Users/optin/.ssh/neuron-agent.sock ssh-add /c/Users/optin/.ssh/oracle_coordinator`
+   It carries a passphrase, so only a human can do it, and it drops when the PC sleeps.
+3. **Push, or decide not to.** 55 commits, nothing pushed. Pushing also publishes the corrected
+   download links and PRIVACY.md to the Pages site. Do NOT point downloads at 0.20.6 until a
+   release exists — `test_download_links.py` enforces it.
 
 ## Open, roughly in order
 
-- **The first stranger.** The roadmap's One Rule, unmet. Outreach is a human act; nothing in the
-  repo can do it.
-- **The capacity case has NEVER run.** [P43]: no forward pass has ever executed on the 4B. The
-  network serves a 1.5B, which fits on one machine — so *"models too large for any single
-  machine"*, the site's headline, has never been demonstrated. Run it once.
-- **[P30] phase 3** — two nodes on the new engine, and proof-of-compute must still pass. **Open
-  design question:** in ggml's RPC design the CLIENT reads the model file and uploads tensors, so
-  the driver needs the whole model on DISK (not RAM). Today it downloads only its slice. Decide
-  before this replaces anything.
-- **[P52] residual** — the channel authenticates the CALLER, not the PEER. A chain member is
-  coordinator-selected, not trusted, and ggml-rpc is a memory protocol. Belongs with the
-  open-join question in SECURITY.md.
-- **`NEURON_REQUIRE_SECURE=1`** — the end state for the encryption rollout. Flip it once the
-  fleet has moved; until then plaintext is accepted so an upgrade does not partition the network.
-- **[P1] / [P30] speed** — 1.44 tok/s live. Phases 3-4 are the fix.
-- **TERMS.md** — deliberately NOT written. Legal document; TOKENOMICS §12.7's reasoning applies.
-- **[P37]'s open item** — auto-repair moves a node's range and never tells it. Recurred twice;
-  a person fixed it by hand both times.
-- **No replica** — one machine per stage. Real, and a testbed property rather than a defect.
+- **[P43] the 4B has still never run a forward pass.** Hard-blocked on step 1 of
+  `CAPACITY_CASE.md`: `bash coordinator/deploy.sh`, because the tier, the per-model stage-1
+  width and the `weight_dtype` sizing are not on the VM yet. Steps 2-6 are cheap once that is
+  done. Note the runbook assumes a third node; with two machines the fp16 caps still cover 36
+  layers, and the OptiPlex stays out.
+- **[P30] wiring, then phase 4.** In that order, for the reason above.
+- **The first stranger.** ROADMAP's One Rule, unmet after 65 sessions. Outreach is a human act.
+- **[P52] residual** — the channel authenticates the CALLER, not the PEER.
+- **`NEURON_REQUIRE_SECURE=1`** once the fleet has moved.
+- **[P37]'s open item** — auto-repair moves a node's range and never tells it.
 
 ## Environment gotchas
 
+- **The Pavilion is `raman@100.79.125.112`**, not `optin@`. Five sessions were blocked on this.
+  `~/neuron-engine/llama-b10485/` now holds `ggml-rpc-server` there.
 - **Bash from cmd.exe is WSL, not Git Bash.** Use `"C:\Program Files\Git\bin\bash.exe"` for
   anything touching the SSH keys.
-- **The VM deploy key carries a passphrase.** Load it into the agent socket first:
-  `SSH_AUTH_SOCK=/c/Users/optin/.ssh/neuron-agent.sock ssh-add /c/Users/optin/.ssh/oracle_coordinator`
-  It drops when the PC sleeps.
-- **Python is `.venv\Scripts\python.exe`.** PATH python has no torch.
-- **`packaging/test_app_entry.py` runs by PATH, not `-m`** — a local `packaging/__init__.py`
-  would shadow the PyPI package for the whole repo.
-- **The desktop app serves its own packaged copy.** Repo edits to the UI are invisible until a
-  rebuild — this has caught three sessions running.
-- **`good-state-0.20.5`** is a tag. `git reset --hard good-state-0.20.5` returns to a known-good
-  point.
+- **Python is `.venv\Scripts\python.exe`.** There is no pytest in it — the suites are
+  `python <file>` or `python -m <pkg.module>`; `ui/test_node_owner_ui.py` needs `-m`.
+- **The desktop app serves its own packaged copy**, and `/` is `ui/static/chat.html`, NOT the
+  React app at `/next`. A UI fix that only lands in `ui/web` is invisible to real users.
+- **Installing by hand over a live agent ABORTS** with `/VERYSILENT /SUPPRESSMSGBOXES` —
+  RestartManager cannot close a tray app, the suppressed box defaults to Abort, Inno rolls back.
+  Stop the agent first. The auto-updater is unaffected (it exits itself one second after
+  launching the installer).
+- **Deleting the GGUF cache costs a 1.1 GB re-download** before the chat UI comes up at all.
+- **`good-state-0.20.5`** is a tag; `git reset --hard good-state-0.20.5` returns to it.
 
 ## Prompt for the next window
 
 ```
-Continue NEURON. Read PROBLEMS.md [P30] [P52] [P51] [P43], ROADMAP.md, and
+Continue NEURON. Read PROBLEMS.md [P53] [P30] [P43] [P52], ROADMAP.md, and
 NEXT_SESSION.md — that has the handoff. Read ROADMAP.md properly: build rule 1
-says every session, and Session 64 skipped it until asked.
+says every session.
 
-HARD BOUNDARY, read this first. Work with EXACTLY TWO MACHINES and no others:
-this Windows PC (agent-optinovate-6ff49d) and node-c-pavilion. They are a
-TESTBED, not the network — treat them as test hardware, not production. Do NOT
-touch, log into, install onto, or copy files to any other machine, including
-optiplex-server / nuc / 192.168.1.10 even though the SSH key reaches it. Session
-64 downloaded llama.cpp onto the OptiPlex without asking; that was wrong and the
-founder said so. If a task seems to need a third machine, STOP AND ASK — do not
-pick one.
+HARD BOUNDARY. Work with EXACTLY TWO MACHINES: this Windows PC
+(agent-optinovate-6ff49d) and node-c-pavilion (raman@100.79.125.112). They are a
+TESTBED, not the network. Do NOT touch optiplex-server / nuc / 192.168.1.10.
+The coordinator VM (150.230.22.250) is a THIRD machine — ask before deploying to
+it, and its deploy key needs a passphrase only the founder can enter.
 
-STATE: the wire is encrypted and authenticated end to end ([P52]) — per hop,
-different key each hop, and the coordinator itself cannot decrypt a recording.
-[P30] phase 1 passed (a real relayed hop is 22.6 ms, so the ENGINE is 93% of a
-token's cost) and phase 2 is built (agent/rpc_engine.py, 28 tok/s through the
-encrypted channel vs 1.44 live). NEURON-Setup-0.20.5.exe is built and unpushed
-along with 47 commits.
+STATE: [P53] is fixed and installed — claiming a node now uses your Google/GitHub
+account and the key the machine already holds, no browser wallet, no
+old_signature. Verified live on 0.20.6. The uninstaller no longer destroys
+unclaimed NRN silently. [P30] phase 3 is MEASURED: 32.11 tok/s on one machine
+against 3.97 split across two — distribution costs 8x and never bought speed.
 
-FIRST: install 0.20.5, then sign in and claim this machine's node through the
-UI. Everything user-facing from two sessions is invisible until that installer
-runs, and the claim is the first real execution of connect → sign → bind.
+FIRST: check whether the node is claimed (GET /node/{id}/payout-address →
+owner_wallet_id). If it is still null, the founder needs to press "Claim with my
+account" at http://127.0.0.1:8080 — one click, settles 33.49 NRN.
 
-THEN [P30] PHASES 3 AND 4, which is the speed work and the reason the engine
-plan exists. Phase 1 is DONE (22.6 ms real hop; the engine is 93% of a token's
-cost) and phase 2 is BUILT (agent/rpc_engine.py, 28 tok/s through the encrypted
-channel). Phase 3 needs a SECOND machine running ggml-rpc-server — ASK which
-machine, do not pick one — and a decision first: in ggml's RPC design the driver
-needs the whole model file on DISK, where today it downloads only its slice.
-That changes what a driver is, so settle it before writing code. Phase 4 is
-packaging the binary with the installer, which also retires [P41]'s CPU floor.
-Projected ~16.7 tok/s against 1.44 today; treat that as a direction, since the
-same arithmetic ran ~2x optimistic against the live chain.
+THEN the engine, IN THIS ORDER, and the order is the point: agent/rpc_engine.py
+is imported by NOTHING but its own tests, so phase 4 (packaging the binary) would
+ship 17 MB that no code calls. Wire it first. In ggml's design the DRIVER holds
+the model and drives remote servers, so this means neuron_driver opening a [P52]
+channel per chain member, bridging each to a local port, and running llama.cpp
+with --rpc plus the coordinator's --tensor-split. The whole-model-on-disk
+question is already SETTLED in the PROBLEMS decisions log — do not re-litigate
+it.
 
-AND DECIDE, because this is a direction question and not mine to settle:
-ROADMAP.md's One Rule is "build the agent, get the first stranger, everything
-else follows" and after 63 sessions no stranger has ever run a node — the roster
-is two of the founder's own machines, which are a TESTBED, not the network.
-Meanwhile ROADMAP says "not faster than a single machine for one user" is what
-NEURON is NOT, while PROBLEMS ranks single-user speed HIGHEST. Those two
-documents disagree. Reconcile them before building, or each session works from
-whichever one it opens.
+ALSO NEVER DEMONSTRATED: [P43], no forward pass has ever run on the 4B. It is
+hard-blocked on CAPACITY_CASE.md step 1 (coordinator/deploy.sh to the VM), which
+needs the founder. Ask early so it is not discovered at the end.
 
-ALSO NEVER DEMONSTRATED: [P43] says no forward pass has ever run on the 4B. The
-site's headline is "models too large for any single machine" and the network
-serves a 1.5B that fits on one. Running that once is worth more than another
-optimisation.
+WATCH OUT: `/` serves ui/static/chat.html, NOT the React app at /next — a UI fix
+that only lands in ui/web is invisible to real users. Stop the agent before
+running an installer by hand or it silently rolls back.
 
-WATCH OUT: [P50] before touching an agent config (one PC, two identities, one
-file). The desktop app serves its own packaged UI, so repo edits are invisible
-until a rebuild. And [P30] phase 3 has an open design question — in ggml's RPC
-design the DRIVER needs the whole model file on disk, where today it downloads
-only its slice.
-
-Nothing is pushed. Pushing also publishes the corrected download links and
-PRIVACY.md to the GitHub Pages site.
-
-Environment gotchas and the rest of the open list are in NEXT_SESSION.md.
+Nothing is pushed. 55 commits.
 ```
