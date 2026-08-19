@@ -648,7 +648,7 @@ function buildNodeOwnerSection(){
   const stat = document.createElement("div");
   stat.className = "note";
   const btn = document.createElement("button");
-  btn.textContent = "Claim with browser wallet";
+  btn.textContent = "Claim with my account";
   wrap.append(label, val);
 
   fetch("/node/owner").then(r => r.json()).then(d => {
@@ -683,6 +683,32 @@ function buildNodeOwnerSection(){
 // exists twice is a signing flow that diverges. `setStatus` is how each caller shows progress;
 // it returns the bound address, or null if nothing was recorded.
 async function runNodeClaim(setStatus){
+  // THE ACCOUNT PATH FIRST, AND IT IS THE ONE THAT NORMALLY SUCCEEDS ([P53]).
+  //
+  // Asking for a browser wallet here was wrong twice over. It excluded everyone who signs in
+  // with Google and owns no crypto wallet at all — which is the population this product is
+  // for. And for everyone else it bound the WALLET's address, which is by construction not
+  // the address already on file: agent/payout_key.py mints a key and binds it on an early
+  // start, so a claim is always a REBIND, and the coordinator refuses a rebind without
+  // `old_signature` from the incumbent key. That is why the first real claim on the live
+  // network failed, and why zero nodes had ever been claimed.
+  //
+  // /node/claim re-binds the address ALREADY bound, signed by the key this machine already
+  // holds, and records the signed-in account as owner. Nothing to install, nothing to sign.
+  try{
+    setStatus("Recording this node against your account…");
+    const r = await fetch("/node/claim", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"
+    });
+    const d = await r.json();
+    if(r.ok && !d.error) return d.payout_address;
+    // 409 means this machine cannot sign for the bound address — a real address change, which
+    // must keep needing the incumbent key. Fall through to the wallet, which is exactly the
+    // tool for that case. Any other refusal is reported as-is rather than retried blindly.
+    if(r.status !== 409){ setStatus(String(d.error || ("Could not claim (" + r.status + ")"))); return null; }
+    setStatus(String(d.error || "") + " Trying your browser wallet…");
+  }catch(err){ /* offline or no such route on an older build — the wallet path still works */ }
+
   if(!window.ethereum){
     setStatus("No wallet extension in this browser. Open NEURON in the browser that holds "
               + "your wallet, or use tools/sign_payout.html.");

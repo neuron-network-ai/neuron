@@ -245,6 +245,22 @@ def main():
           "No wallet id is sent" in SRC)
     check("a declined signature is still a decline, not a failure",
           "You declined the signature. Nothing changed" in SRC)
+    # [P53]. Requiring a browser wallet to claim excluded everyone who signs in with Google and
+    # owns no wallet — the population this product is for — and for everyone else it bound the
+    # WALLET's address, which is never the address already on file, making every claim a rebind
+    # the coordinator correctly refuses. The account path has to come FIRST, not exist beside.
+    # Scoped to runNodeClaim's own body. A whole-file index comparison fails for the wrong
+    # reason: the /wallet/payout/* flow is a DIFFERENT binding with its own legitimate
+    # eth_requestAccounts, and it appears earlier in the file.
+    _claim_fn = SRC[SRC.index("async function runNodeClaim(setStatus)"):]
+    _claim_fn = _claim_fn[:_claim_fn.index("\n}\n")]
+    check("the claim tries the ACCOUNT before it ever mentions a wallet",
+          '"/node/claim"' in _claim_fn
+          and _claim_fn.index('"/node/claim"') < _claim_fn.index('eth_requestAccounts'))
+    check("...and only falls back to the wallet on a 409, the genuine address-change case",
+          "r.status !== 409" in SRC)
+    check("...so the button offers the account, not an extension nobody installed",
+          '"Claim with my account"' in SRC)
     check("a failure re-enables the button rather than stranding the strip",
           "btn.disabled = false;" in SRC)
 
