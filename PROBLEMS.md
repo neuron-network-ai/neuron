@@ -233,9 +233,159 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
   which is where the founder's idea pays off, and which needs the roster size they correctly
   identified.
 
+- **2026-08-18 (Session 65) - ROADMAP and PROBLEMS disagreed about speed. They are reconciled
+  here, and the reconciliation has a NUMBER attached.** `ROADMAP.md` lists *"not faster than a
+  single machine for one user"* under What NEURON Is Not. `PROBLEMS.md` ranks single-user speed
+  [P1] **HIGHEST**. Every session since has worked from whichever file it happened to open.
+
+  **They are not actually in conflict, and today's measurement is what shows it.** Phase 3 ran
+  the same model, same engine, on one machine and then split across two:
+
+  | configuration | rate |
+  |---|---|
+  | this PC alone, llama.cpp q4_k_m, no RPC | **32.11 tok/s** |
+  | the same model split across this PC + the Pavilion (ggml-rpc over an authenticated tunnel) | **3.97 tok/s** |
+
+  **Distribution costs 8x. It does not buy speed and it was never going to.** ROADMAP is
+  simply right: for a model that fits one machine, one machine wins, and no engine change
+  reverses that. What the engine work buys is the 32.11 - and 32.11 is a SINGLE-MACHINE number,
+  which is the local path, not the network path.
+
+  **So the two documents are answering different questions, and the reconciliation is a
+  threshold, not a ranking:**
+
+    * **ROADMAP governs the pitch.** NEURON competes on capacity, cost and access. It must
+      never be sold on latency, because splitting a model across machines is *slower* than not
+      splitting it, by 8x on measured hardware. Any copy that implies otherwise is false.
+    * **[P1] governs the floor.** 1.44 tok/s is not "slower than a single machine", it is
+      unusable, and an unusable network cannot deliver the capacity claim to anybody. Speed
+      work is justified *up to a usability floor* and is waste beyond it.
+    * **The floor is already written down**: TOKENOMICS §11.6's "answers under 30 s". That is
+      the number that decides when speed work stops.
+
+  **What this tells a future session, which is the point of writing it down.** Optimise until
+  the network clears §11.6, then stop and spend the effort on capacity and on the first
+  stranger. Do not chase single-machine parity - it is unreachable by construction, and
+  chasing it is how a distributed network ends up justifying itself on the one axis it must
+  lose.
+
+  **ROADMAP.md itself is unchanged**, because build rule 2 forbids editing it in-session. It
+  needs one line from the founder: its "not faster than a single machine for one user" bullet
+  is correct and should stay, and the *reason* now has a measurement behind it rather than an
+  intuition.
+
+- **2026-08-18 (Session 65) - [P30] phase 3's open design question, settled: the driver holds
+  the whole model on DISK, and that is the exact boundary of what Route 1-prime can serve.**
+  In ggml's RPC design the CLIENT reads the model file and uploads tensors; the server holds no
+  model of its own. With mmap the driver does not need the model in RAM, but it does need the
+  whole file on disk - where NEURON's driver downloads only its own slice. For the 1.5B that is
+  nothing; for the models this project exists for it is ~100 GB on whoever drives.
+
+  **The decision: accept it, and stop pretending Route 1-prime is the capacity path.**
+
+  1. **Disk is the cheap resource; RAM is the binding one.** "Too large for any single machine"
+     has always meant too large for one machine's *memory* - that is what makes inference
+     impossible rather than merely slow. A 100 GB file on a 1 TB disk is ordinary; 100 GB of
+     RAM is not. So the claim survives the change in its true form, and `slice_downloader.py`
+     stays exactly as it is for every node that is not driving.
+  2. **The cost is the download, and it is real.** One machine per chain must fetch the whole
+     model once. That is a barrier to *becoming a driver*, not to joining the network, and it
+     must be stated in the product rather than discovered.
+  3. **It gives the coordinator a new placement input it does not have today:** who holds the
+     file. Driver-capable is now a property of a node, alongside `ram_gb` and `ms_per_layer`.
+  4. **And it draws the line honestly.** Route 1-prime cannot serve a model no single machine
+     can hold on disk. Route 2 (embed ggml, each node loads its own slice) remains the only
+     path to that, and today's 3.97 tok/s says the reward for building it is capacity, never
+     speed.
+
+  **Which makes the roadmap for the engine two products, not one:** the fast local path (32.11
+  tok/s, one machine, model fits) and the capacity path (slow, many machines, model does not
+  fit). Route 1-prime serves the first. Only Route 2 serves the second. Anything that reports
+  one number for both is measuring the wrong thing.
+
 ---
 
 ## Problems & risks
+
+### [P53] 🟢 A node that bound its own payout key could never be claimed through the UI — found on the first real claim, fixed (2026-08-19)
+
+**The first genuine execution of connect → sign → bind failed, and it fails for every node that
+has been running long enough to matter.** The founder signed in on this machine (391.39 NRN,
+`raman011sharma@gmail.com`), pressed **Claim these earnings**, and got:
+
+> *"this node already pays out to 0x29772e94d9D31287C10032Fd9dF2b3C4E9af7ff2. Changing it needs
+> `old_signature`: the same message signed by that address's key. If the key is lost, the
+> operator must rebind with the register secret."*
+
+**The mechanism, and why it is structural rather than a mishap.** `ui/app.py`'s
+`/node/payout/bind` binds the payout ADDRESS and records the OWNER **in one call** —
+deliberately, so a copied `node_token` cannot move ownership without a signature. But
+`agent/payout_key.py:ensure_bound` has already generated a key for this node and bound it,
+automatically, on an earlier start. So by the time anybody signs in to claim, an address is
+always on file, the claim's own call is therefore a *rebind*, and
+`coordinator/payout.py:require_rebind_authority` correctly refuses it without `old_signature`.
+
+**Every self-hosted node reaches this state on its own, unprompted.** Nothing the operator did
+caused it. The two behaviours — the agent binds a key by itself, and claiming re-binds — are
+each correct alone and together make the feature unreachable. That is a second reason zero nodes
+on the live network have an owner recorded, alongside the `needs_owner` gating in [P39].
+
+**The advice in the error is wrong here, and that is the sharp part.** It tells the operator the
+key may be *lost* and to go and find the register secret. The key is not lost: it is in
+`payout_key.json` in the agent's own state directory on the very machine displaying the message,
+and it is the key for exactly the address the message names. The product held the answer and
+told the user to seek an administrator. Verified this session: the local key's address is
+`0x29772e...af7ff2`, identical to the bound one.
+
+**The fix is small and the coordinator already permits it.** `require_rebind_authority` exempts
+a bind to the same address — `if not current_address or current_address.lower() ==
+new_address.lower(): return`. So when this machine holds the key for the address already bound,
+the claim can re-bind that same address, signed locally by `payout_key.sign_binding`, carrying
+`owner_wallet_id` from the session. Nothing about where the money goes changes; only who is
+recorded as owning it. No `old_signature`, no register secret, one click.
+
+  * **Do NOT let the claim silently rebind to a DIFFERENT address.** The `old_signature`
+    requirement is the control that stops a stolen `node_token` redirecting earnings, and it
+    must stay exactly as strict for a genuine address change.
+  * **The error text needs its third case.** It offers "sign with the old key" and "the operator
+    has the register secret" and omits the common one: *this machine still has the key — keep
+    the address and just record the owner.*
+
+**Still open:** the fix touches the packaged UI, which the desktop app serves from its own
+bundle, so it needs a rebuild before any operator sees it.
+
+**FIXED (2026-08-19, 0.20.6) — and the fix is that ownership stops depending on a wallet at
+all.** The founder's words, after the claim failed on their own machine: *"I asked you to
+assign node with github or google ID of a user, not this."* That is the correct requirement and
+the old flow never met it — `claimNodeEarnings` opens a browser extension, signs with whatever
+address that extension holds, and binds THAT. A person with a Google account and no MetaMask
+could not claim anything, and a person with MetaMask claimed with an address that was, by
+construction, not the one already bound.
+
+`POST /node/claim` (`ui/app.py`) does the whole thing with no wallet in the picture: read the
+address already bound, confirm this machine holds its key, sign the challenge locally, and
+re-bind the SAME address carrying `owner_wallet_id` from the session. The payout address never
+moves. The button is now **"Claim with my account"**, and the wallet path is demoted to *"Pay
+out to a different wallet instead"* for the operator who genuinely wants an external address.
+
+**What was deliberately NOT relaxed.** A bound address this machine has no key for is refused
+with a 409 that says so. That case is a real address change, and it must keep needing the
+incumbent key — a claim endpoint able to override it would be exactly the bypass the
+`old_signature` control exists to prevent. Asserted, not assumed:
+`ui/test_node_owner_ui.py` (26 pass) pins that the owner comes from the SESSION, that no
+`old_signature` is sent, that a foreign bound address is refused **and nothing is POSTed**, and
+that a missing local key is an honest 409 rather than a crash. `nodeOwner.test.ts` (69 pass)
+pins that the browser sends an empty body, never a wallet id, and never touches
+`window.ethereum`.
+
+**And the reason this matters more than the claim button.** The same day, the founder
+uninstalled and reinstalled the app. `new_node_id()` mints `agent-{hostname}-{random6}` whenever
+the config has no `node_id`, and the uninstaller deletes the config — so the machine came back
+as `agent-optinovate-7fc2ff` and **`agent-optinovate-6ff49d` was left holding 33.49 NRN across
+41 served requests, unreachable by its own owner.** A claimed node does not have that problem:
+the earnings are recorded against an account that survives the disk. Identity churn is
+survivable; unclaimed identity churn is not. That is the argument for making the claim reachable
+on day one rather than treating it as a later nicety.
 
 ### [P48] 🟡 Three things the operator sees are wrong or stale, and each looked fine from inside the repo (2026-08-17)
 

@@ -54,7 +54,15 @@ START_TIMEOUT_S = 30.0
 
 # Where the binary lives. Packaged beside the agent; overridable for a source checkout.
 BINARY_ENV = "NEURON_RPC_SERVER"
-BINARY_NAME = "ggml-rpc-server.exe" if os.name == "nt" else "rpc-server"
+# The released archives do NOT agree on the name, which is worth stating rather than guessing at
+# once per platform. Windows `llama-bXXXXX-bin-win-cpu-x64.zip` ships `ggml-rpc-server.exe`;
+# Linux `llama-bXXXXX-bin-ubuntu-x64.tar.gz` ships `ggml-rpc-server` — verified 2026-08-18 by
+# unpacking b10485 on the Pavilion, where the previous guess of `rpc-server` would have found
+# nothing and silently left the node on PyTorch forever. `rpc-server` is kept as a fallback: it
+# is what a local cmake build produces, so a source checkout still works.
+BINARY_NAMES = (("ggml-rpc-server.exe", "rpc-server.exe") if os.name == "nt"
+                else ("ggml-rpc-server", "rpc-server"))
+BINARY_NAME = BINARY_NAMES[0]
 
 
 def find_binary():
@@ -68,11 +76,16 @@ def find_binary():
     if explicit and os.path.exists(explicit):
         return explicit
     here = os.path.dirname(os.path.abspath(__file__))
-    for cand in (os.path.join(here, BINARY_NAME),
-                 os.path.join(os.path.dirname(here), "bin", BINARY_NAME)):
-        if os.path.exists(cand):
-            return cand
-    return shutil.which(BINARY_NAME)
+    for name in BINARY_NAMES:
+        for cand in (os.path.join(here, name),
+                     os.path.join(os.path.dirname(here), "bin", name)):
+            if os.path.exists(cand):
+                return cand
+    for name in BINARY_NAMES:
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
 
 
 def _port_open(port, host=BIND_HOST, timeout=0.5):

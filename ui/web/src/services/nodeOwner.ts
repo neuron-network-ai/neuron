@@ -208,6 +208,53 @@ export async function claimNodeEarnings(
   }
 }
 
+/**
+ * Claim with the signed-in account alone — no wallet extension, no signature prompt.
+ *
+ * THIS IS THE DEFAULT PATH AND `claimNodeEarnings` IS THE EXCEPTION, which is the reverse of
+ * how this started. [P53]: `agent/payout_key.py` mints a key for the node and binds it on an
+ * early start, so by the time anyone signs in an address is ALREADY on file. The wallet path
+ * then binds a DIFFERENT address, which makes it a rebind, which the coordinator refuses
+ * without `old_signature` from the incumbent key. The first real claim on the live network
+ * failed exactly that way — and was told the key might be lost while it sat on the same disk.
+ *
+ * `/node/claim` re-binds the address already bound, signed server-side by the key this
+ * machine holds, carrying the owner from the session. The address does not move; only
+ * ownership is recorded. That is what "the node belongs to a Google/GitHub identity" means.
+ *
+ * A 409 is not a bug — it is the honest answer when the bound address is one this machine has
+ * no key for. That case is a real address change and must keep needing the incumbent key.
+ */
+export async function claimWithAccount(
+  onProgress: ClaimProgress = () => {},
+): Promise<ClaimResult> {
+  onProgress('binding', 'Recording this node against your account…');
+  try {
+    // An EMPTY body, sent explicitly rather than omitted. There is nothing for the page to
+    // say: the node comes from this machine's config and the owner comes from the session, so
+    // any field here would be a field the page could lie about. Asserted in the tests.
+    const r = await fetch('/node/claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) {
+      const m = String(d.error ?? `Could not claim (${r.status})`);
+      onProgress('error', m);
+      return { phase: 'error', message: m, retryable: true };
+    }
+    const done =
+      'Claimed. This node is recorded against your account, and survives losing this machine.';
+    onProgress('done', done);
+    return { phase: 'done', message: done, address: d.payout_address, retryable: false };
+  } catch (err) {
+    const m = `Could not claim: ${describe(err)}`;
+    onProgress('error', m);
+    return { phase: 'error', message: m, retryable: true };
+  }
+}
+
 /** The unclaimed-state line, kept here so the wording is asserted rather than typed twice. */
 export function unclaimedLabel(nodeId: string | null): string {
   return `not claimed — this node's NRN is held under ${nodeId ?? 'this machine'}`;

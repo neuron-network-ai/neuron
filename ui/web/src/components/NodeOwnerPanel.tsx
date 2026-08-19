@@ -1,11 +1,13 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Wallet2 } from 'lucide-react';
+import { UserCheck, Wallet2 } from 'lucide-react';
 import {
   NodeOwnerState,
   NO_NODE,
   ClaimPhase,
+  ClaimResult,
   fetchNodeOwner,
   claimNodeEarnings,
+  claimWithAccount,
   unclaimedLabel,
   CLAIM_EXPLANATION,
 } from '../services/nodeOwner';
@@ -34,16 +36,26 @@ export const NodeOwnerPanel: React.FC = () => {
     return () => controller.abort();
   }, []);
 
-  const onClaim = useCallback(async () => {
-    setPhase('connecting');
-    const res = await claimNodeEarnings(window.ethereum, (p, m) => {
-      setPhase(p);
-      setStatus(m);
-    });
+  const report = useCallback((res: ClaimResult) => {
     setPhase(res.phase);
     setStatus(res.message);
     if (res.phase === 'done' && res.address) setAddress(res.address);
   }, []);
+
+  // The DEFAULT claim: the signed-in account, and nothing else. [P53] — this machine already
+  // holds the key for the address already bound, so nothing needs to be signed by a human.
+  const onClaimAccount = useCallback(async () => {
+    setPhase('binding');
+    report(await claimWithAccount((p, m) => { setPhase(p); setStatus(m); }));
+  }, [report]);
+
+  // The exception: binding an address this machine has no key for — a hardware wallet, an
+  // exchange-independent address. Kept because that operator genuinely needs it, demoted
+  // because requiring it of everyone is what made the feature unreachable.
+  const onClaimWallet = useCallback(async () => {
+    setPhase('connecting');
+    report(await claimNodeEarnings(window.ethereum, (p, m) => { setPhase(p); setStatus(m); }));
+  }, [report]);
 
   // Keyed on `unclaimed`, the FACT, not on `needsOwner`, the readiness. needsOwner is
   // `logged_in AND not owned`, so gating here meant a logged-OUT operator whose machine was
@@ -93,16 +105,28 @@ export const NodeOwnerPanel: React.FC = () => {
       </div>
 
       {!claimed && (
-        <button
-          onClick={onClaim}
-          disabled={busy}
-          className="w-full h-7 rounded-lg text-[12px] font-medium text-accent hover:bg-surface-2
-                     transition disabled:opacity-50 disabled:cursor-default
-                     flex items-center justify-center gap-1.5"
-        >
-          <Wallet2 className="w-3.5 h-3.5" />
-          <span>{busy ? 'Claiming…' : 'Claim with browser wallet'}</span>
-        </button>
+        <>
+          <button
+            onClick={onClaimAccount}
+            disabled={busy}
+            className="w-full h-7 rounded-lg text-[12px] font-medium text-accent hover:bg-surface-2
+                       transition disabled:opacity-50 disabled:cursor-default
+                       flex items-center justify-center gap-1.5"
+          >
+            <UserCheck className="w-3.5 h-3.5" />
+            <span>{busy ? 'Claiming…' : 'Claim with my account'}</span>
+          </button>
+          <button
+            onClick={onClaimWallet}
+            disabled={busy}
+            className="w-full h-7 rounded-lg text-[11px] text-ink-faint hover:bg-surface-2
+                       transition disabled:opacity-50 disabled:cursor-default
+                       flex items-center justify-center gap-1.5"
+          >
+            <Wallet2 className="w-3 h-3" />
+            <span>Pay out to a different wallet instead</span>
+          </button>
+        </>
       )}
 
       {/* The explanation shows until something happens, then gets out of the way. A declined

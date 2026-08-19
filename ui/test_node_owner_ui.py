@@ -124,6 +124,48 @@ def main():
     check("...which is the only thing that tells someone what they got wrong",
           b"key for the address" in bytes(r.body))
 
+    print("\n-- [P53] claiming with the ACCOUNT, no wallet extension anywhere")
+    uiapp.requests.get, uiapp.requests.post = fake_get, fake_post
+    uiapp._local_payout_key = lambda create=False: ("0xMINE", "pk")
+    uiapp._sign_binding = lambda pk, msg: "0xlocalsig"
+
+    calls.clear()
+    out = uiapp.node_claim(signed_in)
+    sent = calls[-1][2]["json"]
+    check("the claim records the session's wallet as owner", sent["owner_wallet_id"] == "w_alice")
+    check("...signed by the key this machine already holds", sent["signature"] == "0xlocalsig")
+    check("...against the address it already has, so it is not a rebind",
+          sent["address"] == "0xMINE")
+    check("...and sends NO old_signature, because none is needed for the same address",
+          "old_signature" not in sent)
+    check("...and reports the node as claimed", out["owner_wallet_id"] == "w_alice")
+
+    check("an anonymous session cannot claim", uiapp.node_claim(anon).status_code == 401)
+
+    uiapp._node_identity = lambda: (None, None)
+    check("a machine serving no node cannot claim", uiapp.node_claim(signed_in).status_code == 404)
+    uiapp._node_identity = lambda: ("node-x", "tok-secret")
+
+    def foreign_get(url, **kw):
+        calls.append(("GET", url, kw))
+        if "/payout-address" in url:
+            return FakeResp(200, {"payout_address": "0xSOMEONE_ELSE"})
+        return FakeResp(200, {"nonce": "n1", "message": "m"})
+
+    uiapp.requests.get = foreign_get
+    calls.clear()
+    r = uiapp.node_claim(signed_in)
+    check("a bound address this machine has no key for is REFUSED, not overridden",
+          r.status_code == 409, "this is the control that stops a copied node_token "
+                                "from redirecting somebody's earnings")
+    check("...and nothing was posted", not any(c[0] == "POST" for c in calls))
+
+    uiapp._local_payout_key = lambda create=False: (None, None)
+    uiapp.requests.get = fake_get
+    check("no local key means an honest 409, not a crash",
+          uiapp.node_claim(signed_in).status_code == 409)
+    uiapp._local_payout_key = lambda create=False: ("0xMINE", "pk")
+
     print("\n-- a coordinator outage does not take the chat down")
     import requests as real_requests
 

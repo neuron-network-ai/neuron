@@ -23,6 +23,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   fetchNodeOwner,
   claimNodeEarnings,
+  claimWithAccount,
   isUserDeclined,
   unclaimedLabel,
   NO_NODE,
@@ -242,5 +243,47 @@ describe('wording', () => {
   });
   it('still reads as a sentence when the node id is missing', () => {
     expect(unclaimedLabel(null)).toBe("not claimed — this node's NRN is held under this machine");
+  });
+});
+
+describe('claimWithAccount — the default path, and why it exists ([P53])', () => {
+  it('claims with one POST to /node/claim and no wallet involved', async () => {
+    const posted = serve({ '/node/claim': { node_id: 'n1', owner_wallet_id: 'w_x',
+                                            payout_address: '0xAbC', rebound: false } });
+    const res = await claimWithAccount();
+    expect(res.phase).toBe('done');
+    expect(res.address).toBe('0xAbC');
+    expect(posted).toHaveLength(1);
+    expect(posted[0].url).toBe('/node/claim');
+  });
+
+  it('sends NO wallet id — the server takes the owner from the session, same as rule 1', async () => {
+    const posted = serve({ '/node/claim': { node_id: 'n1', payout_address: '0xAbC' } });
+    await claimWithAccount();
+    expect(JSON.stringify(posted[0].body ?? {})).not.toMatch(/w_|wallet/i);
+  });
+
+  it('never touches window.ethereum, so a machine with no wallet extension can still claim', async () => {
+    serve({ '/node/claim': { node_id: 'n1', payout_address: '0xAbC' } });
+    vi.stubGlobal('ethereum', undefined);
+    const res = await claimWithAccount();
+    expect(res.phase).toBe('done');
+  });
+
+  it('surfaces the 409 verbatim and stays retryable — a foreign bound address is not a bug', async () => {
+    serve({ '/node/claim': { error: 'this node pays out to 0xOther, which is not an address '
+                                    + 'this machine holds a key for.' } }, { status: 409 });
+    const res = await claimWithAccount();
+    expect(res.phase).toBe('error');
+    expect(res.retryable).toBe(true);
+    expect(res.message).toContain('0xOther');
+  });
+
+  it('reports progress so the button can narrate', async () => {
+    serve({ '/node/claim': { node_id: 'n1', payout_address: '0xAbC' } });
+    const seen: ClaimPhase[] = [];
+    await claimWithAccount(p => seen.push(p));
+    expect(seen).toContain('binding');
+    expect(seen).toContain('done');
   });
 });
