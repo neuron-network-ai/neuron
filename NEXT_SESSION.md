@@ -38,8 +38,8 @@ now reads owner and balance BEFORE the DELETE kills the token, says plainly when
 earnings are safe, and when they are not it names the amount, the node id, that reinstalling
 will not recover it, and writes `unclaimed-earnings.json` with the id a sweep needs.
 
-A later reinstall came back as `6ff49d`, so **the 33.49 NRN is on the live node and one click
-settles it.**
+A later reinstall came back as `6ff49d`. **Both identities were then swept: 35.82 NRN from
+`6ff49d` and 26.39 from the `7fc2ff` orphan — 62.21 NRN that a reinstall had put out of reach.**
 
 **[P30] phase 3, measured on both machines** — `ggml-rpc-server` on the Pavilion (authorised),
 loopback-bound, through an authenticated tunnel:
