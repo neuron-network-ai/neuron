@@ -196,6 +196,19 @@ def main():
     check("...and which stays hidden rather than rendering an empty list",
           "if(!d.logged_in || d.error || !d.nodes || !d.nodes.length) return;" in SRC)
 
+    print("\n-- the chat page is never served from a stale cache")
+    # A shipped, served, on-disk feature was invisible on screen because the browser held the
+    # previous chat.html. Server correct, install correct, user correctly concluding it had not
+    # been built. Same family as [P46]: everything reports success and the screen disagrees.
+    resp = uiapp.index()
+    cc = resp.headers.get("cache-control", "")
+    check("the page says no-store", "no-store" in cc, cc)
+    check("...and must-revalidate", "must-revalidate" in cc, cc)
+    check("...while hashed bundles are NOT no-stored, because their URL changes on change",
+          "no-store" not in open("ui/app.py", encoding="utf-8").read()
+          .split('name="app-assets"')[0].split("app.mount(\"/assets\"")[-1],
+          "content-hashed filenames make caching correct and free")
+
     print("\n-- a coordinator outage does not take the chat down")
     import requests as real_requests
 

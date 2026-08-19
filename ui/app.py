@@ -135,7 +135,25 @@ def sse(event: str, data: dict) -> str:
 # --------------------------------------------------------------------------- #
 @app.get("/")
 def index():
-    return FileResponse(str(STATIC_DIR / "chat.html"))
+    """The chat page, served with caching switched OFF.
+
+    **Why an explicit no-store on the one file that changes every release.** An upgraded agent
+    ships a new `chat.html`, and a browser that already has the old one keeps showing it — so a
+    feature that is genuinely installed, genuinely served, and verifiable with `curl` is
+    invisible to the person sitting in front of it until they think to hard-reload. That
+    happened on 2026-08-19 with the "Use the network" toggle: server correct, disk correct,
+    screen wrong, and the only symptom was the user reasonably concluding it had not been built.
+
+    This is the same failure family as [P46] (a build that verifies itself while the INSTALL is
+    incoherent) one layer further out: everything reports success and the screen disagrees. The
+    page is ~60 KB and loads from loopback, so re-fetching it costs nothing measurable; a stale
+    UI costs trust, and trust is the expensive one.
+
+    The hashed bundles under /assets are deliberately NOT covered — Vite content-hashes those
+    filenames, so a changed asset is a changed URL and caching them is correct and free.
+    """
+    return FileResponse(str(STATIC_DIR / "chat.html"),
+                        headers={"Cache-Control": "no-store, must-revalidate"})
 
 
 # The React rewrite, served alongside the page it will eventually replace rather than instead
