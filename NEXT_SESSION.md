@@ -1,5 +1,43 @@
 # Handoff — start of Session 66
 
+## STATE AT SHUTDOWN, 2026-08-19 16:18 — READ THIS FIRST
+
+**The network is UP and back to exactly where it started:** `chain=[[0,9],[10,27]]`,
+`routable=True`, `healthy=True`, 2 nodes online, chat UI answering. Wallet **585.98 NRN**
+(up from 550.97 — claimed nodes now credit the account directly, which confirms [P39] works).
+65 commits local, nothing pushed, working tree clean.
+
+**I broke the live network for ~50 minutes and this is why.** Pinning Qwen3-4B put both nodes
+into a crash loop:
+
+```
+ValueError: The checkpoint you are trying to load has model type `qwen3`
+            but Transformers does not recognize this architecture
+```
+
+**`transformers` is pinned at 4.44.2, which predates Qwen3.** That is the real reason [P43] has
+never run, after many sessions of treating it as a placement/sizing problem — `CAPACITY_CASE.md`
+walks through fp16, caps and pinning and never mentions it, because nobody had ever executed the
+load. **The 4B cannot run on the PyTorch path until every node upgrades transformers**, which is
+a fleet-wide dependency change, not a config step.
+
+Recovery took DB surgery on the coordinator (`settings.serving_model_id` back to the 1.5B, and
+`nodes.layer_start/layer_end` back to 0-9 / 10-27) because clearing the pin does NOT move the
+serving model — migration needs nodes to report ready, and crash-looping nodes never do. **A
+pinned model that no node can load is a trap with no in-product way out.** That is worth fixing
+before anyone pins anything again.
+
+**What was reverted:** the 4B pin, `donate_ram_gb` on this PC, and `NEURON_WEIGHT_DTYPE=fp16` on
+both machines. `config.json.bak_pre_4b` holds the pre-experiment config.
+
+**What fp16 measured before it was reverted, and it is worth keeping:** the Pavilion's agent
+dropped from **7.19 GB to 4.23 GB** resident, free RAM 2.9 GB → 5.9 GB. NEURON was taking 62%
+of an 11 GB laptop to serve an 18-layer slice of a 1.5B model. That is a recruitment problem in
+its own right.
+
+---
+
+
 Paste the block at the bottom into a new window.
 
 ---
