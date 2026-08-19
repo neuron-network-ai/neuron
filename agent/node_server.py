@@ -28,6 +28,7 @@ import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root
 import batching                                  # noqa: E402
+import lan_direct                                # noqa: E402
 import common                                    # noqa: E402
 import wire_codec                                # noqa: E402
 from slice_downloader import load_slice_model    # noqa: E402
@@ -366,6 +367,18 @@ class NodeServer:
         print(f"[node] slice ready in {time.time()-t0:.1f}s | serving layers "
               f"{layer_start}-{layer_end} | weights on {_weights_device(model)}")
 
+    def _direct_offer(self, hint):
+        """`{"direct": {...}}` when this node shares a private subnet with the caller, else {}.
+
+        Never volunteered: `hint` is the caller's own list of /24s and we answer only from
+        inside it. No hint, no port yet, no shared subnet -> no field, and the caller keeps
+        using the relay address the coordinator gave it.
+        """
+        if not hint or not self.listen_port:
+            return {}
+        ip = lan_direct.address_for(hint)
+        return {"direct": {"ip": ip, "port": self.listen_port}} if ip else {}
+
     def _batcher(self, role, lo, hi):
         """One MicroBatcher per (role, layer range). Keyed rather than global because a
         batch's slots must all run the SAME layers -- the range arrives in the caller's
@@ -399,6 +412,9 @@ class NodeServer:
     # could be true while the site claimed otherwise.
     node_token = None
     node_id = None
+    # The port this server is actually accepting on, set by run(). None until then, which is
+    # what makes _direct_offer decline rather than advertise a port it does not hold.
+    listen_port = None
     # Grants already used, so one cannot be replayed inside its TTL. Bounded
     # by clearing wholesale: every entry older than GRANT_TTL_S is already
     # unusable, so forgetting them costs nothing and an unbounded set on a
@@ -499,6 +515,13 @@ class NodeServer:
                     # un-upgraded caller on the legacy format). See wire_codec.
                     codec = wire_codec.negotiate(msg.get("wire"))
                     ack_wire = {"wire": codec} if codec else {}
+                    # Answer the caller's `lan_hint`, if it asked one. We reveal an address of
+                    # ours ONLY when it sits inside a subnet the caller already told us it is
+                    # on -- so this discloses nothing a peer could not find by scanning its own
+                    # network, and a caller from anywhere else gets no address at all. The
+                    # relay stays the address of record; this only lets two machines in one
+                    # house skip a trip to Amsterdam. See lan_direct and [P57].
+                    ack_direct = self._direct_offer(msg.get("lan_hint"))
                     if "host_b" in msg:                      # MIDDLE relay role (real pipeline traffic)
                         role, s1, s2 = "middle", msg["s1"], msg["s2"]
                         bconn = socket.create_connection((msg["host_b"], msg["port_b"]),
@@ -524,7 +547,7 @@ class NodeServer:
                         bcodec = wire_codec.negotiate([back["wire"]] if back.get("wire") else None)
                         bconn.settimeout(common.HOT_TIMEOUT_S)
                         common.send_msg(conn, {"ok": True, "layers": self.n, "s1": s1, "s2": s2,
-                                               **ack_wire})
+                                               **ack_wire, **ack_direct})
                     elif is_true_last and not _is_range_probe(msg):   # LAST stage role (real pipeline traffic)
                         # `not _is_range_probe(msg)` is load-bearing in BOTH directions, and
                         # each direction has already been a live outage. `is_true_last` asks what
@@ -583,7 +606,7 @@ class NodeServer:
                         # say what went wrong.
                         common.send_msg(conn, {"ok": True, "layers": msg.get("n", self.n),
                                                "s2": s2, "holds": [self.lo, self.hi],
-                                               **ack_wire})
+                                               **ack_wire, **ack_direct})
                     else:
                         # PROBE role (security/proof_of_compute.py): a config with no host_b
                         # that either names a real layer RANGE to challenge (`_is_range_probe`)
@@ -602,7 +625,7 @@ class NodeServer:
                         # and auto-placement puts a joining stranger wherever the GAP is.
                         role, s1, s2 = "probe", self.lo, self.hi + 1
                         common.send_msg(conn, {"ok": True, "layers": self.n, "s1": s1, "s2": s2,
-                                               "holds": [self.lo, self.hi], **ack_wire})
+                                               "holds": [self.lo, self.hi], **ack_wire, **ack_direct})
 
                 elif mtype == "act":
                     # An in-flight request whose node started reloading underneath it. Before
@@ -721,6 +744,7 @@ class NodeServer:
             print(f"[node] rpc-bridge ended: {e}")
 
     def run(self, host, port):
+        self.listen_port = port
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:

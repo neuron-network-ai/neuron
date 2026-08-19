@@ -427,7 +427,34 @@ the reputation system would have to carry that claim. Nothing in the design does
 rather than as its own entry because it is the same mechanism as [P56]: the verifier measures a
 node against a reference that is not what the node is actually being asked to be.
 
-**What is left, after the relay change was declined** (2026-08-20, founder's call -- publishing
+**FIXED WITHOUT PUBLISHING ANYTHING (2026-08-20), because the founder's two constraints were
+both right.** Turning the relay off was refused for a reason worth writing down: NEURON's users
+will not run Tailscale, so a mesh VPN must never be what makes the network fast -- and **the
+relay is a PRIVACY feature**, not merely a NAT workaround. Peers see `150.230.22.250` and never
+where a volunteer lives, which is the same decision `/node/list` already encodes when it hides
+node addresses from public callers.
+
+So the disclosure is inverted instead of widened (`lan_direct.py`). The DRIVER names the private
+/24s it is already on; a node answers **only** from inside one of them:
+
+    driver -> node   config { ..., "lan_hint": ["192.168.1"] }
+    node   -> driver ack    { ..., "direct": {"ip": "192.168.1.11", "port": 50999} }
+
+A peer therefore learns nothing it could not have found by scanning its own LAN, a node on any
+other network answers with no field at all, and the coordinator neither sees nor stores a home
+address -- so **no schema change and no VM deploy**, which matters because deploying to the
+coordinator needs a key passphrase only the founder can enter. Rules, each pinned by
+`test_lan_direct.py` (45 assertions): RFC1918 only, so a public address can never be offered or
+accepted; **100.64/10 excluded on purpose**, so Tailscale is never the route; the caller
+re-checks the answer, so a node cannot name some other machine on the caller's network and have
+activations sent there; and every failure falls back to the relay, so this can make a request
+faster and never break one.
+
+Expected: 459 -> ~320 ms/token, about **3 tok/s**. Needs both ends -- a driver that asks and a
+node that answers -- so it is live only once this PC's app is rebuilt AND the Pavilion picks up
+the code.
+
+**What is still left, on top of that** (2026-08-20, founder's call -- publishing
 Tailscale addresses would make these nodes unreachable to anyone off the tailnet, which is the
 opposite of the project's point): nothing free. The 33% network term stays. The 67% compute term
 moves only with k-quant weights, which means [P30]'s engine, which needs `llama-server` and

@@ -32,6 +32,7 @@ import torch
 import batching  # MicroBatcher — used by _batchers(); missing until 2026-08-01, see below
 import common
 import junction_cache
+import lan_direct
 import wire_codec
 import node_a  # coord_get_chain / coord_complete (its main() is __main__-guarded)
 from safety import moderation
@@ -101,6 +102,12 @@ def log_chain_failure(node_ids, err):
                 ",".join(node_ids or []), err.__class__.__name__, err)
 
 
+# How long a same-LAN dial may take before we give up and keep the relay connection.
+# Short on purpose: a LAN neighbour answers in ~5 ms ([P57]), so anything slower is not
+# a neighbour, and this budget is paid once per request at most.
+DIRECT_TIMEOUT_S = float(os.environ.get("NEURON_DIRECT_TIMEOUT_S", "2"))
+
+
 class _Driver:
     def __init__(self):
         self.model = self.tok = self.n = self.eos_id = None
@@ -117,6 +124,10 @@ class _Driver:
         self._batch_lock = threading.Lock()
         self._stage_batcher = None    # embed + layers 0..S1-1
         self._head_batcher = None     # the lm_head GEMM (the expensive one)
+        # node_id -> (ip, port) for peers that turned out to share a LAN with us. Learned from
+        # a node's own ack, never from the coordinator, and dropped the moment a dial to it
+        # fails -- see lan_direct. Purely an optimisation: an empty dict is today's behaviour.
+        self._direct = {}
 
     @property
     def loaded(self) -> bool:
@@ -248,10 +259,9 @@ class _Driver:
         jcache = junction_cache.JunctionCache()
         reroutes = []
 
-        def _connect():
-            """Open + configure a connection to the current chain. Returns (sock, codec)."""
-            s = socket.create_connection((chain["host_c"], chain["port_c"]),
-                                        timeout=common.COLD_CONNECT_TIMEOUT_S)
+        def _dial(host, port, timeout):
+            """Open + configure ONE connection. Returns (sock, codec, ack)."""
+            s = socket.create_connection((host, port), timeout=timeout)
             # [P52]: encrypt this hop before a single byte of the user's prompt moves. A
             # coordinator too old to mint grants sends none, and the dial stays plaintext --
             # the same rolling-upgrade direction node_server takes, because refusing would
@@ -277,8 +287,16 @@ class _Driver:
             # read the PRESENCE of `s1` as "a verifier is probing me", which is true of the
             # verifier and was equally true of this line, so in a two-stage chain every real
             # request came back without the final norm and the head ran on it.
+            # `lan_hint` asks a question rather than answering one: it names the private
+            # /24s THIS machine sits on, and the peer replies with `direct` only if it holds an
+            # address inside one of them. So a node never advertises where it lives, and we
+            # learn nothing we could not have found by scanning our own LAN. A peer on another
+            # network simply omits the field and the relay carries the request, exactly as it
+            # does today. See lan_direct and [P57] -- the relay costs 88 ms where a LAN
+            # neighbour costs 5.3.
             cfg = {"type": "config", "s2": chain["s2"],
                    "stage": "middle" if chain["host_b"] else "last",
+                   "lan_hint": lan_direct.local_prefixes(),
                    "wire": wire_codec.preference(model.config.hidden_size)}
             # host_b present -> the next hop relays to a further stage (node_c's role); absent
             # -> it IS the final stage and returns the normed hidden itself (node_b's role).
@@ -317,6 +335,38 @@ class _Driver:
                                       + (f" ({a['detail']})" if a.get("detail") else ""))
             c = wire_codec.negotiate([a["wire"]] if a.get("wire") else None)
             s.settimeout(common.HOT_TIMEOUT_S)
+            return s, c, a
+
+        def _connect():
+            """Open the chain's next hop, preferring a same-LAN route when the peer offers one.
+
+            The relay is the ADDRESS OF RECORD and stays the fallback for every failure: no
+            offer, an offer we do not trust, a refused dial, a peer that moved. That ordering is
+            deliberate -- this may make a request faster and must never be able to stop one.
+            """
+            node = chain.get("node_c")
+            known = self._direct.get(node)
+            if known:
+                try:
+                    return _dial(known[0], known[1], DIRECT_TIMEOUT_S)[:2]
+                except (OSError, TimeoutError, PeerUnavailable):
+                    self._direct.pop(node, None)      # it moved or went away; relay from here
+            s, c, ack = _dial(chain["host_c"], chain["port_c"],
+                              common.COLD_CONNECT_TIMEOUT_S)
+            # `usable` re-checks the peer's answer against the subnets we actually asked about.
+            # The node decides what to reveal; the caller still decides what to trust, and a
+            # node naming an address outside our hint is refused even though it answered.
+            if node and lan_direct.usable(ack.get("direct"), lan_direct.local_prefixes()):
+                d = ack["direct"]
+                try:
+                    s2, c2, _ = _dial(d["ip"], d["port"], DIRECT_TIMEOUT_S)
+                except (OSError, TimeoutError, PeerUnavailable):
+                    return s, c                       # keep the relay connection we already have
+                s.close()
+                self._direct[node] = (d["ip"], d["port"])
+                log.info("hop %s is on this LAN — dialling it directly instead of the relay",
+                         node)
+                return s2, c2
             return s, c
 
         try:
