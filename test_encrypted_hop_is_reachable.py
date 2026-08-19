@@ -88,6 +88,24 @@ def main():
     check("the coordinator requires cryptography", "cryptography" in req,
           "wire_crypto needs it, and unlike eth-account it is imported eagerly")
 
+    print("\n-- a node too old to handshake is not sent a grant")
+    # The other half of the rolling upgrade. [P52] covered old-coordinator/new-node; this is
+    # new-coordinator/old-node, which failed live on 2026-08-19 as "socket closed during
+    # handshake" — a version mismatch wearing the costume of a network fault.
+    from coordinator.router import _speaks_secure_hop as speaks
+    check("0.20.5, the first build with the hop, is sent one",
+          speaks({"agent_version": "0.20.5"}) is True)
+    check("0.20.6 is sent one", speaks({"agent_version": "0.20.6"}) is True)
+    check("0.21.0 is sent one", speaks({"agent_version": "0.21.0"}) is True)
+    check("0.20.3 — the Pavilion, which actually broke — is NOT",
+          speaks({"agent_version": "0.20.3"}) is False)
+    check("0.19.9 is not", speaks({"agent_version": "0.19.9"}) is False)
+    check("a node that cannot say what it runs is treated as too old",
+          speaks({"agent_version": None}) is False and speaks({}) is False,
+          "assuming about the one node that will not tell you is how a fleet partitions")
+    check("garbage does not crash the router",
+          speaks({"agent_version": "not-a-version"}) is False)
+
     print("\n-- and it actually resolves at runtime")
     try:
         import neuron_driver

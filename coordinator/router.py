@@ -532,11 +532,44 @@ def chain_public(chain, request_id=None):
             "port": n["port"],
             "layers": [n["layer_start"], n["layer_end"]],
         }
-        if request_id and n.get("node_token"):
+        if request_id and n.get("node_token") and _speaks_secure_hop(n):
             entry["grant"] = base64.b64encode(
                 wire_crypto.mint_grant(n["node_token"], request_id, n["node_id"])).decode()
         out.append(entry)
     return out
+
+
+SECURE_HOP_SINCE = (0, 20, 5)     # the first agent build carrying security/wire_crypto
+
+
+def _speaks_secure_hop(node):
+    """Can this node actually complete the [P52] handshake?
+
+    **The half of the rolling upgrade that was missing.** [P52] handled "old coordinator, new
+    node": no grant arrives, the node accepts plaintext, nothing breaks. The reverse was never
+    handled — a NEW coordinator mints a grant for an OLD node, the driver opens a handshake the
+    node has never heard of, and the node closes the socket. The driver treats that as an
+    identity failure and reroutes; with no replica to reroute to, the request simply fails.
+
+    Seen live 2026-08-19: every request to `node-c-pavilion` (0.20.3) died with
+    *"socket closed during handshake"*, which reads like a network fault and is actually a
+    version mismatch the coordinator had the information to avoid — it stores `agent_version`
+    for exactly this kind of question.
+
+    So the grant is withheld from a node too old to use it, and that hop stays plaintext until
+    its operator upgrades. That is the same direction [P52] already chose: a partitioned network
+    is worse than a rolling one, and `NEURON_REQUIRE_SECURE=1` is the switch for the day the
+    fleet has moved. An UNKNOWN version is treated as too old — a node that cannot say what it
+    runs is exactly the one not to assume about.
+    """
+    raw = (node.get("agent_version") or "").strip()
+    if not raw:
+        return False
+    try:
+        parts = tuple(int(x) for x in raw.split(".")[:3])
+    except ValueError:
+        return False
+    return parts + (0,) * (3 - len(parts)) >= SECURE_HOP_SINCE
 
 
 def missing_str(missing):
