@@ -41,6 +41,66 @@ def _total_earned(cfg):
     return 0.0
 
 
+def _owner_and_balance(cfg):
+    """(owner_wallet_id, balance) for this node, or (None, 0.0) if it cannot be read.
+
+    Both are needed before anything is deleted, because together they answer the only
+    question that matters at uninstall time: **is this machine's NRN reachable by a person
+    after the config is gone?** An owner means yes — it is recorded against a Google/GitHub
+    account that outlives the disk. No owner means the balance is addressable only by a
+    node_id that is about to be deleted and never reissued.
+    """
+    base = cfg.get("coordinator", "").rstrip("/")
+    nid, tok = cfg.get("node_id"), cfg.get("node_token", "")
+    if not (base and nid):
+        return None, 0.0
+    owner, balance = None, 0.0
+    try:
+        r = requests.get(f"{base}/node/{nid}/payout-address",
+                         headers={"X-Node-Token": tok}, timeout=8)
+        if r.status_code == 200:
+            owner = r.json().get("owner_wallet_id")
+    except requests.RequestException:
+        pass
+    try:
+        r = requests.get(f"{base}/ledger/{nid}", headers={"X-Node-Token": tok}, timeout=8)
+        if r.status_code == 200:
+            balance = float(r.json().get("balance") or 0.0)
+    except (requests.RequestException, TypeError, ValueError):
+        pass
+    return owner, balance
+
+
+def _write_recovery_note(cfg, balance, state_dir=None):
+    """Leave the node id behind so unclaimed NRN can still be found afterwards.
+
+    This file is the difference between "33.49 NRN is stranded" and "33.49 NRN is stranded on
+    agent-optinovate-6ff49d". `coordinator/claim_node_earnings.py` sweeps by node_id, so the id
+    is the whole of what recovery needs — and it is the one thing deleting config.json destroys.
+    Deliberately holds NO token: the coordinator kills it on deregistration, so keeping it would
+    be a dead secret on disk pretending to be a key.
+    """
+    # Beside the config being removed, not beside HERE: --config is what decides
+    # which install this is, and a test (or a second install) must not write into
+    # the real state directory.
+    state_dir = state_dir or HERE
+    path = os.path.join(state_dir, "unclaimed-earnings.json")
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"node_id": cfg.get("node_id"),
+                       "coordinator": cfg.get("coordinator"),
+                       "balance_at_removal": round(balance, 4),
+                       "removed_at": int(__import__("time").time()),
+                       "note": "This NRN was never claimed to an account. It is still on the "
+                               "coordinator's ledger under node_id. To recover it, sign in to "
+                               "NEURON and ask the operator to run claim_node_earnings.py for "
+                               "this node_id."}, f, indent=2)
+        return path
+    except OSError:
+        return None
+
+
 def _deregister(cfg):
     """Remove this node from the coordinator. Returns (ok, human-readable detail).
 
@@ -146,6 +206,10 @@ def main(argv=None):
 
     cfg = json.load(open(config_path)) if os.path.exists(config_path) else {}
     earned = _total_earned(cfg) if cfg.get("node_id") else 0.0
+    # Read BEFORE deregistering: the coordinator kills this node's token on DELETE, so after
+    # that point neither the owner nor the balance can be read at all, and the uninstaller
+    # would have to guess about the very thing it is about to make unreachable.
+    owner, balance = _owner_and_balance(cfg) if cfg.get("node_id") else (None, 0.0)
 
     dereg_ok, dereg_detail = True, None
     if cfg.get("node_id") and cfg.get("node_token"):
@@ -163,6 +227,28 @@ def main(argv=None):
         print(f"  deleted {os.path.basename(config_path)}")
 
     print(f"\nNEURON removed. Thank you for contributing {earned:.2f} NRN total.")
+
+    # THE LINE THIS FILE WAS MISSING, and it cost 33.49 NRN on 2026-08-18 ([P53]).
+    # A node's balance lives against its node_id. `new_node_id()` mints a fresh random suffix
+    # on every install, deliberately, so a reinstall NEVER comes back as the same node — and
+    # config.json, the only record of which id this machine was, has just been deleted three
+    # lines above. Printing lifetime earnings as a thank-you at that exact moment reads as a
+    # receipt for money that has in fact just become unaddressable.
+    #
+    # Claimed earnings are fine and should be said so plainly: they are recorded against a
+    # Google/GitHub account and survive the disk, which is the entire point of the claim.
+    if owner:
+        print(f"  Your earnings are recorded to your account and are NOT affected by this "
+              f"removal.")
+    elif balance > 0:
+        note = _write_recovery_note(cfg, balance, os.path.dirname(config_path))
+        print(f"\n  WARNING: {balance:.2f} NRN on this machine was never claimed to an account.")
+        print(f"  It is held under the node id '{cfg.get('node_id')}', and reinstalling will "
+              f"NOT get it back —\n  a new install registers under a NEW id, on purpose.")
+        print(f"  To claim next time: open NEURON, sign in with Google or GitHub, and press "
+              f"'Claim with my account'\n  BEFORE uninstalling.")
+        if note:
+            print(f"  The node id has been saved to {note} so it can still be recovered.")
 
     if not dereg_ok:
         # Say it plainly rather than let a silent orphan degrade the network. Reinstalling

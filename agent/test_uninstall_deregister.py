@@ -124,6 +124,67 @@ def main():
     finally:
         uninstall.requests.delete = real_delete
 
+    # ---------------------------------------------------------------- [P53]
+    # What the uninstaller says about MONEY. It deleted config.json — the only record of which
+    # node id this machine was — and printed lifetime earnings as a thank-you in the same
+    # breath. On 2026-08-18 that ran on the founder's own machine and 33.49 unclaimed NRN
+    # became addressable only by an id nothing had written down. A reinstall does not get it
+    # back: new_node_id() mints a fresh suffix on purpose.
+    real_get = uninstall.requests.get
+    real_owner = uninstall._owner_and_balance
+    try:
+        d = tempfile.mkdtemp()
+        cfg_path = os.path.join(d, "config.json")
+
+        def run(owner, balance):
+            # Clear the note first, so "no note exists afterwards" means THIS run declined to
+            # write one rather than that no run ever has.
+            leftover = os.path.join(d, "unclaimed-earnings.json")
+            if os.path.exists(leftover):
+                os.remove(leftover)
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump(dict(CFG, slice_dir="./model_slice/"), f)
+            uninstall.requests.delete, _ = patched_delete(200)
+            uninstall._owner_and_balance = lambda cfg: (owner, balance)
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                uninstall.main(["--config", cfg_path])
+            return buf.getvalue()
+
+        print("\n-- [P53] unclaimed NRN is named, not thanked away")
+        out = run(None, 33.4858)
+        check("an unclaimed balance is warned about", "WARNING" in out and "33.49" in out, out)
+        check("...it names the node id the money is under",
+              "agent-host-67e4eb" in out.split("WARNING")[-1], out)
+        check("...it says reinstalling will NOT recover it, which is the instinct",
+              "NOT get it back" in out, out)
+        check("...and it names the action that would have prevented it",
+              "Claim with my account" in out, out)
+        note = os.path.join(d, "unclaimed-earnings.json")
+        check("...and the node id survives on disk for recovery", os.path.exists(note))
+        if os.path.exists(note):
+            saved = json.load(open(note, encoding="utf-8"))
+            check("......with the id a sweep needs", saved["node_id"] == "agent-host-67e4eb")
+            check("......and the balance at the moment it was lost",
+                  abs(saved["balance_at_removal"] - 33.4858) < 1e-6)
+            check("......and NO token, because deregistration already killed it",
+                  "token" not in json.dumps(saved).lower(), json.dumps(saved))
+
+        print("\n-- a CLAIMED node says the opposite, because the opposite is true")
+        out = run("w_alice", 33.4858)
+        check("a claimed balance raises no warning", "WARNING" not in out, out)
+        check("...and says plainly that the money is unaffected",
+              "NOT affected by this removal" in out, out)
+        check("...and writes no recovery note, because nothing is stranded",
+              not os.path.exists(os.path.join(d, "unclaimed-earnings.json")))
+
+        print("\n-- a node that earned nothing is not given a scare")
+        out = run(None, 0.0)
+        check("a zero balance warns about nothing", "WARNING" not in out, out)
+    finally:
+        uninstall.requests.get = real_get
+        uninstall._owner_and_balance = real_owner
+
     print(f"\n{ok} passed, {fail} failed")
     return fail == 0
 
