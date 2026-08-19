@@ -396,9 +396,51 @@ and already the default. **Distribution remains a capacity feature, never a spee
 TOKENOMICS 11.6's "answers under 30 s" needs ~4.3 tok/s for a 128-token reply, which only
 quantization reaches.
 
-Related: [P30] (the engine, now the only compute lever), [P1] (the usability floor), [P52] (the
-relay breaks the encrypted hop), [P2] (half precision is slower on these CPUs), [P55] (fixed the
-correctness that made these the first measurable numbers).
+**THE BANDWIDTH ARGUMENT IS CONFIRMED, AND THE CHEAP WAY THROUGH IT IS CLOSED**
+(`tools/bench_quant.py`, 2026-08-20, on the real 19-27 slice). If compute is bytes rather than
+arithmetic, cutting bytes per weight must cut latency by about the same factor and nothing else
+will. `torch.ao.quantization.quantize_dynamic` to qint8 -- 4x fewer weight bytes, no new binary,
+no wire change, no relay change -- measured:
+
+| | ms / decode token | ms / layer |
+|---|---|---|
+| fp32, what nodes serve today | 75.84 | 8.43 |
+| dynamic int8 | **26.45** | **2.94** |
+
+**2.87x, from bytes alone.** The wall is confirmed: it is the memory bus, not the CPU, and
+quantization is the only lever on it.
+
+**And the same run closes this route.** `max|drift|` against fp32 is **24.67, a relative 34.78%**
+-- not a tolerance question, that is garbage output. Per-tensor int8 destroys the outlier
+features transformer activations depend on. llama.cpp's k-quants keep the answer correct at
+*four* bits because they carry per-block scales; that difference, not the bit width, is why
+[P30]'s engine is the route and this is not.
+
+**A second finding falls out of it, and it outlives this experiment.** 24.67 sits against
+`proof_of_compute`'s `atol=0.05`, where an honest fp32 node drifts ~1e-5 and a cheating one ~25.
+**A node serving quantized weights is therefore numerically indistinguishable from a node
+faking its work.** Today that is the correct answer, because this quantization IS wrong. But the
+network's own roadmap needs quantized nodes to be fast, and on the day one joins, the verifier
+will flag it. **Proof-of-compute compares against fp32 and has no notion of a declared
+precision** -- the challenge would have to be computed at the precision the node advertises, and
+the reputation system would have to carry that claim. Nothing in the design does yet. Filed here
+rather than as its own entry because it is the same mechanism as [P56]: the verifier measures a
+node against a reference that is not what the node is actually being asked to be.
+
+**What is left, after the relay change was declined** (2026-08-20, founder's call -- publishing
+Tailscale addresses would make these nodes unreachable to anyone off the tailnet, which is the
+opposite of the project's point): nothing free. The 33% network term stays. The 67% compute term
+moves only with k-quant weights, which means [P30]'s engine, which needs `llama-server` and
+`ggml-rpc-server` binaries that are **not on this machine** -- `llama_cpp` is installed as a
+LIBRARY (that is the 32.11 tok/s local path) and ships `llama_cpp/lib/`, but not those two
+executables. So the ordering is: get the binaries, settle [P52]'s grant hold so the rpc-bridge
+will accept a caller, then wire it.
+
+Related: [P30] (the engine, now demonstrably the ONLY compute lever), [P1] (the usability
+floor), [P52] (the relay breaks the encrypted hop, and its hold currently bolts the rpc-bridge
+shut), [P2] (half precision is slower on these CPUs), [P56] (the verifier measuring the wrong
+reference -- same shape as the precision problem above), [P55] (fixed the correctness that made
+these the first measurable numbers).
 
 ### [P56] 🔴 Proof-of-compute certifies the PROBE path, and users are served by a different one (2026-08-19)
 
