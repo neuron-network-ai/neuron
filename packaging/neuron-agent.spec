@@ -99,7 +99,14 @@ hiddenimports += ["common", "logtail", "slice_downloader", "tunnel_client", "neu
                   "ui", "ui.app", "ui.oauth", "api", "api.openai_compat",
                   "safety", "safety.moderation", "rag", "rag.retriever",
                   "engine", "engine.local_gguf",
-                  "coordinator", "coordinator.ledger", "coordinator.config"]
+                  "coordinator", "coordinator.ledger", "coordinator.config",
+                  # [P52]'s wire encryption. PyInstaller follows imports, and this package is
+                  # reached from node_server/neuron_driver/router — but omitting it here did
+                  # not produce a build error, it produced a frozen app whose NETWORK path
+                  # failed at runtime while local answers kept working, so every smoke test
+                  # passed. Third place this same new package had to be registered: the others
+                  # are coordinator/deploy.sh's FILES and coordinator/requirements.txt.
+                  "security", "security.wire_crypto"]
 
 # ui.app's Chat page (static HTML/JS/CSS) and the moderation blocklist are plain data files,
 # not Python — PyInstaller only follows imports, so these need to be listed explicitly or

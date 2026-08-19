@@ -35,6 +35,13 @@ import junction_cache
 import wire_codec
 import node_a  # coord_get_chain / coord_complete (its main() is __main__-guarded)
 from safety import moderation
+# [P52]'s driver half. This import was MISSING: `_connect()` used `wire_crypto.client_handshake`
+# and `wire_crypto.HandshakeError` with nothing importing the name, so the first hop the
+# coordinator minted a grant for died with `NameError: name 'wire_crypto' is not defined`. It
+# went unnoticed because local-first execution meant the driver path almost never ran — the
+# encrypted-hop code shipped, was tested in isolation, and had never once executed in the
+# product. Found 2026-08-19 by forcing a request onto the network and getting a 503.
+from security import wire_crypto
 
 # `batching` was used in _batchers() and never imported, so EVERY distributed generation
 # through this driver -- the Chat UI and the OpenAI-compatible API both -- died on

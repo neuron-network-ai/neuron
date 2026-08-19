@@ -92,6 +92,11 @@ def best_local_model(preferred=None, require_cached=True):
     so the machine answers on whatever it has now and upgrades once the bigger download lands
     (started in the background by prefetch_best()). Set NEURON_LOCAL_MODEL to pin one.
     """
+    # The override outranks the pin: NEURON_LOCAL_MODEL says WHICH model to run locally,
+    # NEURON_FORCE_NETWORK says not to run locally at all, and a pinned model must not smuggle
+    # the request back onto this machine.
+    if network_forced():
+        return None
     pinned = os.environ.get("NEURON_LOCAL_MODEL")
     if pinned:
         return pinned if can_serve(pinned) else None
@@ -121,9 +126,28 @@ def prefetch_best():
     return target if ensure_weights(target) else None
 
 
+def network_forced():
+    """Has the operator demanded the node chain instead of this machine?
+
+    `NEURON_FORCE_NETWORK=1` existed and was honoured in exactly ONE of the two places that
+    dispatch a request: `ui/app.py:_drive` consulted it, `api/openai_compat.py` did not — it
+    branches straight on `available()`. So the OpenAI-compatible API could never be pushed onto
+    the network at all, and an attempt to measure the real end-to-end network speed through it
+    silently measured the local engine instead and reported a number ~3x too good. Caught
+    2026-08-19 by the coordinator's `requests_served` not moving.
+
+    Answering it HERE rather than at each call site is the point: every present and future
+    caller that asks "can this machine serve it itself" now gets the operator's override for
+    free, instead of each one having to remember a flag that lives in a different module.
+    """
+    return os.environ.get("NEURON_FORCE_NETWORK") == "1"
+
+
 def available(model_id):
     """can_serve() plus the weights actually being on disk already -- used to decide whether to
     advertise local execution without triggering a download mid-request."""
+    if network_forced():
+        return False
     if not can_serve(model_id):
         return False
     repo, fname, _ = GGUF_MODELS[model_id]
