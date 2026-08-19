@@ -81,9 +81,14 @@ error. Both fixed.
 
 ## Do these first
 
-1. **Press "Claim with my account"** at http://127.0.0.1:8080 — signed in as the founder. It is
-   one click and it settles 33.49 NRN against a real account. Verify with
-   `GET /node/{id}/payout-address` → `owner_wallet_id` is no longer null.
+1. **DONE — the claim executed on the live network at 09:07:23 on 2026-08-19**, the first in
+   this project's history. And 62.21 NRN was swept to the wallet: 35.82 from `6ff49d` plus
+   **26.39 from `7fc2ff`, the orphan the reinstall created**, which nobody could ever have
+   signed in as. Wallet 391.39 → 453.60, supply invariant intact.
+   **The check still worth doing next session:** a claimed node is supposed to credit its
+   owner's wallet directly from now on ([P39]), making the sweep a one-time repair. Confirm it
+   by watching the node's own balance stay at 0.0 while the wallet rises. If the node balance
+   climbs again, [P39]'s crediting path is not actually wired and that is a new problem.
 2. **Load the VM deploy key** if anything needs the coordinator:
    `SSH_AUTH_SOCK=/c/Users/optin/.ssh/neuron-agent.sock ssh-add /c/Users/optin/.ssh/oracle_coordinator`
    It carries a passphrase, so only a human can do it, and it drops when the PC sleeps.
@@ -140,9 +145,11 @@ old_signature. Verified live on 0.20.6. The uninstaller no longer destroys
 unclaimed NRN silently. [P30] phase 3 is MEASURED: 32.11 tok/s on one machine
 against 3.97 split across two — distribution costs 8x and never bought speed.
 
-FIRST: check whether the node is claimed (GET /node/{id}/payout-address →
-owner_wallet_id). If it is still null, the founder needs to press "Claim with my
-account" at http://127.0.0.1:8080 — one click, settles 33.49 NRN.
+FIRST: confirm that a CLAIMED node now credits the wallet directly. The claim
+ran successfully on 2026-08-19 and 62.21 NRN was swept to the wallet, but the
+sweep is a repair, not the mechanism. Watch the node's own balance: it should
+stay at 0.0 while the wallet rises. If it climbs, [P39]'s crediting path is not
+wired and every operator would need a manual sweep forever.
 
 THEN the engine, IN THIS ORDER, and the order is the point: agent/rpc_engine.py
 is imported by NOTHING but its own tests, so phase 4 (packaging the binary) would

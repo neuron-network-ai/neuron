@@ -354,6 +354,36 @@ recorded as owning it. No `old_signature`, no register secret, one click.
 **Still open:** the fix touches the packaged UI, which the desktop app serves from its own
 bundle, so it needs a rebuild before any operator sees it.
 
+**EXECUTED ON THE LIVE NETWORK, 2026-08-19 09:07:23** — the first successful claim in this
+project's history, after 65 sessions in which the count was zero:
+
+```
+neuron.ui node agent-optinovate-6ff49d claimed by the signed-in account
+          (address unchanged: 0x29772e94d9D31287C10032Fd9dF2b3C4E9af7ff2)
+```
+
+One click, no wallet extension, no signature prompt, and the payout address is byte-identical
+before and after — which is the whole design: the claim records an owner, it does not move
+money. `owner_wallet_id` on that node is no longer null.
+
+**And the accrued balance was swept separately, because recording an owner does not move what
+was already earned.** `coordinator/claim_node_earnings.py` on the VM, dry run first:
+
+  * `agent-optinovate-7fc2ff` -> **26.39 NRN**. This is the orphan the reinstall created. Nobody
+    could ever have signed in as it; without the sweep that NRN was simply gone, and the only
+    reason it was findable is that this session happened to still know the id.
+  * `agent-optinovate-6ff49d` -> **35.82 NRN** (grown from 33.49 while the fix was being built).
+
+62.21 NRN recovered, wallet 391.39 -> 453.60, supply invariant `1000000000.0000001` verified
+intact after each, DB backed up before each, both appended to `claim_log.json`. `total_earned`
+correctly did NOT fall on the node rows — the network really did distribute that NRN for
+compute, and a later transfer does not un-earn it.
+
+**What this changes for the next node, and it is the point of the whole entry:** a claimed node
+credits its owner's wallet from here on ([P39]), so the sweep is a one-time repair rather than a
+recurring chore. The check that proves it is cheap — watch the node's own balance stay at 0.0
+while the wallet rises.
+
 **FIXED (2026-08-19, 0.20.6) — and the fix is that ownership stops depending on a wallet at
 all.** The founder's words, after the claim failed on their own machine: *"I asked you to
 assign node with github or google ID of a user, not this."* That is the correct requirement and
