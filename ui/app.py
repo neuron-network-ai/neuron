@@ -117,6 +117,12 @@ class ChatBody(BaseModel):
     prompt: str
     max_tokens: int = 128
     use_rag: bool = False       # Session 15: retrieve current web context first
+    # Send THIS request over the node chain even when this machine could answer it itself.
+    # Per-request, unlike NEURON_FORCE_NETWORK, which is a process-wide env var the operator
+    # has to restart the app to set — invisible from the product and therefore useless to the
+    # person who actually wants to see what the network does. Asked for directly: "I want to
+    # see the speed of network".
+    use_network: bool = False
     conversation_id: str | None = None   # None -> a new conversation is created server-side
 
 
@@ -652,6 +658,7 @@ def network():
 # Chat — stream tokens produced by the node chain (SSE for the browser)
 # --------------------------------------------------------------------------- #
 def _drive(prompt: str, max_new: int, wallet_id: str, use_rag: bool = False,
+           use_network: bool = False,
           conversation_id: str | None = None):
     # Input moderation gate (Workstream A) — checked on the RAW user prompt, before RAG
     # augmentation and before anything is dispatched to the node chain. This is the driver
@@ -711,7 +718,11 @@ def _drive(prompt: str, max_new: int, wallet_id: str, use_rag: bool = False,
     # Serve the biggest model THIS machine can hold, which is usually larger than the one the
     # network serves (that is capped by its weakest member). Falls back to the network's model,
     # then to the chain.
-    local_model = None if FORCE_NETWORK else local_gguf.best_local_model(common.MODEL_ID)
+    # `use_network` is the per-request form of the same override. Either one sends this
+    # request down the chain; neither changes the default, because local-first is still the
+    # right tiering for a model that fits.
+    local_model = (None if (FORCE_NETWORK or use_network)
+                   else local_gguf.best_local_model(common.MODEL_ID))
     if local_model:
         events = local_gguf.stream(messages, max_new, local_model,
                                    coordinator=COORDINATOR, wallet_id=wallet_id)
@@ -792,7 +803,8 @@ def chat(body: ChatBody, request: Request):
                                 "code": "login_required"})
         return StreamingResponse(_login_required(), media_type="text/event-stream")
     return StreamingResponse(
-        _drive(prompt, body.max_tokens, wallet_id, body.use_rag, body.conversation_id),
+        _drive(prompt, body.max_tokens, wallet_id, body.use_rag, body.use_network,
+               body.conversation_id),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                  "Connection": "keep-alive"},

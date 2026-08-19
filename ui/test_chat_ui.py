@@ -254,6 +254,17 @@ def main():
     # eth_requestAccounts, and it appears earlier in the file.
     _claim_fn = SRC[SRC.index("async function runNodeClaim(setStatus)"):]
     _claim_fn = _claim_fn[:_claim_fn.index("\n}\n")]
+    # The network had to be SEEABLE. Until now the only way to send a request down the chain
+    # was NEURON_FORCE_NETWORK, a process-wide env var needing an app restart — invisible from
+    # the product, so the one number that says what the network does could not be looked at by
+    # the person who owns it. Worse, that flag was honoured in only one of the two dispatch
+    # paths ([P54]), so the figure it produced was the LOCAL engine's, ~3x too good.
+    check("the page can send a single request over the network",
+          'id="usenet"' in SRC and "use_network:useNetwork" in SRC)
+    check("...as a per-request choice, not a new default",
+          "const useNetwork" in SRC and 'checked id="usenet"' not in SRC,
+          "local-first is still the right tiering for a model that fits")
+
     check("the claim tries the ACCOUNT before it ever mentions a wallet",
           '"/node/claim"' in _claim_fn
           and _claim_fn.index('"/node/claim"') < _claim_fn.index('eth_requestAccounts'))

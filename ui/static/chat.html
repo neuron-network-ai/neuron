@@ -291,7 +291,7 @@
           <button id="send">Send</button>
         </div>
         <div class="blocked" id="blocked" hidden></div>
-        <div class="foothint" id="hint"><label style="cursor:pointer"><input type="checkbox" id="rag"> 🌐 Web search — answer with current info</label> &nbsp;·&nbsp; Cost is metered by response length, shown after each reply. NRN has no cash value.</div>
+        <div class="foothint" id="hint"><label style="cursor:pointer"><input type="checkbox" id="rag"> 🌐 Web search — answer with current info</label> &nbsp;·&nbsp; <label style="cursor:pointer" title="Answer on the node network instead of this machine. Slower — a distributed pipeline always is — but it is what runs models this computer cannot hold."><input type="checkbox" id="usenet"> ⛓ Use the network</label> &nbsp;·&nbsp; Cost is metered by response length, shown after each reply. NRN has no cash value.</div>
       </div>
     </footer>
   </div>
@@ -1154,6 +1154,10 @@ async function sendPrompt(prompt, isRegenerate){
   setBusy(true);
   lastUserPrompt = prompt;
   const useRag = $("#rag").checked;
+  // Per-request, so the network can be SEEN without restarting the app with an env var set.
+  // Local-first is still the default: this is a switch a person flips to watch the chain work,
+  // and the reply's own footer already reports which path answered and at what tok/s.
+  const useNetwork = $("#usenet") ? $("#usenet").checked : false;
   if(!isRegenerate) addMsg("user","you").textContent = prompt;
   const body = addMsg("bot","neuron");
   let meta = null, gotToken = false, rawText = "", reroutes = 0, shownError = false;
@@ -1165,6 +1169,7 @@ async function sendPrompt(prompt, isRegenerate){
       method:"POST", headers:{"Content-Type":"application/json"},
       signal: currentController.signal,
       body: JSON.stringify({prompt, max_tokens:MAX_TOKENS, use_rag:useRag,
+                            use_network:useNetwork,
                             conversation_id: currentConversationId})
     });
     const reader = res.body.getReader();
