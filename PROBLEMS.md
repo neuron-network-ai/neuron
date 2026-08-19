@@ -307,6 +307,99 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
 
 ## Problems & risks
 
+### [P57] 🔴 The network path is 2.18 tok/s, and two thirds of that is memory bandwidth nobody can optimise away (2026-08-20)
+
+**Measured on the live two-machine chain the day [P55] was fixed**, first honest end-to-end
+figures with the network actually returning correct answers: **2.18 tok/s, 119 tokens,
+0.1470 NRN**. That is **459 ms per token**, and it decomposes:
+
+| term | cost | share |
+|---|---|---|
+| driver stage, 10 layers @ 9.67 ms/layer | 97 ms | 21% |
+| Pavilion stage, 18 layers @ 11.67 ms/layer | 210 ms | 46% |
+| network round trip (through the relay) | ~152 ms | 33% |
+
+**The compute two thirds is a MEMORY BANDWIDTH wall, not a CPU one, and that is the finding.**
+This PC streams **36.9 GB/s** (measured: 256 MB fp32 reduction, best of 5). A Qwen2.5-1.5B
+decoder layer at fp32 is **187.2 MB of weights**, and decode at batch 1 reads every byte of
+every layer for every token:
+
+| storage | per layer | whole model per token | bandwidth floor |
+|---|---|---|---|
+| fp32 (today) | 187.2 MB | 5.24 GB | 142 ms -> **7.0 tok/s** |
+| q4_k_m | 25.7 MB | 0.72 GB | 19.5 ms -> 51.3 tok/s |
+
+So **7.0 tok/s is the hard ceiling of the PyTorch fp32 path on this machine even with a perfect
+implementation and no network at all.** Measured local PyTorch is 3.09 tok/s = 44% of that
+floor; measured local llama.cpp q4_k_m is 32.11 tok/s = 63% of ITS floor. The 8.7x between the
+two engines is not implementation quality. **It is 7.3x fewer bytes crossing the memory bus.**
+
+**Which settles what is and is not worth doing, with numbers rather than intuition.**
+
+Worth doing:
+  * **quantization is the only lever on the 67% that is compute.** Nothing else touches it. That
+    reframes [P30]'s engine work: it is not an optimisation, it is the only one available.
+  * **the relay detour is the only lever available for free.** See below.
+
+NOT worth doing, each ruled out by measurement:
+  * **more threads / more cores** — bandwidth-bound. 16 cores here give 9.67 ms/layer against
+    the Pavilion's 4 cores at 11.67. A 4x core advantage buys 1.2x, because neither machine is
+    waiting on arithmetic.
+  * **`NEURON_WEIGHT_DTYPE=fp16`** — halves STORED bytes, but `CastLinear` materialises fp32 on
+    every forward and its own docstring says the cast is amortised across a batch. At batch 1
+    there is no batch to amortise across, and [P2] already measured half-precision compute ~8x
+    slower on these CPUs. A RAM lever, not a speed lever, and it will read like one to the next
+    person who tries it.
+  * **the wire codec (i8h/f16)** — the 152 ms is latency, not bandwidth. A hidden state is
+    `[1,1,1536]` fp32 = 6 KB. There is nothing to compress that matters.
+  * **rebalancing layers between the two nodes** — 9.67 vs 11.67 ms/layer is a 20% spread, so
+    moving a layer changes the SUM by ~2 ms. The coordinator's `/network/plan` reports
+    `speedup_vs_equal: 1.077`, and that is a THROUGHPUT figure (bottleneck = max stage) which
+    does not apply to single-answer latency (= sum of stages) at all. Reading it as a latency
+    win is a trap.
+  * **adding a third machine** — strictly slower. Another hop, and decode stays sequential.
+
+**THE RELAY DETOUR, and it is free to fix.** Both machines sit in the same house and are
+directly reachable from each other, yet every activation goes to a 1 GB Oracle free-tier VM in
+Amsterdam — which is also the coordinator — and back. `coordinator/main.py:574` does it:
+`if body.behind_nat and config.RELAY_ENABLED: tailscale_ip, port = config.RELAY_HOST, relay_port`,
+and `behind_nat` **defaults to True** (`agent/agent.py:651`).
+
+Measured with `tools/bench_hop.py` (read-only, a `config` probe answered before any model work):
+
+| path | round trip |
+|---|---|
+| **this PC's OWN node, dialled through the relay** | **88 ms** median, 124 max |
+| Pavilion via relay | 49.5 ms median, 75 max |
+| Pavilion direct, LAN `192.168.1.11:50999` | 5.3 ms |
+| Pavilion direct, Tailscale `100.79.125.112:50999` | 5.1 ms |
+
+**The first row is the whole argument.** That is this machine talking to a process on itself,
+costing 88 ms, because it published a relay address. And these are the FLOOR: a config probe is
+a few bytes where a real `act` carries 6 KB each way through a 1 GB shared VM.
+
+The relay also looks like the source of the drops — the 30 s `TimeoutError` that turned one
+reply into 0.23 tok/s, and [P52]'s finding that the encrypted hop does not survive the relay at
+all (`router.SECURE_HOP_SINCE = (0, 99, 0)` withholds every grant network-wide because of it).
+
+**The trade-off, stated because it is a product decision and not an optimisation.**
+`--no-relay` publishes a machine's own Tailscale/LAN address, so only peers on the same tailnet
+can reach it. Correct for two machines in one house; wrong the day a stranger joins, which is
+the entire point of the project. The durable fix is for the coordinator to publish BOTH and let
+a driver prefer the direct address with a short fallback to the relay — that keeps strangers
+working and costs LAN peers nothing. Not done here, because the coordinator is on the VM and
+deploying to it needs a key passphrase only the founder can enter.
+
+**Where this lands, honestly.** Relay fix: 459 -> ~330 ms/token, about **3 tok/s**. Plus the
+[P30] engine: plausibly 5-6 tok/s. Local llama.cpp on one machine: 32.11 tok/s, today, free,
+and already the default. **Distribution remains a capacity feature, never a speed one** — and
+TOKENOMICS 11.6's "answers under 30 s" needs ~4.3 tok/s for a 128-token reply, which only
+quantization reaches.
+
+Related: [P30] (the engine, now the only compute lever), [P1] (the usability floor), [P52] (the
+relay breaks the encrypted hop), [P2] (half precision is slower on these CPUs), [P55] (fixed the
+correctness that made these the first measurable numbers).
+
 ### [P56] 🔴 Proof-of-compute certifies the PROBE path, and users are served by a different one (2026-08-19)
 
 **Filed out of [P55], and it is the larger half of it.** For a day the Pavilion returned garbage
