@@ -307,6 +307,135 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
 
 ## Problems & risks
 
+### [P54] 🟢 [P52] shipped, was tested, was proven against a real relay — and had never once executed (2026-08-19)
+
+**The network path raised `NameError` on every single request, and nobody knew for a day.**
+
+```
+503  {"code":"chain_unavailable",
+      "message":"NameError: name 'wire_crypto' is not defined"}
+```
+
+`neuron_driver._connect()` calls `wire_crypto.client_handshake(...)` and catches
+`wire_crypto.HandshakeError`. **Nothing imported the name.** `base64` was added on the line
+above it for the grant decode; the module itself never was. So the first hop the coordinator
+minted a grant for died — and since the coordinator mints one for every hop, that is every
+request, from the moment [P52] shipped.
+
+**Why a day passed with the product's core path dead.** Local-first execution answers almost
+everything on the user's own machine (`ui/app.py` prefers `best_local_model()`, [P29]). The
+driver path therefore essentially never runs on a machine that can hold the model — so the
+encryption shipped, passed its tests, was demonstrated against a byte-recording relay, and was
+never executed by the product even once. **Every token the founder had ever seen in the chat
+window came from their own PC.**
+
+**Four registrations were missing for one new package, and each failed silently in its own
+way.** `security/` was created by [P52]. Nothing in this repo checks that a new top-level
+package is wired into all the places that must carry it:
+
+| where | what happened | how it presented |
+|---|---|---|
+| `neuron_driver.py` | no import at all | `NameError` at runtime, only on the path nobody exercised |
+| `coordinator/deploy.sh` `FILES` | `security/` not shipped | live coordinator in a **systemd restart loop**, `/status` 502, whole network unroutable — while `systemctl is-active` answered *"activating"* |
+| `coordinator/requirements.txt` | no `cryptography` | same outage, one layer down, after the first was fixed |
+| `packaging/neuron-agent.spec` `hiddenimports` | package not frozen | a build that succeeds and an app whose NETWORK path fails while local answers keep working, so every smoke test passes |
+
+**The lesson is not "remember four places".** It is that a missing registration fails at RUNTIME
+on a path nobody exercises, and that is indistinguishable from working. Three of the four were
+found only by deliberately forcing a request onto the network.
+
+**And the instrument for doing that was itself broken**, which is the sharpest part.
+`NEURON_FORCE_NETWORK=1` was honoured in `ui/app.py:_drive` and **not** in
+`api/openai_compat.py`, which branches straight on `local_gguf.available()`. So the first
+attempt to measure end-to-end network speed silently measured the LOCAL engine and reported
+**4.97 tok/s** — about 3x too good. A broken measuring instrument does not look like a failure;
+it looks like good news. It was caught only because the coordinator's `requests_served` counter
+did not move.
+
+**Fixed:**
+  * the import, and `test_encrypted_hop_is_reachable.py` asserts by PARSING rather than
+    importing that every module using `wire_crypto` imports it, that the spec declares the
+    package, that `deploy.sh` ships it and that `requirements.txt` pins `cryptography`;
+  * `local_gguf.network_forced()` — the override now lives where every caller that asks "can
+    this machine serve it itself" inherits it, and outranks `NEURON_LOCAL_MODEL`, which answers
+    *which* model to run locally and must not smuggle a request back onto this machine. 13 cases
+    in `engine/test_force_network.py`;
+  * shipped as **0.20.7**. 0.20.6 and everything before it have a network path that cannot
+    answer, so this is the first installer worth giving to anyone.
+
+**Then the hop failed for a second, unrelated reason, and it is the other half of [P52]'s
+rolling upgrade.** With the import fixed, every request to `node-c-pavilion` (0.20.3) died with
+*"socket closed during handshake"*. [P52] handled old-coordinator/new-node: no grant arrives,
+the node accepts plaintext, nothing breaks. **The reverse was never handled** — a NEW
+coordinator mints a grant for an OLD node, the driver opens a handshake the node has never
+heard of, the node closes the socket, and the driver correctly treats that as an identity
+failure and reroutes. With no replica to reroute to, the request simply fails. A version
+mismatch wearing the costume of a network fault, which the coordinator had `agent_version` on
+hand to avoid. `router._speaks_secure_hop` now withholds the grant below 0.20.5, and an
+UNKNOWN version counts as too old — the node that will not say what it runs is the one not to
+assume about.
+
+**Measured after both fixes, with the coordinator's counter as the witness:** `requests_served`
+84 → 85, **1.36 tok/s** end to end. That is the first honest network number this project has
+ever had, because it is the first one taken while the network could actually answer.
+
+Related: [P52] (the channel), [P29] (local-first, which hid this), [P51] (a failure with no
+error, same shape one layer up), [P46] (a build that verifies itself and an install that does
+not).
+
+### [P55] 🔴 The network returns GARBAGE and bills for it, while proof-of-compute reports it healthy (2026-08-19)
+
+**Same model, same prompt, two paths, measured minutes apart:**
+
+| path | output | tokens | cost |
+|---|---|---|---|
+| local (`engine/local_gguf`) | `Hello! How can I assist you today?` | 9 | 0.0000 NRN |
+| network (driver + node-c-pavilion) | `  1  2   3` then whitespace to the cap | 128 | **0.1330 NRN** |
+
+The model and tokenizer are fine — the local path proves that in the same process. **The
+distributed pipeline is producing wrong output**, running to the 128-token cap emitting
+whitespace, and every request is billed for it. A user gets nonsense and pays ~0.13 NRN.
+
+**What makes it worse than a wrong answer.** `challenges_passed` is 5662/4 on the Pavilion and
+508/0 on the driver. **Proof-of-compute — the mechanism whose entire purpose is catching a node
+that computes incorrectly — reports both nodes healthy while the chain they form returns
+garbage.** Whatever the challenge checks, it does not check the thing that matters. That is a
+bigger finding than the corruption itself: the reputation system, the emission that pays on it,
+and the operator dashboards are all downstream of a signal that just failed silently.
+
+**Ruled out, by measurement rather than reasoning:**
+
+  * **the wire** — `common.py` and `wire_codec.py` are byte-identical on both machines
+    (same md5), and neither has changed since before the running build;
+  * **weight dtype** — both nodes report `fp32` to the coordinator, and the slice on disk is
+    BF16, which is simply how Qwen2.5 ships;
+  * **layer ranges** — assigned and reported agree on both nodes: 0-9 and 10-27, no gap;
+  * **the model id** — both report `Qwen/Qwen2.5-1.5B-Instruct`;
+  * **encryption** — grants are currently withheld ([P52] hold), so this hop is plaintext, the
+    same wire that worked earlier today.
+
+**It is a REGRESSION, not a standing flaw.** Earlier the same day the same two machines answered
+coherently over the network twice: *"Sure, I'm ready to help with any questions you have."*
+(1.36 tok/s) and *"Hello! How can I assist you today?"* (1.26 tok/s). Between those and this,
+the Pavilion re-downloaded its slice during a model migration and now serves 10-27 out of a
+**full-model** slice — `neuron_slice.json` records `layer_start: 0, layer_end: 27` and all 338
+tensors are present. A node serving a sub-range out of a superset slice is the one condition
+that changed and is not covered by any test.
+
+**The next step is a bisect, not more inspection.** Point the driver at a `node_server` running
+locally on the driver's own machine for layers 10-27, and compare:
+  * coherent -> the Pavilion's slice/compute is at fault, and the full-model-slice path is the
+    first suspect;
+  * still garbage -> the driver's own half (embed, layers 0-9, `lm_head`, or the norm placement
+    when there are exactly two stages) is at fault.
+
+**Containment while it is unfixed:** local-first is the default and the "Use the network"
+toggle is off unless ticked, so an ordinary user gets the correct local answer. Anyone who ticks
+it gets nonsense and is charged. That is not acceptable for longer than it takes to bisect.
+
+Related: [P16] (proof-of-compute), [P30] (the engine work this blocks), [P42] (a slice that
+serves a range it does not fully hold — the near neighbour of this).
+
 ### [P53] 🟢 A node that bound its own payout key could never be claimed through the UI — found on the first real claim, fixed (2026-08-19)
 
 **The first genuine execution of connect → sign → bind failed, and it fails for every node that
