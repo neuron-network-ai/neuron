@@ -51,6 +51,48 @@ is needed. **The verifier must be restarted for the stage-1 change to take effec
   answered from the database at all. New databases only; the live one predates the line and
   needs `--seed`.
 
+## v0.20.9
+
+**Network chat gives correct answers again** ([P55]). Ticking "Use the network" returned
+`  1  2   3` and whitespace to the token cap, every time, and billed ~0.13 NRN for it. The last
+node in the chain was running the right layers **with the final normalisation left off**, and
+the driver was applying the output head to that.
+
+A node picks its role from the `config` message it is handed, because a machine holding the
+model's final layer is "the last stage" for every question anyone can ask it — including a
+verifier challenging some other range. That choice was made by asking whether the message
+carried an `s1`; the verifier sends one, so `s1` present meant "probe: run the layers, skip the
+norm". **The driver sends `s1` too**, and in a TWO-machine chain it talks to the last node
+directly, so every real request was served as a challenge. Three-machine chains were unaffected
+(the middle node forwards a different message), which is why the same two machines had answered
+coherently hours earlier.
+
+Fixed at both ends, and **neither end needs the other**:
+
+- `neuron_driver` sends `s1` **only to a middle relay**, which is the only hop that has ever
+  read it. That alone repairs the live network with **no node update**: a node still on 0.20.8
+  picks its last-stage branch with `"s1" not in msg`, which a config without `s1` satisfies.
+- `node_server._is_range_probe` reads what `s1` MEANS when an older driver does send it:
+  `s1 == s2` is the junction between two stages of a real chain, `s1 < s2` is a range being
+  challenged. `stage: "last"` and `probe: true` now state the intent outright.
+
+The driver and the nodes update on their owners' schedules, never together, so a fix needing
+both would have left the network broken until the slowest volunteer restarted.
+
+Verified end to end on real weights over a real socket: the node's reply is now bit-identical to
+`layers[19:]` **with** the norm, where before it was bit-identical to the same layers without it.
+
+- **Nothing caught this, and the reason generalises.** `selftest_shard` (bit-exact),
+  `test_batching`, `test_short_chain` and proof-of-compute were all green throughout — every one
+  of them tests a component or a message shape, and none of them ever drove
+  `node_server.serve()` with the message `neuron_driver` actually sends.
+  `agent/test_last_stage_is_not_a_probe.py` now does, for all five real callers, and fails on
+  the pre-fix code.
+- **Proof-of-compute could not have seen it and still cannot.** The probe path is the only path
+  a challenge exercises, so the node it certified healthy was answering the challenge's question
+  correctly while answering users with the challenge's computation. Filed as [P56]; not fixed
+  here.
+
 ## v0.20.4
 
 Same release as 0.20.3 plus the wallet work that landed after it was built. Cut as a new

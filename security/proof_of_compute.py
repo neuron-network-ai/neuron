@@ -150,7 +150,11 @@ def challenge_middle_node(host, port, s1, s2, inp, timeout=CHALLENGE_TIMEOUT_S):
     loudly instead of silently passing a challenge for a range it doesn't really hold."""
     s = socket.create_connection((host, port), timeout=timeout)
     try:
-        common.send_msg(s, {"type": "config", "s1": s1, "s2": s2})
+        # `probe: True` says outright what `s1`/`s2` only implied. A node below 0.20.9 ignores
+        # the key and reads the range instead (s1 < s2), which means the same thing -- see
+        # node_server._is_range_probe and [P55], where the inference went the other way and
+        # sent real pipeline traffic down this path.
+        common.send_msg(s, {"type": "config", "s1": s1, "s2": s2, "probe": True})
         ack = common.recv_msg(s)
         if not ack.get("ok"):
             err = ack.get("error")

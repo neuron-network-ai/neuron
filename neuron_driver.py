@@ -272,13 +272,29 @@ class _Driver:
             # might predate wire_codec -- and offers the codecs we can decode. The ack names
             # the peer's pick, or omits it, in which case codec stays None and this
             # connection keeps using the legacy format for the whole request.
-            cfg = {"type": "config", "s1": self.s1, "s2": chain["s2"],
+            # `stage` states this hop's role outright instead of leaving the far end to infer
+            # it from the shape of the message. Inference is what [P55] cost: `node_server`
+            # read the PRESENCE of `s1` as "a verifier is probing me", which is true of the
+            # verifier and was equally true of this line, so in a two-stage chain every real
+            # request came back without the final norm and the head ran on it.
+            cfg = {"type": "config", "s2": chain["s2"],
+                   "stage": "middle" if chain["host_b"] else "last",
                    "wire": wire_codec.preference(model.config.hidden_size)}
             # host_b present -> the next hop relays to a further stage (node_c's role); absent
             # -> it IS the final stage and returns the normed hidden itself (node_b's role).
             # Sending host_b=None would satisfy `"host_b" in msg` at the far end and send it
             # looking for a hop that does not exist, so the keys are omitted, not nulled.
             if chain["host_b"]:
+                # `s1` is where THIS driver's own layers stop, and only a middle relay has
+                # anything to do with it (`layers[s1:s2]`). A last stage has never read it --
+                # its own start is implied by `s2` -- so sending it there was a field with no
+                # meaning to its recipient, and the ambiguity [P55] turned on existed only
+                # because it was sent anyway. Omitted rather than merely disambiguated,
+                # because that is what repairs the live network WITHOUT waiting for every node
+                # to update: a node on any build, including one that predates `stage`, reads a
+                # config with no `s1` as real last-stage traffic. `_is_range_probe` on the node
+                # covers the other direction, for drivers older than this line.
+                cfg["s1"] = self.s1
                 cfg["host_b"], cfg["port_b"] = chain["host_b"], chain["port_b"]
                 # The middle node cannot mint its own grant for the last hop -- it does not
                 # hold that node's token -- so the driver carries it down. Sealed to the last

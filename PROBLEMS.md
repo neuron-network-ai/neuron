@@ -307,6 +307,45 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
 
 ## Problems & risks
 
+### [P56] 🔴 Proof-of-compute certifies the PROBE path, and users are served by a different one (2026-08-19)
+
+**Filed out of [P55], and it is the larger half of it.** For a day the Pavilion returned garbage
+to every real request while `challenges_passed` stood at **5662/4**. That number was not broken.
+It was a correct measurement of a question nobody was asking.
+
+`security/proof_of_compute.py` challenges a node through `challenge_middle_node` (the PROBE
+role) or `challenge_node` (the LAST role on a node it believes is last). A real request arrives
+through `neuron_driver` with a different message, and `node_server.serve()` **selects a
+different code path from it**. In [P55] those paths ran the same layers and differed only by the
+final norm — so the verifier's answer was right, the user's answer was wrong, and no signal
+anywhere connected the two.
+
+**Everything downstream of that signal inherits the gap:**
+
+  * reputation, and the probation/promotion machinery that reads it;
+  * emission — availability hours are paid on a PASSING challenge, so the network paid this
+    node for hours in which it served nothing usable;
+  * the operator dashboards, which showed a healthy node because it was healthy at the thing
+    being measured.
+
+**What would actually close it.** The verifier has to exercise the path a USER's request takes,
+not a path adjacent to it. Concretely: challenge through the same `config` message
+`neuron_driver._connect` sends, so the node makes the same role decision it makes in production,
+and compare against `common.last_stage`/`mid_stage` accordingly. The challenge inputs are
+already deterministic and seeded; what is missing is that the request LOOKS like a request.
+
+**Why this is not simply "add a test".** A test pins today's code. This is a claim the network
+makes to strangers — *we detect a node that computes incorrectly* — and it is the mechanism
+strangers are asked to trust before lending their hardware. [P55] is the proof that the claim is
+currently narrower than it sounds: what is detected is a node that computes incorrectly **for
+the verifier**.
+
+**Not fixed here.** [P55]'s fix makes the two paths agree again; it does not make the verifier
+able to notice the next time they diverge.
+
+Related: [P55] (the divergence that exposed this), [P47] (a node the verifier skipped
+entirely, so it could not earn), [P16] (placement, which reads the same reputation signal).
+
 ### [P54] 🟢 [P52] shipped, was tested, was proven against a real relay — and had never once executed (2026-08-19)
 
 **The network path raised `NameError` on every single request, and nobody knew for a day.**
@@ -383,7 +422,7 @@ Related: [P52] (the channel), [P29] (local-first, which hid this), [P51] (a fail
 error, same shape one layer up), [P46] (a build that verifies itself and an install that does
 not).
 
-### [P55] 🔴 The network returns GARBAGE and bills for it, while proof-of-compute reports it healthy (2026-08-19)
+### [P55] 🟢 The network returned GARBAGE and billed for it, while proof-of-compute reported it healthy — the last node was answering a verifier's question (2026-08-19)
 
 **Same model, same prompt, two paths, measured minutes apart:**
 
@@ -457,7 +496,7 @@ implementation — `batching.last_stage_batched` / `run_layers_batched` with a p
 — rather than `common.last_stage`. That is where to look, and it is the only place left.
 
 It also explains why proof-of-compute never noticed: whatever the challenge exercises, it is not
-the batched serve path that real requests take.
+the path that real requests take. Filed as [P56], which outlives this bug.
 
 **The next step is a bisect, not more inspection.** Point the driver at a `node_server` running
 locally on the driver's own machine for layers 10-27, and compare:
@@ -491,12 +530,106 @@ the pre-[P52] `node_server.py` onto a current checkout fails with *"socket close
 — the old serve loop is not compatible with the current driver and `common.py`. Bisecting this
 needs matched pairs (driver and node from the same commit), not a single file swapped.
 
-**Containment while it is unfixed:** local-first is the default and the "Use the network"
-toggle is off unless ticked, so an ordinary user gets the correct local answer. Anyone who ticks
-it gets nonsense and is charged. That is not acceptable for longer than it takes to bisect.
+**Containment while it was unfixed:** local-first is the default and the "Use the network"
+toggle is off unless ticked, so an ordinary user got the correct local answer. Anyone who ticked
+it got nonsense and was charged.
 
-Related: [P16] (proof-of-compute), [P30] (the engine work this blocks), [P42] (a slice that
-serves a range it does not fully hold — the near neighbour of this).
+**FOUND AND FIXED (2026-08-19, 0.20.9). The last node was running the PROBE role — the same
+layers, without the final norm.**
+
+`agent/node_server.py` picks a node's role from the `config` message, and it has to, because
+`is_true_last` asks what the node HOLDS: a machine holding the model's final layer is "true
+last" for every question anyone ever asks it, including a verifier's challenge about some other
+range. [P49] fixed one direction of that by reading the mere PRESENCE of `s1` as "a verifier is
+probing me":
+
+```python
+elif is_true_last and "s1" not in msg:      # LAST stage role
+```
+
+**`neuron_driver._connect` sends `s1` on every config it ever writes.** In a THREE-stage chain
+that config goes to the middle node, which forwards `{"s2", "n", "wire"}` and no `s1`, so the
+last node was reached correctly — which is why the network answered coherently earlier the
+same day. In a TWO-stage chain — driver 0-9, one node 10-27, `host_b` absent, **the shape
+the live network has been running since the re-split** — the driver *is* the previous stage,
+its `s1` goes straight to the last node, and every real request fell into the probe branch:
+
+| what ran | what it computes |
+|---|---|
+| what should have run | `last_stage_batched(model, 10)` = `layers[10:]` **+ `model.model.norm`** |
+| what actually ran | `mid_stage_batched(model, 10, 28)` = `layers[10:]`, **no norm** |
+
+Same layers, same weights, same wire, same cache — which is why every single thing measured
+during the bisect was correct. The driver then applied `lm_head` to an **un-normed** hidden
+state, whose values are several times larger than anything the head has ever seen, and got
+`'  1  2   3  '` and whitespace to the 128-token cap.
+
+**That is the 2358.6965.** Reproduced end to end, real weights, real socket, a node holding
+19-27 driven with the exact config the driver puts on the wire (`s1 == s2 == 19`), seeded input:
+
+| | sum of the returned hidden | max|diff| vs the node's answer |
+|---|---|---|
+| before the fix | **-966.1324** | `layers[19:]` **without** norm: **0.0** |
+| after the fix | **-627.7026** | `layers[19:]` **with** norm: **0.000e+00** |
+
+Bit-exact against the un-normed computation before, bit-exact against the normed one after.
+The 247.09 in the bisect above is this, at the live chain's split point.
+
+**Why proof-of-compute could not see it, and never will have been able to.** The probe path is
+the ONLY path a challenge exercises. The node was answering every challenge perfectly — it
+was answering *real requests* with the challenge's computation. `challenges_passed` 5662/4 was
+not a broken signal; it was a correct signal about a different question. **A verifier that only
+ever asks the probe question cannot certify the serve path.** That is the finding to carry
+forward and it outlives this bug, so it is filed on its own as **[P56]** — this fix makes the
+two paths agree again, it does not make the verifier able to notice the next divergence.
+
+**Fixed in two places, and which one matters depends on which machine you can update.**
+
+**1. The driver stops sending a field its recipient cannot use.** `s1` is where the DRIVER's own
+layers stop, and only a middle relay has ever read it (`layers[s1:s2]`); a last stage's own start
+is implied by `s2`. So `neuron_driver._connect` now sets `s1` **only inside the `host_b`
+branch**. That is the half that repairs the live network **with no node update at all** — a
+Pavilion still running 0.20.8 selects its last-stage branch with `is_true_last and "s1" not in
+msg`, and a config with no `s1` satisfies it. One rebuild on the driver's own machine, and the
+answer is correct against every node already installed.
+
+**2. The node reads what `s1` MEANS rather than whether it is there**
+(`node_server._is_range_probe`), which covers the other direction — drivers already in the field
+that still send it:
+
+  * a **chain junction** has `s1 == s2` — the driver owns `0..s1-1` and the next stage begins
+    at `s2`, and a chain with no gap makes them equal at any depth. Real traffic.
+  * a **challenge** has `s1 < s2` — `challenge_middle_node` asks about a non-empty range.
+  * `stage: "last"` (driver) and `probe: true` (verifier) now state the intent outright, so the
+    next reader does not have to re-derive it.
+
+**Neither half needs the other, and that is deliberate.** The driver and the nodes update on
+their owners' schedules, never together, so a fix that required both would have left the network
+returning garbage until the slowest volunteer restarted. Every combination of old and new on
+either end now answers correctly.
+
+**What actually caught it, and what did not.** `selftest_shard.py` (bit-exact), `test_batching`
+(batched == unbatched), `test_short_chain` (13 pass) and proof-of-compute were all green
+throughout, because every one of them tests a COMPONENT or a MESSAGE SHAPE. Nothing anywhere
+drove `node_server.serve()` with the message `neuron_driver` really sends. That is now
+`agent/test_last_stage_is_not_a_probe.py` (26 assertions): each real caller's verbatim config
+through a live `serve()`, asserting which role it selects, for a 10-27 node, a full-model node
+and a mid-range node, with and without the new explicit fields — plus a check against the
+literal 0.20.8 rule, since the machine that runs it cannot be imported, and a check that the two
+roles differ by the norm, so picking wrong is a wrong answer and not a rounding error. It fails
+on the pre-fix code with exactly the failures that describe [P55].
+
+**The generalisable lesson, and it is the third time this project has paid for it.** [P54] was
+a network path nothing exercised. [P47] was a driver nothing verified. This is a role nothing
+asserted. **Every one of them was a seam between two components, each correct, tested only from
+one side.** A test that sends a component the message its real caller sends is worth more than
+a test that sends it a message the test author designed.
+
+Related: [P56] (proof-of-compute measured the wrong path and could not have known — filed out
+of this), [P49] (the other direction of exactly this discriminator),
+[P54] (a path nothing exercised),
+[P30] (the engine work this blocked), [P42] (a slice that serves a range it does not fully
+hold — the near neighbour of this).
 
 ### [P53] 🟢 A node that bound its own payout key could never be claimed through the UI — found on the first real claim, fixed (2026-08-19)
 

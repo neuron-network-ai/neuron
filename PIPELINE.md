@@ -54,6 +54,18 @@ returns an **un-normed** hidden state. The driver reads only `resp["hidden"]`
 (`neuron_driver.py:278`), applies `lm_head`, and streams **fluent nonsense**. No exception is
 raised anywhere. A naive 4th node would not crash the network — it would quietly corrupt it.
 
+> **This happened, and it did not need a 4th node** ([P55], 2026-08-19). It needed TWO: the
+> driver holding 0-9 and one node holding 10-27. The driver's config carried an `s1`, the
+> last-stage branch had been narrowed to `"s1" not in msg` to keep a full-model node from
+> answering a verifier's probe ([P49]), and so every real request fell through to PROBE and came
+> back un-normed. The driver applied `lm_head` and streamed exactly the fluent nonsense
+> described above, for a day, billed at ~0.13 NRN a request, while proof-of-compute — which
+> only exercises the probe path — reported the node healthy on 5662 passed challenges. The
+> paragraph above was written before it happened and describes it precisely. **Declaring the
+> role is not a nicety for N-hop chains; the inference was already wrong at N=2.** `stage` and
+> `probe` are now on the wire for that reason, which is a down payment on the `role` field this
+> design proposes.
+
 **2. `s2` means two different things.** In the driver's config it is *the last stage's start*
 (`node_a.py:123` returns `last["layers"][0]`). Inside a middle it is *that middle's own
 exclusive end* (`node_server.py:161`, `:206`). Those are the same number **only when there is

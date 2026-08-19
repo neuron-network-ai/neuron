@@ -117,6 +117,52 @@ def _layers_in_slice(slice_dir):
     idx = _layer_set(slice_dir)
     return (min(idx), max(idx)) if idx else None
 
+
+def _is_range_probe(msg):
+    """Is this `config` a verifier challenging a RANGE, or real last-stage pipeline traffic?
+
+    **This is the discriminator [P55] turned on, and getting it wrong is silent both ways.**
+    A node holding the model's final layer is `is_true_last` for every question it is ever
+    asked, so the two callers have to be told apart from the message itself:
+
+      * the LAST stage of a real request must run `layers[s2:]` **and the final norm**;
+      * a verifier's probe must run only `layers[s1:s2]`, with **no norm** -- normalising an
+        answer nobody asked to be normalised is [P49]'s `max_err 28.6`.
+
+    The two are separated by what `s1` MEANS, not by whether it is present:
+
+    | caller | sends | verdict |
+    |---|---|---|
+    | `neuron_driver._connect`, 2-stage chain, 0.20.9+ | `s2`, `stage: "last"`, `wire` | traffic, said outright |
+    | the same, from a driver already in the field | `s1`, `s2`, `wire` | traffic -- **s1 == s2**: the driver owns `0..s1-1`, the last stage begins at `s2`, and a chain with no gap makes them equal at any depth |
+    | a middle relay passing traffic on | `s2`, `n`, `wire` | traffic -- no `s1` |
+    | `proof_of_compute.challenge_node` | `s2`, `n` | traffic (it scores the last stage) -- no `s1` |
+    | `proof_of_compute.challenge_middle_node` | `s1`, `s2`, `probe: true` | probe -- **s1 < s2**, a non-empty range to challenge |
+
+    [P49] used mere PRESENCE of `s1` to mean "probe", which is true of the verifier and was also
+    true of the driver in a two-stage chain -- the exact topology the live network runs. So
+    every real request to the last node fell into the probe branch, came back WITHOUT the
+    final norm, and the driver applied `lm_head` to an un-normed hidden state: `'  1  2   3'`
+    and whitespace to the token cap, billed in full, while proof-of-compute -- which only ever
+    exercises the probe path -- reported the node perfectly healthy. See [P55], and [P56] for
+    the half of it a fix cannot close.
+
+    **This function is the half of the fix that covers drivers already in the field.** The
+    other half is that `neuron_driver` no longer sends `s1` to a hop that never reads it, which
+    is what repairs a node too old to have this function at all. Neither half needs the other,
+    deliberately: a driver and the machines it dials are updated by different people on
+    different days, so a fix requiring both would leave the network wrong until the slowest one
+    restarted.
+    """
+    if msg.get("probe"):
+        return True                      # a verifier that says so outright (0.20.9+)
+    if msg.get("stage") == "last":
+        return False                     # a driver that says so outright (0.20.9+)
+    s1 = msg.get("s1")
+    if s1 is None:
+        return False                     # middle relay and challenge_node both omit it
+    return s1 != msg.get("s2")           # a real range to challenge, not a chain junction
+
 # Is this machine in the middle of serving somebody? Used by the auto-updater, which must never
 # replace the app underneath a request in flight -- a dropped hop shows up to the driver as
 # "socket closed mid-message" and the whole inference fails, for every user on that chain.
@@ -479,23 +525,27 @@ class NodeServer:
                         bconn.settimeout(common.HOT_TIMEOUT_S)
                         common.send_msg(conn, {"ok": True, "layers": self.n, "s1": s1, "s2": s2,
                                                **ack_wire})
-                    elif is_true_last and "s1" not in msg:    # LAST stage role (real pipeline traffic)
-                        # `and "s1" not in msg` is load-bearing, and it is what let the driver be
-                        # unpayable for its entire existence ([P47]). `is_true_last` asks what
+                    elif is_true_last and not _is_range_probe(msg):   # LAST stage role (real pipeline traffic)
+                        # `not _is_range_probe(msg)` is load-bearing in BOTH directions, and
+                        # each direction has already been a live outage. `is_true_last` asks what
                         # THIS node holds, never what it was ASKED -- so a machine holding the
                         # whole model (0-27 of 28) is "true last" for every question, including a
-                        # verifier's probe about layers 0-9. It then ran `last_stage(model, 10)`
-                        # = layers[10:] + the final norm, and answered a question nobody asked:
-                        # deterministic, confident, and wrong by max_err 28.6 -- the unexplained
-                        # figure in [P47], live again on 2026-08-17.
+                        # verifier's probe about layers 0-9. Taking this branch for that probe ran
+                        # `last_stage(model, 10)` = layers[10:] + the final norm and answered a
+                        # question nobody asked: deterministic, confident, and wrong by
+                        # max_err 28.6 -- the unexplained figure in [P47], live again 2026-08-17.
                         #
-                        # `s1` is the discriminator because the two callers genuinely differ, and
-                        # not by convention: real pipeline traffic reaches a last stage from the
-                        # middle relay 12 lines above, which sends {"s2", "n", "wire"} and never
-                        # an `s1` -- there is nothing for it to mean, since the last stage's own
-                        # start is implied by `s2`. `challenge_middle_node` always sends one.
-                        # So the presence of `s1` on a config with no `host_b` can only be a
-                        # verifier asking about a specific range, which is the probe.
+                        # The first fix for that read mere PRESENCE of `s1` as "this is a probe"
+                        # ([P49]). But `neuron_driver._connect` sends `s1` on every config, and in
+                        # a TWO-stage chain -- driver 0-9, one node 10-27, which is what the live
+                        # network runs -- there is no `host_b`, so real pipeline traffic landed in
+                        # the probe branch instead of this one. The node then returned layers
+                        # 10-27 with NO final norm, the driver put `lm_head` on an un-normed
+                        # hidden state, and every network answer was `'  1  2   3'` padded with
+                        # whitespace to the cap and billed at ~0.13 NRN. Proof-of-compute saw
+                        # nothing wrong because the probe path is the only path it exercises.
+                        # [P55]. `_is_range_probe` reads what `s1` MEANS instead: a chain junction
+                        # (s1 == s2) is traffic, a non-empty range (s1 < s2) is a challenge.
                         #
                         # A full-model node now answers the probe from its own lo/hi (0-27), the
                         # ack says so, and `challenge_middle_node` raises RangeMismatch: the node
@@ -535,9 +585,10 @@ class NodeServer:
                                                "s2": s2, "holds": [self.lo, self.hi],
                                                **ack_wire})
                     else:
-                        # PROBE role (security/proof_of_compute.py): a config with no host_b,
-                        # on a node whose own range does NOT reach the model's final layer, can
-                        # only mean a verifier challenging this node's layers in isolation --
+                        # PROBE role (security/proof_of_compute.py): a config with no host_b
+                        # that either names a real layer RANGE to challenge (`_is_range_probe`)
+                        # or reaches a node whose own range does NOT include the model's final
+                        # layer can only be a verifier challenging this node in isolation --
                         # calling last_stage() here would be WRONG (and likely crash: this
                         # shard was downloaded without norm/later layers, which stay on the
                         # meta device, uninitialized). Uses OUR OWN self.lo/self.hi, never the

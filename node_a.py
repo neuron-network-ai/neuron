@@ -228,14 +228,20 @@ def _run(idx, prompt, model, tok, s1, s2, host_c, port_c, host_b, port_b,
     # The config itself goes out in the legacy format -- it is the one message whose reader
     # might predate wire_codec, and it is tiny. Its "wire" field is the offer; the ack names
     # the codec the peer picked, or omits it, in which case codec stays None (legacy).
-    cfg = {"type": "config", "s1": s1, "s2": s2,
+    cfg = {"type": "config", "s2": s2, "stage": "middle" if host_b else "last",
            "wire": wire_codec.preference(model.config.hidden_size)}
     # OMIT host_b when there is no hop beyond the next one -- do not send None. The receiver
     # decides its role with `"host_b" in msg` (agent/node_server.py), so a None value still
     # reads as "you are a middle relay" and sends it to socket.create_connection((None, None)).
     # coord_get_chain was widened to accept a 2-stage chain; this path was not, and would have
     # failed exactly there. neuron_driver._connect already builds the config this way.
+    #
+    # `s1` goes with it, and ONLY with it: a middle relay runs `layers[s1:s2]` and needs it; a
+    # last stage has never read it, and receiving it is what made real traffic indistinguishable
+    # from a verifier's probe ([P55]). Same rule as neuron_driver._connect, which is the driver
+    # this one was superseded by -- kept in step so the older path cannot resurrect the bug.
     if host_b:
+        cfg["s1"] = s1
         cfg["host_b"], cfg["port_b"] = host_b, port_b
     common.send_msg(sock, cfg)
     ack = common.recv_msg(sock)
@@ -300,8 +306,9 @@ def _run(idx, prompt, model, tok, s1, s2, host_c, port_c, host_b, port_b,
 
 def warmup(host_c, port_c, s1, s2, host_b, port_b):
     s = socket.create_connection((host_c, port_c), timeout=common.COLD_CONNECT_TIMEOUT_S)
-    cfg = {"type": "config", "s1": s1, "s2": s2}
+    cfg = {"type": "config", "s2": s2, "stage": "middle" if host_b else "last"}
     if host_b:                                  # omitted, never None -- see _run for why
+        cfg["s1"] = s1                          # middle relays only -- see _run, [P55]
         cfg["host_b"], cfg["port_b"] = host_b, port_b
     common.send_msg(s, cfg)
     common.recv_msg(s)
