@@ -1,4 +1,68 @@
-# Handoff — start of Session 66
+# Handoff — start of Session 67
+
+## STATE AT SHUTDOWN, 2026-08-20 — READ THIS FIRST
+
+**The network returns correct answers again, and it is 2.18 tok/s.** [P55] is fixed, shipped as
+**0.20.9**, built, installed on this PC and confirmed live by the founder: *"Hello! How can I
+assist you today?"* over the chain. Three commits, tree clean, nothing pushed.
+
+**What [P55] actually was.** The last node ran the right layers and skipped the FINAL NORM,
+because `node_server` decided its role from whether the config carried an `s1` — which the
+verifier sends and which `neuron_driver` also sent on every request. Two-stage chains (driver
+0-9 + one node 10-27, i.e. the live topology) therefore served every real request as if it were
+a verifier's probe. Fixed at both ends independently, so no upgrade ordering is needed. See
+[P55]; the regression test is `agent/test_last_stage_is_not_a_probe.py`.
+
+**Do not chase 51.3 tok/s. It does not exist.** It is a memory-bandwidth floor computed from
+36.9 GB/s and a q4_k_m layer, quoted once and then asked for as a target. The real numbers:
+
+| path | tok/s | status |
+|---|---|---|
+| local llama.cpp q4_k_m, one machine | **32.11** | works today, default, free |
+| ggml split across both (hand-run) | 3.97 | code exists, NOT wired |
+| PyTorch chain | **2.18** | what the network actually is |
+
+**The speed question is settled and the answer is uncomfortable: the wall is the memory bus.**
+`tools/bench_quant.py` proves it — dynamic int8 on the real slice is **2.87x** (8.43 -> 2.94
+ms/layer) purely from 4x fewer weight bytes. fp32 gives 7.0 tok/s as a HARD ceiling on this
+machine with a perfect implementation and no network at all. So quantization is the only lever
+on the 67% of a token that is compute, and everything else that looks like a lever is not:
+threads, cores, fp16 storage, the wire codec, rebalancing layers, adding machines. Each is
+ruled out with a number in [P57].
+
+**But the cheap quantization is closed too.** That same int8 run drifts 34.78% from fp32 —
+garbage, not a tolerance argument. Only k-quants (per-block scales) stay correct, which means
+llama.cpp, which means [P30]'s engine is not one option among several. **It is the only route.**
+
+## Do these first
+
+1. **[P30] phase 2 is still NOT wired, and the git log reads as if it is.** `a2d7b81` added the
+   node-side door and a driver-side dialer; `engine/ggml_pipeline.py` (which carries the 3.97
+   tok/s) is imported by NOTHING — full-tree grep returns only its own docstring and logger.
+   `agent/rpc_bridge_client.py` is imported only by its test. `neuron_driver`, `ui/app.py`,
+   `api/openai_compat.py`, `agent/local_chat.py` and `agent/agent.py` have zero references.
+   There is no `engine/test_ggml_pipeline.py`.
+2. **Three blockers on it, in this order.** (a) `llama-server` and `ggml-rpc-server` are NOT on
+   this machine — `llama_cpp` is installed as a LIBRARY (that is the 32.11 tok/s path) and
+   ships `llama_cpp/lib/`, but neither executable. (b) `_serve_rpc_bridge` refuses any caller
+   without a [P52] channel, and `router.SECURE_HOP_SINCE = (0, 99, 0)` withholds every grant
+   network-wide because the encrypted hop does not survive the relay. **Settle the transport
+   before building the last mile onto a door that refuses everyone.** (c) then the wiring.
+3. **[P56], and it is the larger finding of this session.** Proof-of-compute exercises only the
+   PROBE path, so it certified the Pavilion healthy on 5662 challenges while it returned
+   garbage to every user. It also compares against fp32 with `atol=0.05`, so **a quantized node
+   is numerically indistinguishable from a cheating one** — which the roadmap will hit the day
+   [P30] lands. The verifier needs to challenge at a node's DECLARED precision.
+4. **The relay detour was measured and the fix was DECLINED** (founder, 2026-08-20). Dialling
+   this PC's own node through the relay costs **88 ms** median; the Pavilion is 5.3 ms away
+   directly on the LAN. `--no-relay` would recover ~38% and was refused because it publishes
+   Tailscale addresses and makes nodes unreachable to anyone off the tailnet. **Do not re-apply
+   it.** The durable version is the coordinator publishing BOTH addresses and the driver
+   preferring the direct one with a fallback — that needs a VM deploy, which needs the SSH key
+   passphrase only the founder can enter.
+
+## Still open from before
+
 
 ## STATE AT SHUTDOWN, 2026-08-19 16:18 — READ THIS FIRST
 
