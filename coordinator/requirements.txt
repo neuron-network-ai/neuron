@@ -12,3 +12,12 @@ requests
 # proof-of-control signature. Still no torch: eth-account is pure Python plus small wheels.
 # Imported lazily, so a coordinator without it starts fine and only payout binding fails.
 eth-account
+
+# The [P52] wire encryption (security/wire_crypto.py), which router.py imports at MODULE
+# SCOPE — unlike eth-account above, so its absence is not a degraded feature, it is a
+# coordinator that cannot start at all. On 2026-08-19 a deploy without it put the live
+# service into a systemd restart loop: ModuleNotFoundError, /status 502, the whole network
+# unroutable, and `systemctl is-active` still answering "activating" while it happened.
+# If router.py ever stops importing this eagerly, this line still stays — the grant minting
+# needs it either way.
+cryptography
