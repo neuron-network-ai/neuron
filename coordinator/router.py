@@ -588,7 +588,23 @@ def chain_public(chain, request_id=None):
     return out
 
 
-SECURE_HOP_SINCE = (0, 20, 5)     # the first agent build carrying security/wire_crypto
+# HELD DELIBERATELY ABOVE EVERY SHIPPED BUILD, 2026-08-19.
+#
+# [P52]'s encrypted hop does NOT survive the relay. Proven the hard way: with both nodes on
+# 0.20.8, the coordinator healthy, the chain routable and a grant minted, a real driver dial to
+# a relayed node fails in 90 ms with "socket closed during handshake" — every time. The same
+# dial with the grant withheld (plaintext) answers normally, which is how the network served
+# 1.26 tok/s an hour earlier while the Pavilion was still 0.20.3.
+#
+# So the channel works on loopback and in `security/test_secure_hop_live.py`, and has never
+# once worked across the NAT relay that every volunteer machine actually sits behind. Minting a
+# grant for a relayed node therefore does not secure the hop, it BREAKS it.
+#
+# Set to a version no shipped build has, so grants are withheld everywhere until the relay path
+# is fixed and proven. This is the [P24] rule: a half-finished migration that takes the network
+# down is worse than one that has not started. Lower it the day a relayed encrypted hop is
+# demonstrated end to end — not before, and not on the strength of a loopback test.
+SECURE_HOP_SINCE = (0, 99, 0)
 
 
 def _speaks_secure_hop(node):

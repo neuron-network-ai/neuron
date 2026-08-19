@@ -92,11 +92,17 @@ def main():
     # The other half of the rolling upgrade. [P52] covered old-coordinator/new-node; this is
     # new-coordinator/old-node, which failed live on 2026-08-19 as "socket closed during
     # handshake" — a version mismatch wearing the costume of a network fault.
-    from coordinator.router import _speaks_secure_hop as speaks
-    check("0.20.5, the first build with the hop, is sent one",
-          speaks({"agent_version": "0.20.5"}) is True)
-    check("0.20.6 is sent one", speaks({"agent_version": "0.20.6"}) is True)
-    check("0.21.0 is sent one", speaks({"agent_version": "0.21.0"}) is True)
+    from coordinator.router import _speaks_secure_hop as speaks, SECURE_HOP_SINCE
+    # HELD ABOVE EVERY SHIPPED BUILD (2026-08-19). The encrypted hop does not survive the NAT
+    # relay: with both nodes on 0.20.8 and everything healthy, a real dial fails in 90 ms with
+    # "socket closed during handshake", while the same dial with the grant withheld answers
+    # normally. So minting a grant for a relayed node does not secure the hop, it breaks it.
+    check("no shipped build is sent a grant while the relay path is unproven",
+          not speaks({"agent_version": "0.20.8"})
+          and not speaks({"agent_version": "0.21.0"}),
+          "a grant that breaks the hop is worse than no grant")
+    check("...and the threshold is deliberately unreachable, not a typo",
+          SECURE_HOP_SINCE >= (0, 99, 0), str(SECURE_HOP_SINCE))
     check("0.20.3 — the Pavilion, which actually broke — is NOT",
           speaks({"agent_version": "0.20.3"}) is False)
     check("0.19.9 is not", speaks({"agent_version": "0.19.9"}) is False)
