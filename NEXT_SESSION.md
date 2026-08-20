@@ -78,6 +78,15 @@ Kill by PID, or use a bracketed pattern.
   * **Its venv now has the web stack**: fastapi 0.139.2, uvicorn 0.51.0, starlette 1.3.1,
     itsdangerous, Authlib, httpx2. torch 2.4.1+cpu, transformers 4.44.2 and pydantic 2.13.4 are
     UNCHANGED — checked before and after. The "no uvicorn" note in older handoffs is gone.
+  * **`local_chat` is now `false` in its config.json, and it MUST stay false.** Installing
+    uvicorn turned that old "cosmetic" note into a memory bomb: the agent starts its own Chat
+    UI on boot, the UI loads the pipeline-driver shard (layers 0-9), and on a 12 GB laptop
+    already holding an 18-layer fp32 slice at ~8 GB that is an OOM. It went round that loop
+    twice — start, `paused (low RAM (160 MB))`, OOM, systemd restart — and each pass dropped
+    the node off the chain. With `local_chat: false` it came back within one poll and stayed.
+    **A node that cannot hold the driver shard as well must not serve a chat page.** If that
+    machine ever needs one, the fix is to make `start_local_chat` refuse on insufficient RAM
+    rather than to turn the flag back on.
   * **It also needed `coordinator/*.py`**, because `api/openai_compat.py` imports
     `coordinator.config/ledger/model_registry`. Only the .py files were sent — `neuron.db` and
     `node_tokens.json` were deliberately NOT copied.
