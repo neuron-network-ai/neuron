@@ -117,6 +117,11 @@ if (STATIC_DIR / "app" / "assets").is_dir():
 if (STATIC_DIR / "workspace" / "index.html").is_file():
     app.mount("/workspace", StaticFiles(directory=str(STATIC_DIR / "workspace"), html=True),
               name="workspace")
+# The workspace UI's own /api/* routes, reimplemented in Python because its Express server
+# cannot ship inside a frozen binary. Skills and the secretary are real; memory refuses with a
+# reason rather than pretending. See ui/workspace_api.py.
+from ui.workspace_api import router as workspace_router   # noqa: E402
+app.include_router(workspace_router)
 app.include_router(openai_router)          # Session 11: /v1/* on the same server
 app.include_router(oauth_module.router)    # Workstream B: /auth/login|callback|me|logout
 

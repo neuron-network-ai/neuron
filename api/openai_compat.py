@@ -77,6 +77,11 @@ class ChatBody(BaseModel):
     # Retrieve current web context and prepend it, exactly as ui/app.py's `use_rag` does. The
     # sources come back in the `neuron` block so a caller can cite them.
     use_rag: bool = False
+    # Persist this turn into the SAME conversation store the Chat UI reads, so a chat started
+    # in one page appears in the other. Omit it and a conversation is created; the id comes
+    # back in the `neuron` block for the caller to send next time. Without this the two pages
+    # keep separate histories and neither can see the other's.
+    conversation_id: str | None = None
 
 
 class CompletionBody(BaseModel):
@@ -286,7 +291,8 @@ def chat_completions(body: ChatBody, authorization: str = Header(default=None)):
     def neuron_block():
         return {"nodes": seen["nodes"], "local": seen["local"],
                 "node_ids": seen["node_ids"], "reroutes": seen["reroutes"],
-                "sources": sources, "used_rag": bool(sources)}
+                "sources": sources, "used_rag": bool(sources),
+                "conversation_id": convo["id"]}
 
     def absorb(ev):
         if ev["type"] == "meta":
@@ -297,6 +303,29 @@ def chat_completions(body: ChatBody, authorization: str = Header(default=None)):
             seen["reroutes"] += 1
         elif ev["type"] == "done":
             seen["reroutes"] = ev.get("reroutes", seen["reroutes"])
+
+    # Conversation persistence, mirroring ui/app.py exactly: the user's turn and the reply, both
+    # against the signed-in wallet. Best-effort -- a history write that fails must never cost
+    # somebody an answer they already paid for.
+    convo = {"id": body.conversation_id}
+
+    def remember(answer):
+        if not answer:
+            return
+        try:
+            from ui import conversations
+            last_user = next((m["content"] for m in reversed(messages)
+                              if m["role"] == "user"), "")
+            if convo["id"]:
+                existing = conversations.get_conversation(convo["id"], wallet)
+                if existing is None:
+                    convo["id"] = None        # not ours, or gone: start a fresh one
+            if not convo["id"]:
+                convo["id"] = conversations.create_conversation(wallet, title=last_user[:40])
+            conversations.add_message(convo["id"], wallet, "user", last_user)
+            conversations.add_message(convo["id"], wallet, "assistant", answer)
+        except Exception:                                        # noqa: BLE001
+            pass
 
     if body.stream:
         def gen():
@@ -311,6 +340,7 @@ def chat_completions(body: ChatBody, authorization: str = Header(default=None)):
                 elif ev["type"] == "token":
                     yield _sse(chunk({"content": ev["text"]}, None))
                 elif ev["type"] == "done":
+                    remember(ev.get("text") or "")
                     yield _sse(chunk({}, ev["finish_reason"]))
                     if _want_usage(body):
                         final = chunk({}, ev["finish_reason"])
@@ -335,6 +365,7 @@ def chat_completions(body: ChatBody, authorization: str = Header(default=None)):
             pt, ct, cost = ev["prompt_tokens"], ev["completion_tokens"], ev.get("cost_nrn")
     if err is not None:
         return _error_response_for_event(err_ev)
+    remember(text)
     resp = {"id": cid, "object": "chat.completion", "created": created,
             "model": model_name,
             "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
