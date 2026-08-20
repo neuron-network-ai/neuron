@@ -14,6 +14,36 @@ act the founder has not taken.
 **The Pavilion is still on 0.20.8** and is the ONLY machine where the claim flow can be tested,
 because this PC's node is already claimed (`unclaimed: false`).
 
+## The outage at the end of Session 67, and what actually caused it
+
+**Recovered. `[[0,9],[10,27]]`, routable, healthy, 2 nodes.** Recorded because none of it was
+obvious from the symptom, and one part is still unexplained.
+
+**The symptom was placement, not corruption.** The Pavilion dropped off; the coordinator
+gap-healed by giving the only remaining node the whole model; `chain_ranges` collapsed to
+`[[0,27]]` and `stage1_ok` went false, because `node_a.coord_get_chain` requires stage 1 to be
+exactly `[0,9]`. Network chat was down, local chat was untouched throughout. This is precisely
+what `pin_layers.sh`'s header warns about: *a node left spanning the whole model wins the chain
+walk and collapses the pinned stages*.
+
+**Three separate faults were stacked underneath it:**
+
+  * **`stream_timing.py` was MISSING on the Pavilion** while `neuron_driver.py` and
+    `engine/local_gguf.py` both import it — a partial file copy, new modules omitted. Its chat
+    UI crashed on every start. **Lesson: copying a changed file to that machine means copying
+    every NEW module it imports; there is no packaging step to catch it, because it is a plain
+    file copy and not an installer.**
+  * **The node_token stopped matching the coordinator's copy** — 409 on register, 401 on ping,
+    so it could not rejoin at all. Fixed by putting `register_secret` in its config so it could
+    re-register under its EXISTING node id (a fresh id would have orphaned its earnings,
+    [P53]), then removing the secret again once the new token was persisted. **WHY the token
+    diverged is still unknown, and it can therefore recur.**
+  * **It self-paused**: `cpu 51% > donation ceiling 50%`. Normal behaviour, not a fault, but it
+    means the node can be healthy, credentialed and still not advertising.
+
+**Also still true there:** its venv has no `uvicorn`, so the Pavilion's own chat page cannot
+start. Cosmetic — node serving is unaffected.
+
 ## What this session did
 
 **[P55] — fixed, shipped, confirmed live.** The network returned `'  1  2   3'` and billed for
