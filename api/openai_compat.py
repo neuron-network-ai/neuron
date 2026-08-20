@@ -65,6 +65,18 @@ class ChatBody(BaseModel):
     max_tokens: int | None = None
     stream: bool = False
     stream_options: dict | None = None
+    # The two switches the Chat UI has always had and this API never exposed, so anything
+    # driving NEURON through /v1 -- including NEURON's own workspace UI -- could not reach
+    # them. Extra fields on an OpenAI-shaped body are ignored by every other client, so adding
+    # them costs compatibility nothing.
+    #
+    # `use_network` is the per-request form of NEURON_FORCE_NETWORK: send this one down the
+    # node chain even when this machine could answer it alone. It does NOT change the default,
+    # because local-first is still the right tiering for a model that fits ([P29]).
+    use_network: bool = False
+    # Retrieve current web context and prepend it, exactly as ui/app.py's `use_rag` does. The
+    # sources come back in the `neuron` block so a caller can cite them.
+    use_rag: bool = False
 
 
 class CompletionBody(BaseModel):
@@ -228,6 +240,21 @@ def chat_completions(body: ChatBody, authorization: str = Header(default=None)):
     max_new = body.max_tokens or 256
     router_prompt = next((m["content"] for m in reversed(messages)
                           if m["role"] == "user"), "")
+
+    # Web search, applied to the LAST user turn only -- the same thing ui/app.py does, and for
+    # the same reason: retrieval answers the question being asked, not the conversation so far.
+    # Failure is not fatal here; an answer without current context beats no answer.
+    sources = []
+    if body.use_rag and router_prompt:
+        try:
+            from rag import retriever as rag
+            augmented, sources = rag.retrieve_and_augment(router_prompt)
+            for m in reversed(messages):
+                if m["role"] == "user":
+                    m["content"] = augmented
+                    break
+        except Exception:                                        # noqa: BLE001
+            sources = []
     cid = "chatcmpl-" + uuid.uuid4().hex
     created = int(time.time())
     model_name = body.model or MODEL_ID
@@ -236,7 +263,7 @@ def chat_completions(body: ChatBody, authorization: str = Header(default=None)):
     # machine can hold it -- 36 ms/token quantized vs 240 ms/token across the node pipeline --
     # and use the pipeline only for models it cannot hold. Without this the API would be ~7x
     # slower than the chat page on identical hardware.
-    if local_gguf.available(MODEL_ID):
+    if local_gguf.available(MODEL_ID) and not body.use_network:
         events = local_gguf.stream(messages, max_new, MODEL_ID,
                                    coordinator=COORDINATOR, wallet_id=wallet)
         hold_estimate = 0.0          # local execution spends nobody else's compute
@@ -251,9 +278,30 @@ def chat_completions(body: ChatBody, authorization: str = Header(default=None)):
                 "model": model_name,
                 "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
 
+    # What the Chat UI puts under a reply -- which machines answered, whether it ran here, what
+    # it cost, what it read. `usage.nrn_cost` alone cannot say any of that, and a UI that
+    # cannot tell "this machine, free" from "two nodes, 0.13 NRN" is hiding the whole product.
+    seen = {"nodes": 0, "local": True, "node_ids": [], "reroutes": 0}
+
+    def neuron_block():
+        return {"nodes": seen["nodes"], "local": seen["local"],
+                "node_ids": seen["node_ids"], "reroutes": seen["reroutes"],
+                "sources": sources, "used_rag": bool(sources)}
+
+    def absorb(ev):
+        if ev["type"] == "meta":
+            seen["nodes"] = ev.get("nodes", 0)
+            seen["local"] = bool(ev.get("local", False))
+            seen["node_ids"] = ev.get("node_ids") or []
+        elif ev["type"] == "reroute":
+            seen["reroutes"] += 1
+        elif ev["type"] == "done":
+            seen["reroutes"] = ev.get("reroutes", seen["reroutes"])
+
     if body.stream:
         def gen():
             for ev in events:
+                absorb(ev)
                 if ev["type"] == "error":
                     yield _sse(_stream_error_chunk(ev))
                     yield "data: [DONE]\n\n"
@@ -269,6 +317,7 @@ def chat_completions(body: ChatBody, authorization: str = Header(default=None)):
                         final["choices"] = []
                         final["usage"] = _usage(ev["prompt_tokens"], ev["completion_tokens"],
                                                 ev.get("cost_nrn"))
+                        final["neuron"] = neuron_block()
                         yield _sse(final)
                     yield "data: [DONE]\n\n"
         return StreamingResponse(gen(), media_type="text/event-stream",
@@ -277,6 +326,7 @@ def chat_completions(body: ChatBody, authorization: str = Header(default=None)):
     # non-streaming: consume the generator, build one response
     text, finish, pt, ct, cost, err, err_ev = "", "stop", 0, 0, None, None, None
     for ev in events:
+        absorb(ev)
         if ev["type"] == "error":
             err, err_ev = ev["detail"], ev
             break
@@ -289,7 +339,8 @@ def chat_completions(body: ChatBody, authorization: str = Header(default=None)):
             "model": model_name,
             "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
                          "finish_reason": finish}],
-            "usage": _usage(pt, ct, cost)}
+            "usage": _usage(pt, ct, cost),
+            "neuron": neuron_block()}
     return JSONResponse(resp, headers={"X-NRN-Cost": str(cost), "X-NRN-Wallet": wallet})
 
 
