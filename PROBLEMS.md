@@ -307,6 +307,65 @@ Status keys: 🔴 open/unaddressed · 🟡 mitigation known, not done · 🟢 re
 
 ## Problems & risks
 
+### [P58] 🟢 "Claim with my account" looked for the payout key in a place only Windows has (2026-08-21)
+
+**Five sessions of green checks on one machine.** [P53] fixed claiming so an operator with no
+browser wallet could record ownership with a Google/GitHub account, and it was verified on a
+clean 0.20.6 install — on the founder's Windows PC, whose node was already claimed. Run for
+the first time against a node that was genuinely UNCLAIMED (the Pavilion, 2026-08-21), it
+returned:
+
+```
+409  this node pays out to 0xA39F...E3Ee, and this machine holds no key at all —
+     nothing here can sign for it. Use the browser-wallet claim, or ask the operator
+     to rebind with the register secret.
+```
+
+**The key was on disk, for that exact address, in the same directory as the config file the
+same endpoint had just read successfully.**
+
+**Two rules for one directory.** `agent/agent.py:1568` binds with
+`state_dir=os.path.dirname(self.config_path) or HERE` — the payout key lives BESIDE the config
+that names the node it pays for. `ui/app.py::_node_identity` knew that config could be in
+either of two places: the installed state directory, or the `agent/` folder a source checkout
+runs from. `_local_payout_key` knew about neither and hard-coded `LOCALAPPDATA/NEURON`.
+
+| install | config.json | payout_key.json | `_local_payout_key` looked in | claim |
+|---|---|---|---|---|
+| Windows installer | `LOCALAPPDATA/NEURON/` | `LOCALAPPDATA/NEURON/` | `LOCALAPPDATA/NEURON/` | works |
+| anything else | `<checkout>/agent/` | `<checkout>/agent/` | `~/.local/share/NEURON/` | **409** |
+
+So the flow worked on precisely the one machine it was ever exercised on, and failed on every
+Linux node, every source run, every self-hoster — the entire population [P53] was written for.
+
+**And it failed the way [P53] failed.** [P53]'s indictment was that the error told an operator
+their key might be lost while it sat in `payout_key.json` on the same disk. This error says
+the machine "holds no key at all" about a file one directory lookup away, and sends them to
+find a browser wallet — the exact thing [P53] existed to make unnecessary.
+
+**Fixed by making it one rule.** `_node_config()` now returns the config's PATH as well as its
+contents, and the key is read from `path.parent`. `create=True` inherits the same directory,
+so a first claim on a keyless machine mints the key where the agent will look for it rather
+than in a second location nobody reads — a key nobody knows exists being [P53]'s other half.
+
+**Verified live.** The Pavilion's node is claimed, `owner_wallet_id` recorded, payout address
+unchanged at `0xA39F…E3Ee`, `unclaimed: false`. First successful account-claim of a node that
+was not already owned.
+
+**The lesson is the same one [P54] drew.** A path computed twice by two rules is a bug waiting
+for the first machine where the rules disagree, and a UI resolving state by its own rule
+instead of asking the component that wrote it will always find that machine eventually. What
+made this survive five sessions is that the only test bed was the one layout where the two
+rules happen to agree.
+
+`ui/test_claim_finds_the_key_beside_the_config.py`. `ui/test_node_identity_is_current.py` now
+pins the whole resolver group, because pinning `_node_identity` alone said nothing about where
+the config was looked for — which is where this bug was.
+
+Related: [P53] (the claim this was supposed to have fixed), [P54] (one thing registered in
+several places, each failing silently), [P39] (ownership crediting, which is what a claim
+turns on).
+
 ### [P57] 🔴 The network path is 2.18 tok/s, and two thirds of that is memory bandwidth nobody can optimise away (2026-08-20)
 
 **Measured on the live two-machine chain the day [P55] was fixed**, first honest end-to-end
