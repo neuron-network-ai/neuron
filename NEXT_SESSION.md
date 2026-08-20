@@ -1,4 +1,76 @@
-# Handoff — start of Session 67
+# Handoff — start of Session 68
+
+## STATE AT SHUTDOWN, 2026-08-20 — READ THIS FIRST
+
+**0.20.14 is built and INSTALLED on this PC and serves two chat UIs.** `/` is the original
+page, untouched. `/workspace` is the new one (from the founder's `Trust chat` repo, rebranded
+and cut down to NEURON only). Both answer through NEURON. Coordinator shows
+`agent-optinovate-6ff49d ver=0.20.14`.
+
+**NOTHING HAS BEEN PUSHED.** Not NEURON, not trust-chat. `coordinator/config.AGENT_VERSION` is
+still **0.20.3**, so no node in the fleet is told about any of this. Publishing is a deliberate
+act the founder has not taken.
+
+**The Pavilion is still on 0.20.8** and is the ONLY machine where the claim flow can be tested,
+because this PC's node is already claimed (`unclaimed: false`).
+
+## What this session did
+
+**[P55] — fixed, shipped, confirmed live.** The network returned `'  1  2   3'` and billed for
+it because the last node ran the right layers with the FINAL NORM SKIPPED: `node_server` read
+the presence of `s1` as "a verifier is probing me", and `neuron_driver` sends `s1` on every
+config, so in a TWO-stage chain every real request took the probe branch. Fixed at both ends,
+neither needing the other. `agent/test_last_stage_is_not_a_probe.py`.
+
+**[P56] filed and STILL OPEN — the most serious thing on this list.** Proof-of-compute only
+ever exercises the PROBE path, so it certified the Pavilion healthy on 5662 challenges while it
+returned garbage to every user. It also compares against fp32 with `atol=0.05`, which means a
+quantized node is indistinguishable from a cheating one — a wall [P30] will hit.
+
+**[P57] filed.** The network is 2.18 tok/s and two thirds of that is a MEMORY BANDWIDTH wall,
+not CPU: 36.9 GB/s measured, 187 MB per fp32 layer. `tools/bench_quant.py` shows int8 gives
+2.87x from bytes alone and destroys the answer (34.78% drift), so k-quants are the only route
+and that means [P30]. Threads, cores, fp16 storage, the wire codec and rebalancing are each
+ruled out with a number.
+
+**The relay detour is fixed but DORMANT.** `lan_direct.py` lets two machines on one LAN skip
+the relay by having the DRIVER name its subnets and the node answer only from inside them — no
+Tailscale, no address published, nothing stored. It is dormant only because this PC is
+currently on a hotspot (`192.168.137`) while the Pavilion is at home (`192.168.1`).
+
+## Do these first
+
+1. **Test "Claim with my account" on the Pavilion.** Untested end to end. Needs 0.20.14 there,
+   which means a source update (it is a plain file copy run by systemd, NOT a git checkout).
+   **And note: something silently restored `agent/node_server.py` there once during a gap.**
+   Cause never identified; the hourly `iris_autonomous_v7.py` cron was suspected and CLEARED by
+   18 consecutive checks across its firing. Verify with
+   `md5sum ~/neuron/agent/node_server.py` after any copy.
+2. **Decide what `/` serves.** The workspace UI is additive today. Making it the default is a
+   product decision, not a code one, and everything below is downstream of it.
+3. **[P56].** The verifier has to drive the path a USER's request takes, and needs a notion of
+   a node's declared precision before quantized nodes can ever be honest.
+4. **[P30] phase 2.** Still not wired: `engine/ggml_pipeline.py` is imported by NOTHING. Three
+   blockers in order — the `llama-server`/`ggml-rpc-server` binaries are absent; the rpc-bridge
+   refuses every caller because `router.SECURE_HOP_SINCE = (0,99,0)` withholds all grants; then
+   the wiring. Settle the transport before building the last mile onto a bolted door.
+5. **Publishing.** Release notes exist for 0.20.9 and 0.20.13. Nothing is on GitHub, no SHA is
+   set, `AGENT_VERSION` unchanged. Until that happens the fleet stays on 0.20.3.
+
+## Known-open, smaller
+
+  * `trust-chat` still has uncommitted `src/server/skills.ts` and `src/server/docx.ts`. The
+    latter makes Tailwind emit one dead `.table` rule, which is the ONLY reason the CSS differs
+    between a clean checkout and the shipped bundle. The JS is byte-identical.
+  * The workspace UI's tool loop is OFF: it runs shell and file actions through a route that
+    does not exist in a frozen app, and shipping it to strangers is a security decision.
+  * Memory is per-machine, not per-account, and costs 174 MB while in use (released after 10
+    minutes idle). Conversations DO follow the account.
+  * `agent-optinovate-6ff49d` and `-7fc2ff` are both registered for this one PC; the id it
+    reports has flipped between them across restarts. Worth reconciling.
+
+## Still open from before
+
 
 ## STATE AT SHUTDOWN, 2026-08-20 — READ THIS FIRST
 
