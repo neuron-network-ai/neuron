@@ -210,6 +210,14 @@ def _stream_error_chunk(ev):
 def _error_response_for_event(ev):
     if ev.get("code") == "insufficient_funds":
         return _error_response(402, ev["detail"], "insufficient_quota", "insufficient_funds")
+    # A refusal is not an outage. The INPUT gate above already returns this code correctly, but
+    # an OUTPUT block arrives here as an engine event and fell through to the generic branch --
+    # so a moderated answer was reported as `503 chain_unavailable`, "server_error". The caller
+    # then tells somebody the network is down when in fact their content was refused, which is
+    # both wrong and unfixable from the user's side: they would retry a working network forever.
+    if ev.get("code") == "content_policy_violation":
+        return _error_response(400, ev["detail"], "invalid_request_error",
+                               "content_policy_violation")
     return _error_response(503, ev["detail"], "server_error", "chain_unavailable")
 
 
