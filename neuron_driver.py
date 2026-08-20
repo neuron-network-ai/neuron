@@ -33,6 +33,7 @@ import batching  # MicroBatcher — used by _batchers(); missing until 2026-08-0
 import common
 import junction_cache
 import lan_direct
+import stream_timing
 import wire_codec
 import node_a  # coord_get_chain / coord_complete (its main() is __main__-guarded)
 from safety import moderation
@@ -225,6 +226,9 @@ class _Driver:
         max_new = max(1, min(int(max_new), MAX_TOKENS_CAP))
         prompt_tokens = int(input_ids.shape[1])
         t_start = time.time()
+        # When the FIRST token came out. Splits the wait into prefill (which scales with the
+        # PROMPT) and decode (which scales with the network) -- see stream_timing and [P57].
+        t_first = None
 
         # 1) ask the coordinator for a chain matching our shard (layers 0..self.s1-1)
         try:
@@ -503,6 +507,8 @@ class _Driver:
                                         "policy (see SAFETY.md).",
                               "code": "content_policy_violation"}
                         return
+                    if t_first is None:
+                        t_first = time.time()   # everything before this was prefill, not decode
                     yield {"type": "token", "text": delta}
                 if completion >= max_new:
                     finish = "length"
@@ -530,9 +536,10 @@ class _Driver:
                           if hold_now is not None else None)
             done = {"type": "done", "completion_tokens": completion,
                     "prompt_tokens": prompt_tokens, "finish_reason": finish,
-                    "latency_ms": latency_ms,
-                    "tok_per_s": round(completion / max(time.time() - t_start, 1e-6), 2),
-                    "text": prev_text, "cost_nrn": actual_cost}
+                    "text": prev_text, "cost_nrn": actual_cost,
+                    # latency_ms and tok_per_s keep their old meaning; ttft_ms and
+                    # decode_tok_per_s are what make a short answer legible.
+                    **stream_timing.fields(completion, t_start, t_first, time.time())}
             if reroutes:
                 # Surfaced rather than hidden: a recovered answer is still a degraded one, and
                 # whoever is debugging a slow reply needs to know a node died mid-generation.

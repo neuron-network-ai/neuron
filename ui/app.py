@@ -782,6 +782,11 @@ def _drive(prompt: str, max_new: int, wallet_id: str, use_rag: bool = False,
             conversations.add_message(conversation_id, wallet_id, "assistant", full_text)
             yield sse("done", {"tokens": ev["completion_tokens"],
                                "latency_ms": ev["latency_ms"], "tok_per_s": ev["tok_per_s"],
+                               # The split that stops a SHORT answer looking like a slow
+                               # network: ttft_ms is prompt-shaped, decode_tok_per_s is
+                               # network-shaped. See stream_timing.
+                               "ttft_ms": ev.get("ttft_ms"),
+                               "decode_tok_per_s": ev.get("decode_tok_per_s"),
                                "cost_nrn": ev.get("cost_nrn"),
                                # The driver records these deliberately ("a recovered answer is
                                # still a degraded one"). They were dropped here, so a request

@@ -93,7 +93,7 @@ hiddenimports += collect_submodules("transformers.models.qwen2")
 # missing again.
 hiddenimports += ["sqlite3", "_sqlite3"]
 hiddenimports += ["common", "logtail", "slice_downloader", "tunnel_client", "neuron_driver", "node_a",
-                  "lan_direct",
+                  "lan_direct", "stream_timing",
                   "agent", "agent.agent", "agent.resource_guard", "agent.node_server",
                   "agent.tray", "agent.uninstall", "agent.local_chat",
                   "agent.payout_key", "agent.bind_payout", "agent.gpu",

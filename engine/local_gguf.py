@@ -31,6 +31,7 @@ import os
 import time
 import uuid
 
+import stream_timing
 from safety import moderation
 
 log = logging.getLogger("neuron.engine.local_gguf")
@@ -307,6 +308,9 @@ def stream(messages, max_new, model_id, coordinator=None, wallet_id=None, reques
            "cost_nrn": 0.0, "local": True}
 
     t0 = time.time()
+    # When the FIRST token appears. Everything before it is prefill, which
+    # scales with the PROMPT -- see stream_timing.
+    t_first = None
     full, completion, finish = "", 0, "length"
     try:
         for chunk in llm.create_chat_completion(messages, max_tokens=max_new,
@@ -331,12 +335,13 @@ def stream(messages, max_new, model_id, coordinator=None, wallet_id=None, reques
                                  "policy (see SAFETY.md).",
                        "code": "content_policy_violation"}
                 return
+            if t_first is None:
+                t_first = time.time()       # prefill ends here; decode starts
             yield {"type": "token", "text": delta}
     except Exception as e:
         yield {"type": "error", "detail": f"{e.__class__.__name__}: {e}"}
         return
 
-    elapsed = max(time.time() - t0, 1e-6)
     yield {"type": "done", "completion_tokens": completion, "prompt_tokens": 0,
-           "finish_reason": finish, "latency_ms": int(elapsed * 1000),
-           "tok_per_s": round(completion / elapsed, 2), "text": full, "cost_nrn": 0.0}
+           "finish_reason": finish, "text": full, "cost_nrn": 0.0,
+           **stream_timing.fields(completion, t0, t_first, time.time())}

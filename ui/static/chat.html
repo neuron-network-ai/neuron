@@ -1286,11 +1286,30 @@ function finishBot(body, meta, d, rawText){
   // here rather than nowhere: the driver has always tracked `reroutes` and the UI dropped it,
   // which made surviving two node deaths look identical to an uneventful request.
   const rr = (typeof d.reroutes === "number") ? d.reroutes : 0;
+  // `tok_per_s` divides OUTPUT tokens by the WHOLE request -- coordinator round trip,
+  // handshake and the prefill of the entire prompt all included. So a SHORT answer to a long
+  // prompt reads slow even when nothing is wrong: 16 tokens over a healthy chain showed 1.16
+  // where 119 tokens showed 2.18, with the hop measuring 49.7 ms against 49.5 either side.
+  // Show the wait and the steady rate separately, which is what node_a.py already concluded --
+  // "report both rather than picking whichever is flattering". See stream_timing.py.
+  const secs = (typeof d.latency_ms === "number")
+                 ? (d.latency_ms / 1000).toFixed(1) + "s" : null;
+  const dec  = (typeof d.decode_tok_per_s === "number") ? d.decode_tok_per_s : null;
+  const stats = d.tokens + " tokens"
+    + (secs ? " · " + secs : "")
+    + (dec !== null ? " · " + dec + " tok/s"
+                    : (d.tok_per_s ? " · " + d.tok_per_s + " tok/s" : ""));
+  const statsTip = (dec !== null)
+    ? "Steady speed once the reply started. "
+      + (typeof d.ttft_ms === "number"
+           ? "Reading the prompt took " + (d.ttft_ms / 1000).toFixed(1) + "s before the first "
+             + "word, which is why a short answer to a long prompt still takes a while." : "")
+    : "Output tokens over the whole request, including reading the prompt.";
   m.innerHTML =
     (localRun ? "<span>⛓ this machine</span>"
               : "<span>⛓ " + n + " nodes</span>") +
     "<span>◈ Cost: " + cost + " NRN</span>" +
-    "<span>" + d.tokens + " tokens · " + d.tok_per_s + " tok/s</span>" +
+    "<span title='" + statsTip + "'>" + stats + "</span>" +
     (rr ? "<span title='A machine dropped out and the network rebuilt the chain. The answer "
           + "is unaffected — recovery replays the conversation so far into the new chain.'>"
           + "↻ recovered from " + rr + " node drop" + (rr === 1 ? "" : "s") + "</span>" : "");
