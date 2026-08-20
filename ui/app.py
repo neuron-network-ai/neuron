@@ -35,7 +35,8 @@ from pathlib import Path
 
 import requests
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, RedirectResponse,
+                               StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
@@ -146,8 +147,40 @@ def sse(event: str, data: dict) -> str:
 # --------------------------------------------------------------------------- #
 # Pages
 # --------------------------------------------------------------------------- #
+def _workspace_is_built():
+    return (STATIC_DIR / "workspace" / "index.html").is_file()
+
+
 @app.get("/")
 def index():
+    """The front door. Sends people to the workspace UI, and keeps the old page at /classic.
+
+    **A redirect, not a re-mount, and that is not a style choice.** The workspace bundle is
+    built with `NEURON_BASE=/workspace/`, so it asks for `/workspace/assets/...`. Rebuilding it
+    at base `/` would make it ask for `/assets/...`, which is already mounted — that is the OLD
+    React app's chunk directory (`static/app/assets`, see the mount above). The collision would
+    not error; it would serve the wrong JavaScript, which is the worst way for this to fail.
+    So the bundle stays where it is and the door moves instead.
+
+    **The old page is not retired, it is renamed.** `/classic` serves exactly what `/` served,
+    byte for byte and with the same no-store header — 59 of `ui/test_chat_ui.py`'s assertions
+    read that file, and the fastest way back if the workspace UI turns out to be wrong for
+    somebody is a URL they can still type.
+
+    **`/` only moves when there is somewhere to move to.** A source checkout that has never run
+    `npm run build` has no `static/workspace/index.html`, and redirecting it into a 404 would
+    turn a missing build into a machine with no chat at all.
+    """
+    if _workspace_is_built():
+        # 307, not 301/308: a permanent redirect is cached by the browser and would survive a
+        # rollback, so the decision this line represents could not be taken back without every
+        # existing user clearing their history.
+        return RedirectResponse(url="/workspace/", status_code=307)
+    return index_classic()
+
+
+@app.get("/classic")
+def index_classic():
     """The chat page, served with caching switched OFF.
 
     **Why an explicit no-store on the one file that changes every release.** An upgraded agent

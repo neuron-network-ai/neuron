@@ -200,10 +200,27 @@ def main():
     # A shipped, served, on-disk feature was invisible on screen because the browser held the
     # previous chat.html. Server correct, install correct, user correctly concluding it had not
     # been built. Same family as [P46]: everything reports success and the screen disagrees.
-    resp = uiapp.index()
+    # `/` is now the front door and redirects to the workspace UI; the page itself lives at
+    # /classic. The no-store rule belongs to whichever route actually serves chat.html, so it
+    # is asserted there.
+    resp = uiapp.index_classic()
     cc = resp.headers.get("cache-control", "")
     check("the page says no-store", "no-store" in cc, cc)
     check("...and must-revalidate", "must-revalidate" in cc, cc)
+
+    front = uiapp.index()
+    if uiapp._workspace_is_built():
+        check("/ sends people to the workspace UI",
+              getattr(front, "status_code", None) == 307
+              and front.headers.get("location") == "/workspace/",
+              f"{getattr(front, 'status_code', None)} {front.headers.get('location')}")
+        check("...temporarily, so the decision can be taken back",
+              front.status_code in (302, 307),
+              "a 301/308 is cached by the browser and would survive a rollback")
+    else:
+        check("/ still serves the page when no workspace build exists",
+              "no-store" in front.headers.get("cache-control", ""),
+              "redirecting a checkout with no build turns a missing bundle into no chat at all")
     check("...while hashed bundles are NOT no-stored, because their URL changes on change",
           "no-store" not in open("ui/app.py", encoding="utf-8").read()
           .split('name="app-assets"')[0].split("app.mount(\"/assets\"")[-1],
