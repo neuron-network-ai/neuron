@@ -98,6 +98,39 @@ describe('streamChat', () => {
     expect(seen.error).toHaveLength(0);
   });
 
+  it('carries the timing split, so a SHORT answer stops looking like a slow network', async () => {
+    // The reading this exists for: 16 tokens read 1.16 tok/s where 119 read 2.18 over the same
+    // healthy chain, because tok_per_s divides OUTPUT tokens by the WHOLE request -- prefill
+    // included. ttft_ms attributes the wait to the prompt; decode_tok_per_s is the rate that
+    // actually describes the network. See stream_timing.py.
+    serve(
+      frame('done', { tokens: 16, latency_ms: 13790, tok_per_s: 1.16,
+                      ttft_ms: 6970, decode_tok_per_s: 2.2,
+                      cost_nrn: 0.065, reroutes: 0, text: 'x', finish_reason: 'stop' })
+    );
+    const { seen, handlers } = collect();
+    await streamChat({ prompt: 'hi' }, handlers);
+    const d = seen.done[0] as any;
+    expect(d.tokPerS).toBe(1.16);          // unchanged, still whole-request
+    expect(d.ttftMs).toBe(6970);
+    expect(d.decodeTokPerS).toBe(2.2);     // what the page should actually show
+  });
+
+  it('leaves the timing split UNDEFINED when the server does not send it', async () => {
+    // An older agent, or an engine that never emitted a token: the page must fall back rather
+    // than render a zero that reads as "the network stopped".
+    serve(
+      frame('done', { tokens: 2, latency_ms: 900, tok_per_s: 2.2, cost_nrn: 0.01,
+                      reroutes: 0, text: 'hi', finish_reason: 'stop' })
+    );
+    const { seen, handlers } = collect();
+    await streamChat({ prompt: 'hi' }, handlers);
+    const d = seen.done[0] as any;
+    expect(d.ttftMs).toBeUndefined();
+    expect(d.decodeTokPerS).toBeUndefined();
+    expect(d.tokPerS).toBe(2.2);
+  });
+
   it('emits each token as a FRAGMENT, not the accumulated answer', async () => {
     serve(frame('token', { text: 'a' }) + frame('token', { text: 'b' }));
     const { seen, handlers } = collect();

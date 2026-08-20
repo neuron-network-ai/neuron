@@ -336,6 +336,8 @@ function AppContent() {
                 costNrn: d.costNrn,
                 tokPerS: d.tokPerS,
                 latencyMs: d.latencyMs,
+                ttftMs: d.ttftMs,
+                decodeTokPerS: d.decodeTokPerS,
                 reroutes: d.reroutes || reroutes,
               },
             }));

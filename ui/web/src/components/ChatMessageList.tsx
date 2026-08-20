@@ -467,8 +467,27 @@ const Metrics: React.FC<{ msg: ChatMessage }> = ({ msg }) => {
   // model answers locally BY DESIGN, and that is not a lesser answer -- it is a free one.
   const isLocal = msg.neuron?.local ?? false;
 
+  // Prefer the DECODE rate the server measured. Deriving it here -- which is what this line
+  // used to do -- divides output tokens by the WHOLE request, prefill included, so a short
+  // answer to a long prompt reads as a slow network when nothing is wrong: 16 tokens showed
+  // 1.16 tok/s where 119 showed 2.18 over the same chain, with the hop measuring 49.7 ms
+  // against 49.5 either side. The fallback stays for an engine or a build that sends neither.
+  // See stream_timing.py, and note that ui/static/chat.html carries the same rule -- these two
+  // pages have diverged before ([P53]).
+  const decodeRate = msg.neuron?.decodeTokPerS;
+  const ttftMs = msg.neuron?.ttftMs;
   const tokensPerSec =
-    latency && latency > 0 && compTokens > 0 ? (compTokens / (latency / 1000)).toFixed(1) : null;
+    decodeRate != null
+      ? decodeRate.toFixed(1)
+      : latency && latency > 0 && compTokens > 0
+        ? (compTokens / (latency / 1000)).toFixed(1)
+        : null;
+  const rateTitle =
+    decodeRate != null
+      ? ttftMs != null && ttftMs > 0
+        ? `Steady speed once the reply started. Reading the prompt took ${(ttftMs / 1000).toFixed(1)}s before the first word.`
+        : 'Steady speed once the reply started.'
+      : 'Output tokens over the whole request, including reading the prompt.';
 
   // What the answer ACTUALLY cost, as the coordinator settled it -- never a client-side
   // estimate. This block used to price the reply against Gemini's per-token rates and render
@@ -497,7 +516,10 @@ const Metrics: React.FC<{ msg: ChatMessage }> = ({ msg }) => {
   ].filter(Boolean) as string[];
 
   return (
-    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-2.5 font-mono text-[10.5px] text-ink-faint">
+    <div
+      title={rateTitle}
+      className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-2.5 font-mono text-[10.5px] text-ink-faint"
+    >
       {stats.map((s, i) => (
         <React.Fragment key={i}>
           {i > 0 && <span className="text-line-strong select-none">/</span>}

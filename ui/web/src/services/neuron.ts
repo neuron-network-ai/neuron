@@ -11,7 +11,8 @@
  *   sources  { sources, used }                      -- RAG, when web search was used
  *   token    { text }                               -- a FRAGMENT, not the accumulated answer
  *   reroute  { at_token, nodes }                    -- recovery, NOT an error (see below)
- *   done     { tokens, latency_ms, tok_per_s, cost_nrn, reroutes, text, finish_reason }
+ *   done     { tokens, latency_ms, tok_per_s, ttft_ms, decode_tok_per_s, cost_nrn,
+ *              reroutes, text, finish_reason }
  *   error    { detail, code }
  *
  * Three behaviours here are load-bearing, and each exists because of a real incident recorded
@@ -43,7 +44,16 @@ export interface NeuronMeta {
 export interface NeuronDone {
   tokens: number;
   latencyMs: number;
+  /** OUTPUT tokens over the WHOLE request -- setup, handshake and prefill included. Kept
+   *  because it is the honest answer to "how long did I wait per token", but it is NOT a
+   *  measure of the network: it shrinks as the prompt grows. Prefer decodeTokPerS. */
   tokPerS: number;
+  /** Time to the first token: setup, handshake and reading the prompt. PROMPT-shaped. */
+  ttftMs?: number;
+  /** The steady rate after the first token. NETWORK-shaped, and the one that answers "how
+   *  fast is NEURON". Absent for a one-token reply, where there is no steady state to
+   *  report -- see stream_timing.py. */
+  decodeTokPerS?: number;
   costNrn: number | null;
   /** >0 means a node dropped and the answer was rebuilt. Visible, never silent. */
   reroutes: number;
@@ -179,6 +189,9 @@ export async function streamChat(req: StreamRequest, handlers: StreamHandlers): 
             tokens: Number(d.tokens ?? 0),
             latencyMs: Number(d.latency_ms ?? 0),
             tokPerS: Number(d.tok_per_s ?? 0),
+            ttftMs: d.ttft_ms == null ? undefined : Number(d.ttft_ms),
+            decodeTokPerS:
+              d.decode_tok_per_s == null ? undefined : Number(d.decode_tok_per_s),
             costNrn: d.cost_nrn == null ? null : Number(d.cost_nrn),
             reroutes: Number(d.reroutes ?? 0),
             text: String(d.text ?? ''),

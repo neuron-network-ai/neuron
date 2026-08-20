@@ -28,6 +28,10 @@ export interface AnswerMeta {
   costNrn: number | null;
   tokPerS?: number;
   latencyMs?: number;
+  /** Time to the first token -- setup, handshake and reading the prompt. */
+  ttftMs?: number;
+  /** Steady rate after the first token: the figure that actually describes the network. */
+  decodeTokPerS?: number;
   /** >0 means a node dropped and the answer was rebuilt. Recorded because a recovered answer
    *  is still a degraded one — and it must never be silent. */
   reroutes?: number;
