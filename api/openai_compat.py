@@ -27,6 +27,7 @@ Or it is auto-mounted into the Chat UI server (ui.app) at the same /v1 paths.
 """
 import json
 import os
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -373,6 +374,120 @@ def chat_completions(body: ChatBody, authorization: str = Header(default=None)):
             "usage": _usage(pt, ct, cost),
             "neuron": neuron_block()}
     return JSONResponse(resp, headers={"X-NRN-Cost": str(cost), "X-NRN-Wallet": wallet})
+
+
+# --------------------------------------------------------------------------- #
+# POST /v1/embeddings
+# --------------------------------------------------------------------------- #
+#
+# **Why this exists.** The workspace UI's long-term memory embeds every stored message and
+# searches by cosine similarity, and it had nowhere to send them: /v1 served chat, completions
+# and models and nothing else, so memory was a switch that could not work. Ollama, LM Studio
+# and KoboldCPP all expose one; NEURON did not.
+#
+# **It stays on this machine, which is the whole point.** The vectors are produced by the GGUF
+# already on this disk -- the same one local chat uses -- and the memory index is a file in
+# NEURON's own state directory. Nothing about memory reaches the coordinator or the node
+# network, and it costs no NRN. That is why this is worth having rather than being asked of a
+# remote service.
+#
+# **The cost, stated rather than discovered.** llama.cpp needs a SEPARATE handle in embedding
+# mode, so turning memory on adds roughly the model's size in RAM again. Loaded LAZILY for that
+# reason: a user who never enables memory never pays for it.
+#
+# **A purpose-built embedding model, and this is not a nicety.** Measured with the chat model
+# doing the embedding: "how much memory does my laptop have?" scored a note about PASTA at
+# 0.908 and the note about the laptop's 12 GB at 0.839 -- the wrong memory, confidently. A chat
+# model's vectors cluster everything around 0.85-0.91 because they encode sentence shape more
+# than meaning, so recall is not merely weaker, it is misleading. A memory that returns the
+# wrong thing with conviction is worse than one that is switched off.
+#
+# So memory pulls a real embedding model (~80 MB, one time, cached like every other GGUF) the
+# first time it is used. NEURON_EMBED_GGUF still overrides it for anyone who wants a different
+# one, and if the download fails the endpoint refuses with a reason rather than falling back to
+# vectors that would mislead.
+EMBED_REPO = "nomic-ai/nomic-embed-text-v1.5-GGUF"
+EMBED_FILE = "nomic-embed-text-v1.5.Q4_K_M.gguf"
+
+
+def _embed_weights():
+    """Path to the embedding GGUF, downloading it once if needed. None when unavailable."""
+    override = os.environ.get("NEURON_EMBED_GGUF")
+    if override:
+        return override
+    try:
+        from huggingface_hub import hf_hub_download
+        return hf_hub_download(EMBED_REPO, EMBED_FILE)
+    except Exception:                                                # noqa: BLE001
+        return None
+_embed_lock = threading.Lock()
+_embed_model = {"llama": None, "path": None}
+
+
+def _embedder():
+    """The embedding handle, loaded on first use. None when it cannot be built."""
+    with _embed_lock:
+        if _embed_model["llama"] is not None:
+            return _embed_model["llama"]
+        try:
+            from llama_cpp import Llama
+        except Exception:                                            # noqa: BLE001
+            return None
+        path = _embed_weights()
+        if not path:
+            return None
+        try:
+            _embed_model["llama"] = Llama(model_path=path, embedding=True, n_ctx=512,
+                                          verbose=False)
+            _embed_model["path"] = path
+        except Exception:                                            # noqa: BLE001
+            return None
+        return _embed_model["llama"]
+
+
+class EmbeddingsBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    model: str | None = None
+    input: str | list[str] = ""
+
+
+@router.post("/v1/embeddings")
+def embeddings(body: EmbeddingsBody, authorization: str = Header(default=None)):
+    wallet = _auth(authorization)
+    if isinstance(wallet, JSONResponse):
+        return wallet
+    inputs = [body.input] if isinstance(body.input, str) else list(body.input)
+    inputs = [t for t in (str(i or "") for i in inputs) if t.strip()]
+    if not inputs:
+        return _error_response(400, "`input` is required.", "invalid_request_error", None)
+
+    llm = _embedder()
+    if llm is None:
+        # A REASON, not an empty list. Silently returning nothing would make memory look like
+        # it works and recall nothing -- the failure that looks like success.
+        return _error_response(
+            503,
+            "No embedding model is available on this machine. NEURON downloads a small one "
+            "(~80 MB) the first time memory is used; that download did not succeed. Set "
+            "NEURON_EMBED_GGUF to a local .gguf to use your own.",
+            "server_error", "model_unavailable")
+
+    out, total = [], 0
+    for i, text in enumerate(inputs):
+        try:
+            vec = llm.create_embedding(text)["data"][0]["embedding"]
+        except Exception as e:                                       # noqa: BLE001
+            return _error_response(500, f"Embedding failed: {e}", "server_error", None)
+        # llama.cpp returns [[...]] for some builds (one row per token pooled); flatten to the
+        # single vector the OpenAI shape promises, or a client gets a list where it expects
+        # floats and every similarity comes out NaN.
+        if vec and isinstance(vec[0], list):
+            vec = vec[0]
+        out.append({"object": "embedding", "index": i, "embedding": vec})
+        total += len(text.split())
+    return {"object": "list", "data": out,
+            "model": body.model or "neuron-embed",
+            "usage": {"prompt_tokens": total, "total_tokens": total}}
 
 
 # --------------------------------------------------------------------------- #

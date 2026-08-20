@@ -10,13 +10,12 @@ So the ones that are honest CRUD are reimplemented here, against NEURON's own st
 rather than the working directory Express used (a frozen app's cwd is wherever the shortcut
 pointed, which is not a place to keep a user's data).
 
-**What is deliberately NOT reimplemented, and why it returns a REASON rather than an empty
-list.** Memory embeds every stored message through an `/v1/embeddings` endpoint and searches by
-cosine similarity. NEURON serves no embeddings model — `api/openai_compat.py` has
-`/v1/chat/completions`, `/v1/completions` and `/v1/models`, and nothing else. Answering
-`{"ok": true, "memories": []}` would be a lie shaped like success: the UI would show memory
-working and silently recall nothing. It returns `ok: false` with the reason instead, which is
-the same discipline `/app/update` uses for "we could not check" versus "you are up to date".
+**Memory works, and stays on this machine.** It embeds each stored message and searches by
+cosine similarity; NEURON now serves `/v1/embeddings` from the GGUF already on this disk, and
+the index is a file here. Nothing about it reaches the coordinator or the node network. On a
+machine with no embedding model it still refuses with a REASON rather than answering
+`{"ok": true, "hits": []}` — an empty success would show memory working while recalling
+nothing, which is the failure that looks like success.
 
 Everything here is per-machine, not per-account. That matches where these features came from —
 a single-user workspace on one computer — and it is why none of them take a wallet id.
@@ -72,7 +71,11 @@ def health():
     # that the server is stale. NEURON serves the page and these routes from ONE binary, so
     # they can never disagree -- reporting a matching version is the truth here, not a stub.
     return {"ok": True, "server": "neuron", "apiVersion": 999999,
-            "features": {"skills": True, "secretary": True, "memory": False, "tools": False}}
+            "features": {"skills": True, "secretary": True, "memory": True,
+                         # The tool loop runs shell/file actions through Express's
+                         # /api/tools/run. Shipping that inside a consumer app handed to
+                         # strangers is a security decision, not a port -- left off.
+                         "tools": False}}
 
 
 # --------------------------------------------------------------------------- #
@@ -231,41 +234,159 @@ async def secretary_remove(request: Request):
 
 
 # --------------------------------------------------------------------------- #
-# memory — refused with a REASON, never faked
+# memory — real, and entirely on this machine
 # --------------------------------------------------------------------------- #
+#
+# Every stored message is embedded once and kept on disk beside its vector, so a later
+# conversation can pull back what an earlier one said. Both halves are LOCAL: the vectors come
+# from the GGUF already on this disk (api/openai_compat.py's /v1/embeddings, called in-process
+# here rather than over HTTP to ourselves) and the index is a file in NEURON's state directory.
+# Nothing reaches the coordinator or the node network, and it costs no NRN.
+#
+# JSONL, not one JSON blob: appending a record is O(1) where rewriting the whole array grows
+# more expensive with every message ever stored. Vectors are NORMALISED on write, which turns
+# cosine similarity into a plain dot product at read time.
+#
+# The frontend sends a `baseUrl` because it was written against Express, which proxied to
+# whatever local server the user configured. It is ignored: NEURON is the server, and honouring
+# a client-supplied URL here would let a page point this endpoint at an arbitrary host.
+def _mem_file() -> Path:
+    return _state_dir() / "memory.jsonl"
+
+
+def _embed(texts):
+    """Vectors for `texts`, or None when this machine has no embedding model."""
+    try:
+        from api.openai_compat import _embedder
+    except Exception:                                            # noqa: BLE001
+        return None
+    llm = _embedder()
+    if llm is None:
+        return None
+    out = []
+    for t in texts:
+        try:
+            v = llm.create_embedding(t)["data"][0]["embedding"]
+        except Exception:                                        # noqa: BLE001
+            return None
+        if v and isinstance(v[0], list):
+            v = v[0]
+        n = sum(x * x for x in v) ** 0.5 or 1.0
+        out.append([x / n for x in v])
+    return out
+
+
 _MEMORY_REASON = (
-    "Memory needs an embeddings model to search by meaning, and NEURON does not serve one "
-    "(/v1 offers chat and completions only). Turning it on would store notes nothing could "
-    "ever recall."
+    "No embedding model is available on this machine, so memory cannot search by meaning. "
+    "Set NEURON_EMBED_GGUF to a dedicated embedding model, or leave memory off."
 )
-
-
-def _memory_unavailable():
-    # ok:false, not an empty success. An empty list here would render as "memory is working and
-    # remembers nothing", which is exactly the failure that looks like success.
-    return JSONResponse({"ok": False, "error": _MEMORY_REASON,
-                         "unavailable": True, "memories": [], "stats": {"count": 0}},
-                        status_code=501)
 
 
 @router.get("/api/memory/stats")
 def memory_stats():
-    return _memory_unavailable()
+    n = 0
+    try:
+        with open(_mem_file(), encoding="utf-8") as f:
+            n = sum(1 for line in f if line.strip())
+    except OSError:
+        n = 0
+    return {"ok": True, "stats": {"count": n}, "count": n}
 
 
 @router.post("/api/memory/remember")
-def memory_remember():
-    return _memory_unavailable()
+async def memory_remember(request: Request):
+    body = await request.json()
+    text = str(body.get("text") or "").strip()
+    if not text:
+        return {"ok": True, "stored": False}
+    vecs = _embed([text])
+    if vecs is None:
+        return JSONResponse({"ok": False, "error": _MEMORY_REASON, "unavailable": True},
+                            status_code=501)
+    rec = {"id": uuid.uuid4().hex[:12],
+           "threadId": body.get("threadId"),
+           "threadTitle": body.get("threadTitle") or "",
+           "messageId": body.get("messageId"),
+           "role": body.get("role") or "user",
+           "text": text,
+           "ts": int(body.get("ts") or time.time() * 1000),
+           "v": vecs[0]}
+    try:
+        with open(_mem_file(), "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec) + "\n")
+    except OSError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+    return {"ok": True, "stored": True}
 
 
 @router.post("/api/memory/recall")
-def memory_recall():
-    return _memory_unavailable()
+async def memory_recall(request: Request):
+    body = await request.json()
+    query = str(body.get("query") or "").strip()
+    if not query:
+        return {"ok": True, "hits": []}
+    qv = _embed([query])
+    if qv is None:
+        return JSONResponse({"ok": False, "error": _MEMORY_REASON, "unavailable": True,
+                             "hits": []}, status_code=501)
+    q = qv[0]
+    exclude = body.get("excludeThreadId")
+    limit = int(body.get("limit") or 4)
+
+    hits = []
+    try:
+        with open(_mem_file(), encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue          # one bad line must not lose the whole index
+                if exclude and r.get("threadId") == exclude:
+                    continue
+                v = r.get("v") or []
+                if len(v) != len(q):
+                    continue          # a different embedding model wrote this; skip, do not crash
+                score = sum(a * b for a, b in zip(q, v))
+                hits.append({"threadId": r.get("threadId"), "threadTitle": r.get("threadTitle"),
+                             "role": r.get("role"), "text": r.get("text"),
+                             "ts": r.get("ts"), "score": round(score, 4)})
+    except OSError:
+        return {"ok": True, "hits": []}
+
+    hits.sort(key=lambda h: h["score"], reverse=True)
+    return {"ok": True, "hits": hits[:limit]}
 
 
 @router.post("/api/memory/forget")
-def memory_forget():
-    return _memory_unavailable()
+async def memory_forget(request: Request):
+    body = await request.json()
+    tid = body.get("threadId")
+    path = _mem_file()
+    if not tid or not path.exists():
+        return {"ok": True, "removed": 0}
+    kept, removed = [], 0
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if r.get("threadId") == tid:
+                    removed += 1
+                else:
+                    kept.append(line.rstrip("\n"))
+        tmp = path.with_suffix(".jsonl.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(kept) + ("\n" if kept else ""))
+        os.replace(tmp, path)
+    except OSError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+    return {"ok": True, "removed": removed}
 
 
 # --------------------------------------------------------------------------- #
