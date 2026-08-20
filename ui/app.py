@@ -413,23 +413,44 @@ def payout_bind_proxy(body: PayoutBindBody, request: Request):
 # The agent's config.json is the authority (it is what `_save()` writes on rotation); the
 # environment stays a fallback so a dev shell override still works and a driver-only machine,
 # which has neither, still reports `is_node: false`.
+def _config_candidates():
+    """Where an agent's config.json can be, best first: the installed state directory, then
+    the `agent/` folder a source checkout runs out of. A function so a test can stand a whole
+    machine up somewhere else."""
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"),
+                                                          ".local", "share")
+    return (Path(base) / "NEURON" / "config.json",
+            Path(__file__).resolve().parent.parent / "agent" / "config.json")
+
+
+def _node_config():
+    """(path, config) for the config this machine's agent actually uses, or (None, None).
+
+    The PATH is returned, not just the contents, because everything else this machine keeps
+    lives BESIDE it: `agent/agent.py` binds the payout key with
+    `state_dir=os.path.dirname(self.config_path)`. Any caller that re-derives that directory
+    by its own rule instead of asking here will look in the wrong place on exactly the
+    installs where the two rules differ — see `_local_payout_key`.
+    """
+    try:
+        for path in _config_candidates():
+            if path.exists():
+                cfg = json.loads(path.read_text(encoding="utf-8"))
+                if cfg.get("node_id") and cfg.get("node_token"):
+                    return path, cfg
+    except (OSError, ValueError):
+        pass
+    return None, None
+
+
 def _node_identity():
     """(node_id, node_token) as they are NOW. Never raises — a missing or half-written config
     is 'this machine serves no node', which is a state the UI already renders correctly."""
     env_id = os.environ.get("NEURON_NODE_ID") or None
     env_tok = os.environ.get("NEURON_NODE_TOKEN") or None
-    try:
-        base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"),
-                                                              ".local", "share")
-        for path in (Path(base) / "NEURON" / "config.json",
-                     Path(__file__).resolve().parent.parent / "agent" / "config.json"):
-            if path.exists():
-                cfg = json.loads(path.read_text(encoding="utf-8"))
-                nid, tok = cfg.get("node_id"), cfg.get("node_token")
-                if nid and tok:
-                    return nid, tok
-    except (OSError, ValueError):
-        pass
+    _path, cfg = _node_config()
+    if cfg:
+        return cfg["node_id"], cfg["node_token"]
     return env_id, env_tok
 
 
@@ -541,9 +562,29 @@ def _local_payout_key(create=False):
         from agent import payout_key
     except ImportError:                                     # pragma: no cover - packaging guard
         return None, None
-    base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"),
-                                                          ".local", "share")
-    state = str(Path(base) / "NEURON")
+    # BESIDE THE CONFIG, because that is where the agent put it: `agent/agent.py` calls
+    # `payout_key.ensure_bound(..., state_dir=os.path.dirname(self.config_path) or HERE)`.
+    # This used to hard-code `LOCALAPPDATA/NEURON` — true of a Windows installer install,
+    # where the config lives there too, and false of every other node. `_node_identity`
+    # already had the second candidate (`<repo>/agent/config.json`) and this did not, so on a
+    # source-run node the SAME endpoint read the config successfully and then reported that
+    # the machine "holds no key at all" about a file sitting next to it.
+    #
+    # Live on the Pavilion, 2026-08-21: config and key both in `~/neuron/agent/`, node bound
+    # to 0xA39F…E3Ee, key on disk for that exact address — and "Claim with my account"
+    # returned 409 telling the operator to find a browser wallet. That is [P53]'s own failure
+    # returning one layer down: a claim refused for a key the machine is holding, with an
+    # error that blames the operator for losing it.
+    #
+    # `create=True` inherits the same directory, so a first claim on a keyless machine mints
+    # the key where the agent will look for it rather than in a second location.
+    _cfg_path, _cfg = _node_config()
+    if _cfg_path is not None:
+        state = str(_cfg_path.parent)
+    else:
+        base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"),
+                                                              ".local", "share")
+        state = str(Path(base) / "NEURON")
     try:
         if not create and not os.path.exists(payout_key.key_path(state)):
             return None, None

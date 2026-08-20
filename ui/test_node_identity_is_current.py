@@ -62,19 +62,22 @@ def main():
               "this route still closes over a value captured at import")
 
     print("\n-- config.json is the authority, because it is what rotation writes")
-    check("the resolver reads config.json", "config.json" in
-          src[src.index("def _node_identity():"):src.index("def _node_identity():") + 1400])
-    check("...and keeps the environment as a fallback",
-          "NEURON_NODE_TOKEN" in src[src.index("def _node_identity():"):
-                                     src.index("def _node_identity():") + 1400],
+    # The resolver is a GROUP of three small functions rather than one, since the claim path
+    # needs the config's PATH as well as its contents (the payout key lives beside it — see
+    # test_claim_finds_the_key_beside_the_config). So the text checks below, and the exec
+    # further down, take the whole group: pinning only `_node_identity` would have said
+    # nothing about where the config is looked for, which is where the last bug was.
+    group = src[src.index("def _config_candidates():"):src.index("return env_id, env_tok")]
+    check("the resolver reads config.json", "config.json" in group)
+    check("...and keeps the environment as a fallback", "NEURON_NODE_TOKEN" in group,
           "a dev shell override must still work, and a driver-only machine has neither")
     check("...and never raises",
           "except (OSError, ValueError):" in src,
           "a half-written config is 'this machine serves no node', a state already rendered")
 
     print("\n-- the behaviour, against real files")
-    # Import the resolver without dragging in torch: exec just that function.
-    start = src.index("def _node_identity():")
+    # Import the resolver without dragging in torch: exec just those functions.
+    start = src.index("def _config_candidates():")
     end = src.index("\n\n", src.index("return env_id, env_tok"))
     # __file__ is referenced by the repo-checkout fallback branch; supply the real one.
     ns = {"os": os, "json": json, "__file__": os.path.join(HERE, "app.py")}
