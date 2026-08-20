@@ -1,3 +1,147 @@
+# Handoff — start of Session 69
+
+## STATE AT SHUTDOWN, 2026-08-21 — READ THIS FIRST
+
+**Network HEALTHY, verified at shutdown:** 2 nodes, 2 stages, `[[0,9],[10,27]]`, routable,
+`stage1_ok`. Both machines are up.
+
+**0.20.15 is built and INSTALLED on this PC, and `/` is now the workspace UI.**
+
+```
+/            307 -> http://127.0.0.1:8080/workspace/
+/classic     200   (what / used to serve, byte for byte, same no-store)
+/workspace/  200
+```
+
+Done as a redirect exactly as the last handoff specified — the bundle was NOT rebuilt at base
+`/`, so there is no collision with the `/assets` mount that serves the old React app's chunks.
+
+**THE PAVILION'S NODE IS CLAIMED.** `agent-raman-hp-pavilion-laptop-15-eh3xxx-e4920b`,
+`owner_wallet_id` recorded, payout address unchanged at `0xA39F…E3Ee`. First successful
+account-claim of a node that was not already owned.
+
+**`coordinator/config.AGENT_VERSION` is still 0.20.3 and NOTHING is pushed.** Publishing
+remains a deliberate act the founder has not taken. `test_version_lockstep` permits the
+coordinator to lag a built version precisely so this state is legal.
+
+## [P58] — the claim was broken for every node that is not a Windows installer install
+
+**Testing it was the session, and it failed on the first honest try.** Run against the
+Pavilion — the only genuinely unclaimed node — `POST /node/claim` returned:
+
+```
+409  this node pays out to 0xA39F...E3Ee, and this machine holds no key at all —
+     nothing here can sign for it. Use the browser-wallet claim...
+```
+
+**The key was on disk, for that exact address, in the same directory as the config file the
+same endpoint had just read successfully.**
+
+`agent/agent.py:1568` binds with `state_dir=os.path.dirname(self.config_path) or HERE` — the
+key lives BESIDE the config. `_node_identity` knew the config could be in either of two places;
+`_local_payout_key` knew about neither and hard-coded `LOCALAPPDATA/NEURON`. Those coincide on
+a Windows installer install and nowhere else, so the flow worked on the one machine it had ever
+been run on and failed on the entire population [P53] was written for — and it failed by
+telling the operator to go find a browser wallet, which is the exact thing [P53] existed to
+make unnecessary.
+
+Fixed, committed, in 0.20.15, verified live. `ui/test_claim_finds_the_key_beside_the_config.py`.
+
+## I took the network down for ~25 minutes, and the cause is worth carrying forward
+
+**Never start `ui.app` on a node that is tight on RAM.** Its lifespan calls
+`local_gguf.can_serve()`, and when llama.cpp cannot serve locally it loads the pipeline-driver
+shard — embed + layers 0..9 + lm_head. The Pavilion is a 12 GB laptop already holding an
+18-layer fp32 node slice at ~8 GB resident. Starting a uvicorn there put it into swap thrash
+so deep that **sshd could not answer for 25 minutes while the machine still answered ping.**
+The node dropped, the coordinator gap-healed, `chain_ranges` collapsed to `[[0,27]]`.
+
+**It recovered on its own.** Once the Pavilion came back and re-advertised, the coordinator
+restored `[[0,9],[10,27]]` — `pin_layers.sh` was NOT needed. Do not reach for it reflexively.
+
+**The way to exercise a UI endpoint on a node is `starlette.testclient.TestClient` WITHOUT the
+`with` form** — used that way it never runs lifespan, so nothing loads, and the request still
+goes through the real router, the real SessionMiddleware and the real endpoint. Run it under
+`systemd-run --user --scope -p MemoryMax=1600M -p MemorySwapMax=0` so a mistake kills the test
+instead of the machine. `/tmp/claim_test.py` on the Pavilion is that harness.
+
+**And `pkill -f <pattern>` over ssh matches its own command line.** Half an hour of "still
+down" was `pkill -9 -f uvicorn` killing the shell that ran it, before it could print anything.
+Kill by PID, or use a bracketed pattern.
+
+## What the Pavilion looks like now
+
+  * **Full 0.20.14 source sync**, shipped as ONE tarball rather than file-by-file — that is the
+    fix for last session's partial-copy outage. Backup of the previous tree is at
+    `~/neuron-src-backup-0.20.8.tgz`. Verified after the copy by importing every module the
+    agent loads, not just by compiling them.
+  * **Its venv now has the web stack**: fastapi 0.139.2, uvicorn 0.51.0, starlette 1.3.1,
+    itsdangerous, Authlib, httpx2. torch 2.4.1+cpu, transformers 4.44.2 and pydantic 2.13.4 are
+    UNCHANGED — checked before and after. The "no uvicorn" note in older handoffs is gone.
+  * **It also needed `coordinator/*.py`**, because `api/openai_compat.py` imports
+    `coordinator.config/ledger/model_registry`. Only the .py files were sent — `neuron.db` and
+    `node_tokens.json` were deliberately NOT copied.
+  * **Its `ui/app.py` carries the [P58] fix but NOT the `/` redirect.** It is a node, so this
+    does not matter for serving; re-sync it if anyone wants the workspace UI there.
+
+## Do these, in this order
+
+1. **[P56] — still the most serious open item, and it is now scoped.** The verifier does not
+   drive the path a user's request takes. Concretely, what to build:
+     * **One constructor for the `config` message.** `neuron_driver._connect` builds it at
+       `neuron_driver.py:301`; `proof_of_compute.challenge_node` and `challenge_middle_node`
+       each build their own. Move it to `common.stage_config()` and have all three call it —
+       then the role-deciding fields cannot drift apart again, which is the whole of [P55].
+       Note `verify()` deliberately sends NO `wire` field so the reply is lossless; keep that,
+       it is a transport choice and does not touch the role decision.
+     * **Exercise the MIDDLE role for real.** Today it is challenged with `probe: True`, a role
+       no user request ever produces. Instead give the node a next hop it can actually reach —
+       a sink the verifier opens — and compare what it forwards against `common.mid_stage`.
+       The node's side is already read: it dials `host_b:port_b`, sends
+       `{"type":"config","s2":..,"n":..,"wire":..}`, expects `{"ok":True}`, then forwards
+       `{"type":"act","hidden":h2}` and expects `{"hidden":..,"b_compute_ms":..}` back. A sink
+       that acks with no `wire` keeps the forwarded tensor lossless. Fall back to the probe
+       when the node cannot dial back, and RECORD which path ran — a probe-only attestation
+       must not be reported as equal to a real one.
+     * **Declared precision.** `verify(..., atol=0.05)` compares against fp32, so a quantized
+       node is indistinguishable from a cheating one. This needs a MEASURED tolerance per
+       declared dtype, not a guessed table — run the same challenge against a shard loaded
+       fp32 and fp16 and read the drift. `agent/test_weight_dtype_report.py` already exists,
+       so the node has somewhere to declare it.
+2. **Publishing, or a decision not to.** 70+ commits, nothing on GitHub, `AGENT_VERSION` 0.20.3.
+   Until that happens the fleet stays on 0.20.3 and none of this reaches anyone.
+3. **[P30] phase 2**, unchanged: `engine/ggml_pipeline.py` is imported by nothing; the
+   `llama-server`/`ggml-rpc-server` binaries are absent; `router.SECURE_HOP_SINCE=(0,99,0)`
+   withholds every grant. Settle the transport before building the last mile.
+
+## Known open, smaller
+
+  * **An installer exit code of 0 does not prove an install, and neither does the timestamp.**
+    The first silent run of NEURON-Setup-0.20.15.exe returned 0, the exe appeared with a moved
+    timestamp, and a minute later it was NOT on disk. Inno's setup.exe returns before its child
+    finishes, so `Start-Process -Wait` is not a wait. Re-running with `/LOG=` installed
+    cleanly. **Check the exe is still there a minute later, and check the routes.**
+  * **The node id flipped back to `agent-optinovate-6ff49d`** after this reinstall (it was
+    `-7fc2ff`). Both are registered for this one PC and both hold history. Still worth
+    reconciling; a fresh id would orphan earnings ([P53]), so never mint one.
+  * The Pavilion's `node_token` divergence from Session 67 is still unexplained and can recur.
+  * The workspace UI's tool loop is OFF by decision: it runs shell and file actions.
+  * `trust-chat` still has uncommitted `src/server/skills.ts` and `src/server/docx.ts`.
+
+## Facts that save time
+
+  * Speed is settled: 2.18 tok/s on the network, two thirds a MEMORY BANDWIDTH wall
+    (36.9 GB/s, 187 MB per fp32 layer). Only k-quants move it, which means [P30]. Local is
+    32 tok/s and free. `tools/bench_quant.py` reproduces it. Do not re-litigate.
+  * Tests: NO pytest. `C:\Users\optin\neuron\.venv\Scripts\python.exe -m <module>` per file.
+    `python` on PATH has no torch.
+  * The Pavilion is `raman@100.79.125.112`, a PLAIN FILE COPY run by `systemd --user`, not a
+    git checkout. Ship a TARBALL, not individual files.
+  * `pkill` is unreliable here and matches its own command line. Use PowerShell `Stop-Process`
+    by PID, and verify the port is free before starting a replacement.
+
+---
+
 # Handoff — start of Session 68
 
 ## STATE AT SHUTDOWN, 2026-08-20 — READ THIS FIRST
