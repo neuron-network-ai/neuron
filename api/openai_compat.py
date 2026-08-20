@@ -391,9 +391,18 @@ def chat_completions(body: ChatBody, authorization: str = Header(default=None)):
 # network, and it costs no NRN. That is why this is worth having rather than being asked of a
 # remote service.
 #
-# **The cost, stated rather than discovered.** llama.cpp needs a SEPARATE handle in embedding
-# mode, so turning memory on adds roughly the model's size in RAM again. Loaded LAZILY for that
-# reason: a user who never enables memory never pays for it.
+# **The cost, MEASURED rather than guessed.** llama.cpp needs a separate handle in embedding
+# mode, and turning memory on costs **174 MB** resident (measured: 199.8 MB -> 373.7 MB across
+# load plus one embedding). That is the small embedding model, not a second copy of the chat
+# model -- an earlier version of this comment said "roughly the model's size again", which was
+# true only while the chat model was doing the embedding and is six times too pessimistic now.
+#
+# Two things keep that 174 MB honest on a machine somebody else is using:
+#   * LAZY -- a user who never turns memory on never pays for it at all;
+#   * RELEASED WHEN IDLE -- held for EMBED_IDLE_S after the last use, then freed. Occasional
+#     recall costs a ~1 s reload rather than a permanent resident cost, which is the right
+#     trade on a volunteer's PC. Same reasoning as GPU_HEADROOM_GB and RAM_HEADROOM_FACTOR:
+#     this is somebody's own computer and they are using it for something else.
 #
 # **A purpose-built embedding model, and this is not a nicety.** Measured with the chat model
 # doing the embedding: "how much memory does my laptop have?" scored a note about PASTA at
@@ -421,13 +430,42 @@ def _embed_weights():
     except Exception:                                                # noqa: BLE001
         return None
 _embed_lock = threading.Lock()
-_embed_model = {"llama": None, "path": None}
+_embed_model = {"llama": None, "path": None, "used_at": 0.0}
+
+# How long an idle embedding handle is kept. Long enough that a conversation's worth of recalls
+# reuses one load; short enough that memory used once this morning is not still holding 174 MB
+# this afternoon.
+EMBED_IDLE_S = float(os.environ.get("NEURON_EMBED_IDLE_S", "600"))
+_embed_reaper_started = False
+
+
+def _embed_reaper():
+    """Free the embedding handle once nobody has used it for EMBED_IDLE_S."""
+    while True:
+        time.sleep(30)
+        with _embed_lock:
+            llm = _embed_model["llama"]
+            if llm is None:
+                continue
+            if time.time() - _embed_model["used_at"] < EMBED_IDLE_S:
+                continue
+            _embed_model["llama"] = None
+        # Dropped OUTSIDE the lock: closing a llama.cpp handle touches native memory and can
+        # take a moment, and holding the lock through it would stall a request that arrives in
+        # the meantime for no reason.
+        try:
+            llm.close()
+        except Exception:                                            # noqa: BLE001
+            pass
+        del llm
 
 
 def _embedder():
     """The embedding handle, loaded on first use. None when it cannot be built."""
+    global _embed_reaper_started
     with _embed_lock:
         if _embed_model["llama"] is not None:
+            _embed_model["used_at"] = time.time()
             return _embed_model["llama"]
         try:
             from llama_cpp import Llama
@@ -440,8 +478,12 @@ def _embedder():
             _embed_model["llama"] = Llama(model_path=path, embedding=True, n_ctx=512,
                                           verbose=False)
             _embed_model["path"] = path
+            _embed_model["used_at"] = time.time()
         except Exception:                                            # noqa: BLE001
             return None
+        if not _embed_reaper_started:
+            _embed_reaper_started = True
+            threading.Thread(target=_embed_reaper, daemon=True).start()
         return _embed_model["llama"]
 
 
