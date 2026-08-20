@@ -109,6 +109,14 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 if (STATIC_DIR / "app" / "assets").is_dir():
     app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "app" / "assets")),
               name="app-assets")
+# The Trust-chat workspace UI, evaluated as a replacement for the React app above. Mounted at
+# its OWN path rather than over the top of anything: /assets already belongs to the app in
+# static/app, so this build is made with NEURON_BASE=/workspace/ and asks for
+# /workspace/assets/... instead. Mounted only when a build exists, so a checkout that has never
+# run npm still starts -- same rule as the /assets mount above.
+if (STATIC_DIR / "workspace" / "index.html").is_file():
+    app.mount("/workspace", StaticFiles(directory=str(STATIC_DIR / "workspace"), html=True),
+              name="workspace")
 app.include_router(openai_router)          # Session 11: /v1/* on the same server
 app.include_router(oauth_module.router)    # Workstream B: /auth/login|callback|me|logout
 
