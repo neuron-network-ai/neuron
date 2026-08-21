@@ -103,10 +103,11 @@ def log_chain_failure(node_ids, err):
                 ",".join(node_ids or []), err.__class__.__name__, err)
 
 
-# How long a same-LAN dial may take before we give up and keep the relay connection.
-# Short on purpose: a LAN neighbour answers in ~5 ms ([P57]), so anything slower is not
-# a neighbour, and this budget is paid once per request at most.
-DIRECT_TIMEOUT_S = float(os.environ.get("NEURON_DIRECT_TIMEOUT_S", "2"))
+# How long a same-LAN dial may take before we give up and keep the relay connection. Defined
+# in lan_direct, and re-exported here because the driver is no longer its only caller: a MIDDLE
+# node dials its own next hop the same way ([P59]), and two copies of a timeout is how two
+# callers end up disagreeing about what "a neighbour" means.
+DIRECT_TIMEOUT_S = lan_direct.DIRECT_TIMEOUT_S
 
 
 class _Driver:
@@ -353,13 +354,19 @@ class _Driver:
             # `usable` re-checks the peer's answer against the subnets we actually asked about.
             # The node decides what to reveal; the caller still decides what to trust, and a
             # node naming an address outside our hint is refused even though it answered.
-            if node and lan_direct.usable(ack.get("direct"), lan_direct.local_prefixes()):
+            # `recently_unreachable` is the same guard the middle node uses ([P59]): the offer
+            # arrives on every request because the peer cannot know we failed to reach it, so
+            # without a memory of the failure this dials — and times out — every single time.
+            if (node and lan_direct.usable(ack.get("direct"), lan_direct.local_prefixes())
+                    and not lan_direct.recently_unreachable(node)):
                 d = ack["direct"]
                 try:
                     s2, c2, _ = _dial(d["ip"], d["port"], DIRECT_TIMEOUT_S)
                 except (OSError, TimeoutError, PeerUnavailable):
+                    lan_direct.note_unreachable(node)
                     return s, c                       # keep the relay connection we already have
                 s.close()
+                lan_direct.note_reachable(node)
                 self._direct[node] = (d["ip"], d["port"])
                 log.info("hop %s is on this LAN — dialling it directly instead of the relay",
                          node)

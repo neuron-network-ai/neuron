@@ -409,9 +409,49 @@ the relay — and its onward `config` carries no `lan_hint` at all, so the last 
 asked and can never offer. The feature stops at the first hop because the first hop is the
 only one anybody had two machines for.
 
+---
+
+**2026-08-21 — the hop is fixed in code, and blocked by a firewall rule on the last mile.**
+
+A middle node now asks its next hop about the LAN, using the same constructor and the same
+trust rule as the driver: `lan_hint` names our own /24s, the peer answers with `direct` only
+from inside them, `lan_direct.usable` re-checks the answer against what we asked, and the relay
+stays the address of record for every failure. A [P52]-sealed hop is deliberately never
+re-dialled — a grant is single-use, and presenting it twice is indistinguishable from a replay.
+`agent/test_middle_hop_takes_the_lan.py`, 15 assertions over real sockets against a real
+RFC1918 address, so the trust check is doing its job rather than being stubbed.
+
+**And then it made things worse, which is the part worth writing down.** The OptiPlex's `ufw`
+scopes port 50999 to `tailscale0`, so the LAN dial to `192.168.1.10:50999` **times out** while
+Tailscale connects in 18 ms. The offer arrives on every request — the peer cannot know we
+failed to reach it — so the dial was retried every time at `DIRECT_TIMEOUT_S` a go:
+
+| | decode | time to first token |
+|---|---|---|
+| before | 1.66 tok/s | 2493 ms |
+| the "optimisation", first cut | 1.81 tok/s | **~4000 ms** |
+| with a memory of failure | **1.85 tok/s** | **2034 ms** |
+
+**A cache of successes is not enough; the failures are what cost.** `lan_direct` now remembers
+an unreachable peer for `DIRECT_RETRY_S` (300 s by default) — bounded rather than permanent,
+because the reason is usually transient or fixable and a node that gives up forever never
+notices. The DRIVER had the same flaw and the same fix; it had simply never met a peer that
+offered an address it could not reach.
+
+**Still open: one firewall rule.** The LAN win is real and unclaimed until the OptiPlex accepts
+50999 from its own subnet, matching the rules already there for 22, 3001 and 3002:
+
+```
+sudo ufw allow from 192.168.1.0/24 to any port 50999 proto tcp
+```
+
+That is the founder's to run. Until then the code is correct, costs one timeout per peer per
+five minutes, and takes the relay.
+
 Related: [P57] (the bandwidth wall this sits on top of, and the 88 ms/5.3 ms measurement),
 [P30] (phase 3, where distribution first measured 8x), [P56] (the three-stage topology exists
-because verifying a middle node needed one).
+because verifying a middle node needed one), [P52] (the grant that stops a sealed hop being
+re-dialled).
 
 ### [P57] 🔴 The network path is 2.18 tok/s, and two thirds of that is memory bandwidth nobody can optimise away (2026-08-20)
 

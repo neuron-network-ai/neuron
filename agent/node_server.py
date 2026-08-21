@@ -136,7 +136,7 @@ def _is_range_probe(msg):
     |---|---|---|
     | `neuron_driver._connect`, 2-stage chain, 0.20.9+ | `s2`, `stage: "last"`, `wire` | traffic, said outright |
     | the same, from a driver already in the field | `s1`, `s2`, `wire` | traffic -- **s1 == s2**: the driver owns `0..s1-1`, the last stage begins at `s2`, and a chain with no gap makes them equal at any depth |
-    | a middle relay passing traffic on | `s2`, `n`, `wire` | traffic -- no `s1` |
+    | a middle relay passing traffic on | `s2`, `stage: "last"`, `n`, `wire`, `lan_hint` | traffic, said outright -- no `s1`, and since [P59] it asks about the LAN too |
     | `proof_of_compute.challenge_node` | `s2`, `n` | traffic (it scores the last stage) -- no `s1` |
     | `proof_of_compute.challenge_middle_node` | `s1`, `s2`, `probe: true` | probe -- **s1 < s2**, a non-empty range to challenge |
 
@@ -379,6 +379,107 @@ class NodeServer:
         ip = lan_direct.address_for(hint)
         return {"direct": {"ip": ip, "port": self.listen_port}} if ip else {}
 
+    def _dial_next_hop(self, msg, s2):
+        """Open the hop after this one, preferring a same-LAN route when it offers one.
+
+        **The relay detour this closes ([P59]).** `lan_direct` lets a caller skip the relay by
+        naming the private /24s it sits on and letting the peer answer only from inside them.
+        It was built for the DRIVER's hop and stopped there, because the first hop was the only
+        one anybody had two machines for. A middle node dialled whatever `host_b` the driver
+        was handed by the coordinator — the relay — and its onward `config` carried no
+        `lan_hint` at all, so the last node was never asked and could never offer.
+
+        Live on 2026-08-21 that was two machines on the same switch (`192.168.1.11` and
+        `192.168.1.10`) routing every token through Amsterdam: 88 ms where a neighbour costs 5.3
+        ([P57]). The driver could not fix it for them — it is on a different network, so its
+        own hint matches neither. Only the middle node knows it shares a LAN with its next hop,
+        because only the middle node is on that LAN.
+
+        **The relay stays the address of record.** No offer, an offer outside the subnets we
+        asked about, a refused dial, a peer that moved — every one of them keeps the relay
+        connection. This may make a request faster and must never be able to stop one.
+
+        **A sealed hop is never re-dialled, and that is not an oversight.** A [P52] grant is
+        single-use by design: the receiving node records it in `_grants_seen` so it cannot be
+        replayed inside its TTL. Presenting the same grant on a second connection is
+        indistinguishable from an attacker replaying it, and the node is right to refuse. So
+        when the driver carried a grant down, this takes the relay and keeps it. The durable
+        fix is a grant scoped to a NODE rather than to a connection, or a second grant carried
+        for the direct address — both of which are the driver's to issue, not this node's to
+        work around. Today it costs nothing: `router.SECURE_HOP_SINCE` withholds every grant
+        network-wide, so the live path is the unsealed one.
+        """
+        host_b, port_b = msg["host_b"], msg["port_b"]
+        grant = msg.get("grant_b")
+        hint = lan_direct.local_prefixes()
+
+        def _open(host, port, timeout):
+            c = socket.create_connection((host, port), timeout=timeout)
+            # [P52] encrypt the onward hop as well, with the grant the driver carried down.
+            # Without this the chain is private only as far as the first machine, which is a
+            # privacy claim that is true of one link and false of the request.
+            if grant:
+                try:
+                    ch = wire_crypto.client_handshake(
+                        c, base64.b64decode(grant), msg.get("node_b", ""))
+                    common.attach_channel(c, ch)
+                except wire_crypto.HandshakeError as e:
+                    c.close()
+                    raise ConnectionError(
+                        f"next hop {msg.get('node_b')} failed the handshake: {e}")
+            # `stage="last"` states the next hop's role instead of leaving it to infer one from
+            # the shape of the message — the same constructor the driver uses, for the same
+            # reason ([P55], [P56]). `lan_hint` is the new part: it asks the next hop whether
+            # it shares a network with us, and asks nothing else. It names our own /24s, never
+            # our address, so a peer elsewhere simply omits the answer.
+            common.send_msg(c, common.stage_config(
+                s2, stage="last", n=msg.get("n", self.n),
+                hidden_size=self.model.config.hidden_size, lan_hint=hint))
+            ack = common.recv_msg(c)
+            if not ack.get("ok"):
+                c.close()
+                raise ConnectionError(f"next hop refused: {ack}")
+            return c, ack
+
+        key = (host_b, port_b)
+        known = type(self)._direct_peers.get(key)
+        if known:
+            try:
+                return _open(known[0], known[1], lan_direct.DIRECT_TIMEOUT_S)
+            except (OSError, ConnectionError):
+                type(self)._direct_peers.pop(key, None)   # it moved or went away; relay again
+
+        c, ack = _open(host_b, port_b, common.COLD_CONNECT_TIMEOUT_S)
+        # An offer we have already failed to reach is skipped rather than retried. It arrives
+        # on EVERY request — the peer has no idea we could not get there — so without this the
+        # dial is attempted every time and each attempt costs the full DIRECT_TIMEOUT_S. That
+        # is not theoretical: measured here at +1.5 s on time-to-first-token, against a peer
+        # whose firewall scopes its port to a different interface. See lan_direct.
+        # `usable` re-checks the peer's answer against the subnets we actually asked about. The
+        # peer decides what to reveal; the caller still decides what to trust, and a node naming
+        # an address outside our hint is refused even though it answered — that is what stops a
+        # peer steering somebody's activations at another machine on our own network.
+        if (not grant and lan_direct.usable(ack.get("direct"), hint)
+                and not lan_direct.recently_unreachable(key)):
+            d = ack["direct"]
+            try:
+                c2, ack2 = _open(d["ip"], d["port"], lan_direct.DIRECT_TIMEOUT_S)
+            except (OSError, ConnectionError):
+                lan_direct.note_unreachable(key)
+                return c, ack                            # keep the relay we already have
+            c.close()
+            lan_direct.note_reachable(key)
+            type(self)._direct_peers[key] = (d["ip"], d["port"])
+            # print, not logging: this module reports through print everywhere else, and a
+            # logger name that exists nowhere else in the file is a NameError waiting for the
+            # one branch that reaches it — which is exactly what this was until the test for
+            # it ran, because the branch only fires when a peer accepts the LAN offer and no
+            # peer had ever been asked.
+            print(f"[node] next hop {msg.get('node_b') or f'{host_b}:{port_b}'} is on this "
+                  f"LAN at {d['ip']} — dialling it directly instead of the relay")
+            return c2, ack2
+        return c, ack
+
     def _batcher(self, role, lo, hi):
         """One MicroBatcher per (role, layer range). Keyed rather than global because a
         batch's slots must all run the SAME layers -- the range arrives in the caller's
@@ -415,6 +516,12 @@ class NodeServer:
     # The port this server is actually accepting on, set by run(). None until then, which is
     # what makes _direct_offer decline rather than advertise a port it does not hold.
     listen_port = None
+    # (host_b, port_b) -> (ip, port) for a next hop that turned out to share a LAN with us.
+    # Learned from that node's own ack, never from the coordinator, and dropped the moment a
+    # dial to it fails. Class-level so it survives across connections: the saving is per token,
+    # and re-discovering it on every request would spend a relay round trip to avoid one.
+    # Purely an optimisation — an empty dict is the behaviour that shipped before [P59].
+    _direct_peers = {}
     # Grants already used, so one cannot be replayed inside its TTL. Bounded
     # by clearing wholesale: every entry older than GRANT_TTL_S is already
     # unusable, so forgetting them costs nothing and an unbounded set on a
@@ -524,26 +631,7 @@ class NodeServer:
                     ack_direct = self._direct_offer(msg.get("lan_hint"))
                     if "host_b" in msg:                      # MIDDLE relay role (real pipeline traffic)
                         role, s1, s2 = "middle", msg["s1"], msg["s2"]
-                        bconn = socket.create_connection((msg["host_b"], msg["port_b"]),
-                                                         timeout=common.COLD_CONNECT_TIMEOUT_S)
-                        # [P52] encrypt the onward hop as well, with the grant the driver
-                        # carried down. Without this the chain is private only as far as the
-                        # first machine, which is a privacy claim that is true of one link and
-                        # false of the request.
-                        _gb = msg.get("grant_b")
-                        if _gb:
-                            try:
-                                _ch = wire_crypto.client_handshake(
-                                    bconn, base64.b64decode(_gb), msg.get("node_b", ""))
-                                common.attach_channel(bconn, _ch)
-                            except wire_crypto.HandshakeError as e:
-                                bconn.close()
-                                raise ConnectionError(
-                                    f"next hop {msg.get('node_b')} failed the handshake: {e}")
-                        common.send_msg(bconn, {"type": "config", "s2": s2, "n": msg.get("n", self.n),
-                                                "wire": wire_codec.preference(self.model.config.hidden_size)})
-                        back = common.recv_msg(bconn)
-                        assert back.get("ok"), f"next hop refused: {back}"
+                        bconn, back = self._dial_next_hop(msg, s2)
                         bcodec = wire_codec.negotiate([back["wire"]] if back.get("wire") else None)
                         bconn.settimeout(common.HOT_TIMEOUT_S)
                         common.send_msg(conn, {"ok": True, "layers": self.n, "s1": s1, "s2": s2,

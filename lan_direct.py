@@ -41,7 +41,9 @@ the coordinator never sees a home address.
     refused connection, a wrong build — falls back to the address the coordinator gave.
 """
 import ipaddress
+import os
 import socket
+import time
 
 # RFC1918 only. See the module docstring for why 100.64.0.0/10 is not here.
 PRIVATE_NETS = (
@@ -49,6 +51,52 @@ PRIVATE_NETS = (
     ipaddress.ip_network("172.16.0.0/12"),
     ipaddress.ip_network("192.168.0.0/16"),
 )
+
+
+# How long to wait on a same-LAN dial before giving up and keeping the relay. Short on
+# purpose: a neighbour on the same switch answers in single-digit milliseconds ([P57] measured
+# 5.3 ms against the relay's 88), so a dial that has not connected in two seconds is not a
+# slow neighbour, it is a wrong guess — and every failure here costs a request latency it was
+# supposed to save. Lives here rather than in `neuron_driver` because the driver is no longer
+# the only caller: a MIDDLE node dials its own next hop the same way ([P59]).
+DIRECT_TIMEOUT_S = float(os.environ.get("NEURON_DIRECT_TIMEOUT_S", "2"))
+
+
+# How long to remember that a peer's advertised LAN address could NOT be reached, before
+# trying it again. Without this, an offer that never works is retried on EVERY request and
+# each retry costs the full DIRECT_TIMEOUT_S — turning an optimisation into a per-request tax.
+#
+# Measured, on the day this was written: the Pavilion and the OptiPlex share a switch and the
+# OptiPlex's ufw scopes port 50999 to `tailscale0`, so the LAN dial times out while the offer
+# keeps arriving. Time-to-first-token went 2493 ms -> ~4000 ms, and the "optimisation" was a
+# straight loss. A cache of successes is not enough; the failures are what cost.
+#
+# Bounded rather than permanent because the reason is usually transient or fixable — a laptop
+# moves, a firewall rule is added — and a node that gives up forever never notices.
+DIRECT_RETRY_S = float(os.environ.get("NEURON_DIRECT_RETRY_S", "300"))
+
+_unreachable = {}
+
+
+def note_unreachable(key):
+    """Remember that a direct dial to `key` failed, so we stop paying for it every request."""
+    _unreachable[key] = time.monotonic()
+
+
+def note_reachable(key):
+    """Forget any past failure for `key` — it works now."""
+    _unreachable.pop(key, None)
+
+
+def recently_unreachable(key):
+    """Should we skip the direct dial for `key` and go straight to the relay?"""
+    at = _unreachable.get(key)
+    if at is None:
+        return False
+    if time.monotonic() - at > DIRECT_RETRY_S:
+        _unreachable.pop(key, None)                  # cooled off; worth one more try
+        return False
+    return True
 
 
 def is_private(ip):
