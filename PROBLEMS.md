@@ -366,6 +366,53 @@ Related: [P53] (the claim this was supposed to have fixed), [P54] (one thing reg
 several places, each failing silently), [P39] (ownership crediting, which is what a claim
 turns on).
 
+### [P59] 🟡 A third stage costs a relay round trip per token, and the two nodes paying it share a LAN (2026-08-21)
+
+**Adding `optiplex-server` as a third node dropped the network from ~3.3 tok/s to ~2.1-2.4.**
+The first guess was that the new machine was slow. It is not, and the measurement says so:
+relay-challenged on nine layers each, with the node's own `c_compute_ms` read off the wire so
+compute and network are separated —
+
+| node | layers | compute | per layer |
+|---|---|---|---|
+| Pavilion (`192.168.1.11`) | 10-18 | 118.5 / 112.4 ms | **13.2 / 12.5 ms** |
+| OptiPlex (`192.168.1.10`) | 19-27 | 102.5 / 122.1 ms | **11.4 / 13.6 ms** |
+
+Identical. The `26.9 ms/layer` in the OptiPlex's own log was taken seconds after startup while
+it was still loading its slice, which is how a healthy machine acquires a reputation for being
+slow. **The hop in those same runs cost 61-98 ms against ~115 ms of compute.**
+
+**Splitting layers cannot make decode faster, and this is arithmetic, not tuning.** Decode is
+sequential: every token traverses all 28 layers in order, so two machines running nine layers
+each run one AFTER the other, not in parallel.
+
+```
+2 stages:  driver 0-9 local -> [hop] -> 18 layers   ~225 ms compute + 1 hop
+3 stages:  driver 0-9 local -> [hop] -> 9 -> [hop] -> 9   ~225 ms compute + 2 hops
+```
+
+Same compute, one more round trip. 3.3 -> 2.1 tok/s is 303 -> 476 ms per token, and that
++173 ms lands on the measured cost of an added relay leg each way. This is [P30] phase 3's
+8x, seen from the other end: **more machines buy CAPACITY — bigger models, more concurrent
+users — and never per-user speed, until the model stops fitting on fewer machines.**
+
+**The part that is fixable.** The Pavilion is `192.168.1.11` and the OptiPlex is
+`192.168.1.10`. They are in the same house, on the same switch, and the hop between them goes
+through the relay in Amsterdam. [P57] measured the relay at **88 ms against 5.3 ms** for a
+direct LAN neighbour.
+
+`lan_direct` already exists for exactly this and does not cover this hop. It works
+driver->node: the driver names the private /24s it sits on, the node answers with `direct`
+only if it holds an address inside one of them, and nothing is published or stored. But a
+MIDDLE node dials `host_b` with whatever address the driver was handed by the coordinator —
+the relay — and its onward `config` carries no `lan_hint` at all, so the last node is never
+asked and can never offer. The feature stops at the first hop because the first hop is the
+only one anybody had two machines for.
+
+Related: [P57] (the bandwidth wall this sits on top of, and the 88 ms/5.3 ms measurement),
+[P30] (phase 3, where distribution first measured 8x), [P56] (the three-stage topology exists
+because verifying a middle node needed one).
+
 ### [P57] 🔴 The network path is 2.18 tok/s, and two thirds of that is memory bandwidth nobody can optimise away (2026-08-20)
 
 **Measured on the live two-machine chain the day [P55] was fixed**, first honest end-to-end
