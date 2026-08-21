@@ -1,3 +1,116 @@
+# Handoff — start of Session 70
+
+## STATE, 2026-08-21 — 0.20.16 IS PUBLISHED AND TWO THINGS WAIT ON YOU
+
+**NEURON is on GitHub.** 115 commits pushed to `main-full`, release cut at
+[v0.20.16](https://github.com/neuron-network-ai/neuron/releases/tag/v0.20.16) with the
+installer attached, `AGENT_VERSION` moved 0.20.3 → 0.20.16 and `AGENT_SHA256` set to
+`bf8589376027503051d4aec6f7bae7dbab36b06a3d2a354603c895f4997a42e7` — verified by downloading
+the published asset back and hashing it, so a node's integrity check passes rather than
+refusing the file.
+
+**Network:** 3 nodes, `[[0,9],[10,18],[19,27]]`, routable, healthy, ~1.84 tok/s, correct
+answers. All three report **0.20.16**.
+
+```
+agent-optinovate-6ff49d                          0-9     this PC, driver + stage 1
+agent-optiplex-server-ce473b                     10-18   OptiPlex, MIDDLE relay
+agent-raman-hp-pavilion-laptop-15-eh3xxx-e4920b  19-27   Pavilion, last stage
+```
+
+## THE TWO THINGS ONLY YOU CAN DO
+
+Both need the coordinator VM, whose SSH key carries a passphrase:
+
+```
+SSH_AUTH_SOCK=/c/Users/optin/.ssh/neuron-agent.sock ssh-add /c/Users/optin/.ssh/oracle_coordinator
+bash coordinator/deploy.sh
+```
+
+1. **Until that deploy, publishing has NOT taken effect.** `AGENT_VERSION` is read by the
+   coordinator process, so the live coordinator still says 0.20.3 and no node is told to
+   update. The three on the network are on 0.20.16 because they were updated by hand.
+2. **The [P59] auto-repair fix is in that same deploy** — written, tested (15 assertions),
+   committed, not live.
+
+## [P60] — a node served garbage at 3 tok/s while every light was green
+
+**This is the most important thing in this handoff.** Installing 0.20.16 restarted this PC's
+agent; the coordinator re-placed the roster while it was away and moved the Pavilion from 10-18
+to 10-27. **It was never told.** It served `layers[10:]` over a skeleton whose 19-27 were never
+materialised, and answered a question about the sky with
+`Sovereberg Sovere ABCDEFGHITestCategory`.
+
+`/status` said `routable: true`, `stage1_ok: true`, `network_healthy: true`, 28/28 covered.
+Decode was **3.00 tok/s, the fastest this network has ever produced**, because a node running
+nine layers instead of eighteen is genuinely quicker. **Speed went up as correctness went to
+zero — on this network throughput is not evidence of anything.**
+
+One command found it, and it was [P56]'s own fix from that morning:
+
+```
+RangeMismatch: challenged on layers 10-27 but the node holds 10-18
+               -- placement disagreement, not a bad answer
+```
+
+**The gap is the NOTIFICATION, not the placement** — [P37]'s open item. The fix that closes it
+without trusting the coordinator or timing: `node_server` should refuse a config whose range
+exceeds what `unmaterialized_layers` already told it at load time, and answer `range_mismatch`,
+which the driver already handles as a reroute. Filed, not built. **Do this next.**
+
+**And the operational rule it earns:** after any placement change or restart, attest before
+trusting a chat result.
+
+```
+.venv\Scripts\python.exe -m security.proof_of_compute --host <ip> --port 50999 --s2 <lo> --n 28
+```
+
+## What this session did
+
+  * **[P58]** — the account claim looked for the payout key in a place only Windows has, so it
+    was broken for every Linux node, source run and self-hoster. Fixed; the Pavilion's node is
+    claimed, the first claim of a node that was not already owned.
+  * **[P56] parts one and two** — one constructor for the `config` message, shared by driver and
+    verifier; the MIDDLE role challenged as a relay for the first time, graded on what it
+    forwards. Proven against a real middle node (`max_err` 2.8e-05). Part three (declared
+    precision) is still open and still gated on [P30].
+  * **[P59]** — a middle node now prefers a same-LAN next hop. With the OptiPlex's firewall
+    opened (`ufw allow from 192.168.1.0/24 to any port 50999 proto tcp`) the hop went from a
+    3 s timeout to **0.2 ms**, confirmed on the wire. Also: an unreachable offer is now
+    remembered, because retrying it cost +1.5 s of first-token on every request.
+  * **The third machine joined** and immediately found two bugs only a third machine could: a
+    partial config crash-looping the agent (`KeyError: slice_dir`, while a comment claimed
+    defaults were applied), and `agent/requirements.txt` never listing `cryptography`.
+  * **`/` is the workspace UI**, `/classic` keeps the old page.
+
+## Still open
+
+  * **[P60]** the range-notification gap — above.
+  * **[P56] part three**, declared precision. Needs a MEASURED tolerance per dtype and a
+    declaration that costs something. Urgent the day [P30] lands, not before.
+  * **[P30] phase 2** — `engine/ggml_pipeline.py` is imported by nothing; the binaries are
+    absent; `router.SECURE_HOP_SINCE=(0,99,0)` withholds every grant.
+  * **The node id keeps flipping** between `agent-optinovate-6ff49d` and `-7fc2ff` across
+    restarts. Both are registered for this one PC. Never mint a fresh one — it orphans earnings.
+  * **The driver's own hop still uses the relay** because this PC is on a hotspot
+    (`192.168.137`) while both nodes are on `192.168.1`. On the home network it would go
+    direct, worth roughly another 76 ms/token.
+
+## Facts that save time
+
+  * **Three stages is slower than two** and always will be on a model that fits on two.
+    Splitting does not reduce compute — decode is sequential — it only adds a round trip. More
+    machines buy capacity and verification, never per-user speed. Two stages measured 2.16
+    tok/s against three at 1.84.
+  * Tests: NO pytest. `C:\Users\optin\neuron\.venv\Scripts\python.exe -m <module>`.
+  * Ship source to a node as ONE tarball, then verify by **importing** every module the agent
+    loads. `compileall` passes while imports fail.
+  * `pkill -f <pattern>` over ssh matches its own command line and kills the shell running it.
+  * An installer exit code of 0 does not prove an install; check the exe is still there a
+    minute later, and check the routes.
+
+---
+
 # Handoff — start of Session 69
 
 ## ADDENDUM 2, 2026-08-21 07:50 — THERE ARE THREE MACHINES NOW, AND THE CHAIN HAS A MIDDLE
