@@ -15,6 +15,20 @@ So two invariants, both checkable offline:
   1. every download link names the SAME version;
   2. that version has release notes in the repo — the cheapest available proxy for "this was
      actually released", since a build nobody wrote notes for is not one to send strangers to.
+
+**Both held on 2026-08-21 while the public site sent every visitor to v0.19.0.** They are
+invariants about the repo AGREEING WITH ITSELF, and the repo agreed with itself perfectly at
+0.20.3 for nineteen releases. Two more, added the day that was found:
+
+  3. the version those links name is the version the COORDINATOR publishes at /agent/version —
+     the one every running node is told to install. A page nineteen releases behind the fleet
+     is not inconsistent with anything the first two checks can see;
+  4. any SHA-256 printed beside a download link is the hash of the file that link points at
+     (`config.AGENT_SHA256`). The installer is unsigned, so those pages tell people to verify
+     the hash by hand — and `docs/index.html` said `80eb83a2...` while `README.md` said
+     `b9d486b1...` for the SAME v0.20.3, whose published asset actually hashes to `01867f43...`.
+     Neither was ever right. The only person harmed by that is the careful one: they check, find
+     a mismatch on a completely legitimate download, and learn that checking is noise.
 """
 import os
 import re
@@ -97,6 +111,46 @@ def main():
               f"agent's daily update check and the Chat UI's update notice both point at a "
               f"release that does not exist. Production is only correct while an env pin "
               f"overrides it — remove the pin and the whole fleet is sent to a 404.")
+
+        # 3. THE PAGE MUST NOT BE BEHIND THE FLEET.
+        #
+        # This is the check the first three could not make, because nothing above compares the
+        # repo to anything outside itself. Every file listed here agreed on 0.20.3 while the
+        # coordinator published 0.20.22 and the live site served 0.19.0 — three answers to "what
+        # do I install", all of them silent, because an old release link still downloads and the
+        # installer it fetches then auto-updates itself. The visitor is never told, and the only
+        # trace is that their first run is on a build from before the correctness work.
+        stale = sorted({(f, t) for f, ps in found.items() for t, _ in ps if t != av})
+        check(f"every download link names the version the coordinator publishes (v{av})",
+              not stale,
+              "; ".join(f"{f} sends people to v{t}" for f, t in stale)
+              + f" while /agent/version tells every node to run v{av}" if stale else "")
+
+    # 4. AND A HASH BESIDE A DOWNLOAD LINK MUST BE THAT DOWNLOAD'S HASH.
+    #
+    # Printed so a stranger can verify an unsigned installer by hand, which makes a wrong one
+    # worse than none: it fails on a good download and teaches the careful reader to skip the
+    # check. Both public pages carried a hash that matched nothing at all.
+    ms = re.search(r'AGENT_SHA256\s*=\s*os\.environ\.get\(\s*"NEURON_AGENT_SHA256"\s*,'
+                   r'\s*"([0-9a-f]{64})"\s*\)', cfg)
+    check("coordinator/config.py declares a default AGENT_SHA256", bool(ms))
+    if ms:
+        published = ms.group(1)
+        wrong = []
+        for rel in FILES:
+            path = os.path.join(HERE, rel)
+            if not os.path.exists(path):
+                continue
+            text = open(path, encoding="utf-8").read()
+            if "NEURON-Setup-" not in text:
+                continue          # not a page that offers the download; nothing to verify
+            for h in set(re.findall(r'\b[0-9a-f]{64}\b', text)):
+                if h != published:
+                    wrong.append((rel, h))
+        check("every SHA-256 shown beside a download link is the published installer's",
+              not wrong,
+              "; ".join(f"{f} prints {h[:8]}..." for f, h in sorted(wrong))
+              + f" but the published installer hashes to {published[:8]}..." if wrong else "")
 
     print(f"\n{ok} passed, {fail} failed")
     return fail == 0

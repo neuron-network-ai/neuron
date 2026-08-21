@@ -183,10 +183,10 @@ footer a{color:#15803d}
   <h1>Distributed AI inference across idle machines</h1>
   <p class="hero-sub">Open source, private on your own machine, CPU and GPU nodes, no special setup required. Consumer hardware collectively runs models too large for any single machine.</p>
   <div class="btn-row">
-    <a class="btn-primary" href="https://github.com/neuron-network-ai/neuron/releases/download/v0.20.3/NEURON-Setup-0.20.3.exe">⬇ Download for Windows — v0.20.3</a>
+    <a class="btn-primary" id="dl-primary" href="https://github.com/neuron-network-ai/neuron/releases/download/v0.20.22/NEURON-Setup-0.20.22.exe">⬇ Download for Windows — <span id="dl-version">v0.20.22</span></a>
     <a class="btn-secondary" href="https://github.com/neuron-network-ai/neuron/blob/main-full/INSTALL.md">Source install (Linux / macOS)</a>
   </div>
-  <span class="sha">207 MB &nbsp;·&nbsp; SHA-256: 80eb83a2b669b05e3a84016726e84c55e1b86cc227ac2205636cd33bdfa69b81</span>
+  <span class="sha">~220 MB &nbsp;·&nbsp; SHA-256: <span id="dl-sha">2c7820d063d16ed53039ec0a42e0ddfbce5beb36d7c7360654beb322bfdd2721</span></span>
   <div class="warn-box">⚠ Windows will show an "unrecognized publisher" warning — the installer is not yet code-signed. The full source is public. Verify the SHA-256 above before running.</div>
 </section>
 
@@ -339,7 +339,7 @@ footer a{color:#15803d}
   <div class="install-methods">
     <div class="method">
       <div class="method-title">Windows</div>
-      <div class="method-desc"><a href="https://github.com/neuron-network-ai/neuron/releases/download/v0.20.3/NEURON-Setup-0.20.3.exe">Download the installer</a> — double-click, then open localhost:8080.</div>
+      <div class="method-desc"><a id="dl-method" href="https://github.com/neuron-network-ai/neuron/releases/download/v0.20.22/NEURON-Setup-0.20.22.exe">Download the installer</a> — double-click, then open localhost:8080.</div>
     </div>
     <div class="method">
       <div class="method-title">Linux &amp; macOS</div>
@@ -416,6 +416,58 @@ function fetchStats(){
 }
 fetchStats();
 setInterval(fetchStats, 30000);
+
+// THE DOWNLOAD LINK IS A LIVE FACT TOO, AND IT WAS THE ONE THING ON THIS PAGE NOBODY UPDATED.
+//
+// The version, the url and the SHA-256 were hardcoded in three places here. On 2026-08-21 the
+// published release was 0.20.22, this file in the repo said 0.20.3, and the page GitHub Pages
+// was actually serving said 0.19.0 — because Pages builds from `main:/docs` and the work
+// happens on `main-full`. Three different answers to "what do I install", none of them right,
+// and none of them BROKEN: a stale release link downloads an older installer perfectly
+// happily, so the failure is completely silent and every stranger gets it.
+//
+// The SHA-256 is the sharp end. The installer is unsigned, so this page tells people to verify
+// the hash before running it — and it was printing 0.20.3's hash. Anybody who actually did as
+// asked would find a mismatch on a legitimate download, and the lesson they take from that is
+// to stop checking.
+//
+// /agent/version is the SAME source of truth the fleet's auto-updater installs from, so the
+// page can no longer disagree with what a running node is told to run. Reading it here means
+// a release never again needs someone to remember this file.
+const RELEASES = 'https://github.com/neuron-network-ai/neuron/releases/download/';
+function fetchRelease(){
+  fetch('https://neuronnet.duckdns.org/agent/version', {cache:'no-store'})
+    .then(r=>{ if(!r.ok) throw new Error(r.status); return r.json(); })
+    .then(d=>{
+      // ALL THREE OR NONE. The version, the link and the hash are one fact about one file, and
+      // applying them separately is how the page ends up telling somebody to verify build A's
+      // hash against build B's download — the very mismatch this whole block exists to stop.
+      // An empty sha256 is a real state, not an oversight: it means "released, do not install"
+      // (coordinator config.AGENT_SHA256), and the honest thing to show then is the last
+      // complete answer we had rather than a new link with an old hash beside it.
+      //
+      // The url is required to be on our own releases host. This page takes a link from a
+      // remote endpoint and hands it to a visitor as an executable — so a wrong or tampered
+      // answer may point at nothing but the repository it claims to be.
+      if(!d.version) return;
+      if(typeof d.download_url !== 'string' || d.download_url.indexOf(RELEASES) !== 0) return;
+      if(!/^[0-9a-f]{64}$/.test(d.sha256 || '')) return;
+      const v = document.getElementById('dl-version');
+      if(v) v.textContent = 'v' + d.version;
+      ['dl-primary','dl-method'].forEach(id=>{
+        const a = document.getElementById(id);
+        if(a) a.href = d.download_url;
+      });
+      const h = document.getElementById('dl-sha');
+      if(h) h.textContent = d.sha256;
+    })
+    .catch(()=>{
+      // Deliberately silent: the markup already carries the release that was current when this
+      // file was committed, which is a working download and a matching hash. A coordinator
+      // that is down must not take the download button with it.
+    });
+}
+fetchRelease();
 </script>
 </body>
 </html>

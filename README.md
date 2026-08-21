@@ -5,10 +5,11 @@ joins a network of ordinary computers that together run AI models too big for an
 
 ## Download
 
-**[⬇ NEURON-Setup-0.20.3.exe](https://github.com/neuron-network-ai/neuron/releases/download/v0.20.3/NEURON-Setup-0.20.3.exe)** (207 MB)
+**[⬇ NEURON-Setup-0.20.22.exe](https://github.com/neuron-network-ai/neuron/releases/download/v0.20.22/NEURON-Setup-0.20.22.exe)** (217 MB)
 
-SHA-256 `b9d486b1e92070d3667ab3f7837e4c973fd943fd7fbfac512942befebe5499d6` — the same hash every
-installed agent checks before it will run an update.
+SHA-256 `2c7820d063d16ed53039ec0a42e0ddfbce5beb36d7c7360654beb322bfdd2721` — the same hash every
+installed agent checks before it will run an update, read back from `/agent/version` and from
+the published asset itself.
 
 Windows installer — no technical knowledge needed. Double-click, then open
 **http://localhost:8080** and sign in with Google or GitHub.
