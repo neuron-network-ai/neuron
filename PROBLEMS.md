@@ -597,6 +597,15 @@ or the verifier's blanket `except Exception` scores the network between us again
 that the node's ROLE DECISION is identical for a request and a challenge across every chain
 shape. Verified live against the Pavilion: passed, `max_err` 0.000217, `path: last`.
 
+**The relay challenge is now proven against a real middle node (2026-08-21).** It could not be
+until there WAS one: two machines make a driver and a last stage and nothing in between, which
+is its own comment on how this went unnoticed — the network had no middle node to verify, so
+the fact that middle nodes were never verified cost nothing visible. A third machine
+(`optiplex-server`) joined and the chain was re-split to `[[0,9],[10,18],[19,27]]`, making the
+Pavilion a genuine relay. Challenged on 10-18 through the relay path: **passed, `max_err`
+2.8e-05, `path: relay`, 370 ms.** And the three-stage chain serves users correctly —
+*"Hello! How can I assist you today?"*, all three nodes in the chain, 0 reroutes.
+
 **STILL OPEN — part three, declared precision.** `verify()` compares against fp32 with
 `atol=0.05`, so a legitimately quantized node is numerically indistinguishable from a cheating
 one. This needs a tolerance per declared dtype that is **measured** — load the same shard fp32

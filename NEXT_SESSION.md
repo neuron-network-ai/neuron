@@ -1,5 +1,57 @@
 # Handoff — start of Session 69
 
+## ADDENDUM 2, 2026-08-21 07:50 — THERE ARE THREE MACHINES NOW, AND THE CHAIN HAS A MIDDLE
+
+**The hard boundary is lifted.** The founder brought `optiplex-server` in as a third node
+(2026-08-21). Earlier handoffs said *"Do NOT touch optiplex-server / nuc / 192.168.1.10"* —
+that no longer applies to the OptiPlex. The NUC and 192.168.1.10 were never discussed.
+
+```
+agent-optinovate-7fc2ff                          0-9     this PC, driver + stage 1
+agent-raman-hp-pavilion-laptop-15-eh3xxx-e4920b  10-18   Pavilion, MIDDLE relay
+agent-optiplex-server-ce473b                     19-27   OptiPlex, last stage
+```
+
+`[[0,9],[10,18],[19,27]]`, routable, `stage1_ok`, healthy. A three-stage chat answers
+correctly — all three node ids in the chain, 0 reroutes, 1.66 decode tok/s (two stages was
+2.16; the extra hop costs, exactly as [P57] says distribution does).
+
+**The OptiPlex, as configured:** `homeadmin@100.114.189.46`, Ubuntu, 6 cores, 16 GB, Python
+**3.10**, `~/neuron`, systemd `--user` unit with linger enabled, source synced as one tarball
+from HEAD. `donation_mode: max` and **`local_chat: false` from the first start** — set before
+it ever ran, because of what starting a chat UI did to the Pavilion. Its own payout key was
+minted on first start: `0x50bbBA48aF0a935e90D7914C0b121F0996F59da5`. **Its node is UNCLAIMED**
+— claiming it is now a one-command check that [P58]'s fix works on a machine other than the
+one it was found on.
+
+**[P56] part two is verified against a real middle node.** It could not be until there was one:
+two machines make a driver and a last stage and nothing in between. Relay challenge on layers
+10-18: **passed, `max_err` 2.8e-05, `path: relay`.**
+
+**Two bugs that only a third machine could find** — both fixed, committed, tested:
+
+  * **The config did not fall back to defaults while a comment said it did.** `main()` logs
+    "config predates this build; using built-in defaults for: ..." and carries on, but the
+    agent reads its config forty times with a plain `self.cfg[...]` and `ensure_slice` reads
+    `slice_dir` that way. A partial config raised `KeyError` out of `setup()` and systemd
+    restarted it every ten seconds forever. `load_config` now returns a `_Config` whose
+    `__missing__` falls back to `DEFAULT_CONFIG`. **Caveat worth knowing:** `.get(k, other)`
+    call sites still bypass that — `donation_mode` is read as
+    `self.cfg.get("donation_mode", resource_guard.DEFAULT_MODE)`, so a config without the key
+    gets `idle` (ceiling 15%) even though `DEFAULT_CONFIG` says `balanced` (50%). Two defaults
+    for one setting. Not fixed; it wants those call sites turned into subscripts.
+  * **`agent/requirements.txt` never learned about `cryptography`.** A venv built from it gives
+    `ModuleNotFoundError` for `neuron_driver`, `node_server`, `agent.agent` and
+    `api.openai_compat` at once — `security/wire_crypto.py` is imported at MODULE scope, so it
+    is not a degraded feature, it is an agent that never reaches its first log line. This is
+    [P54]'s fourth registration site one file over: `coordinator/requirements.txt` got that
+    line and a paragraph explaining why, and the file listing the NODE's dependencies did not.
+    `agent/test_requirements_carry_eager_imports.py` now parses the startup path and checks it.
+
+**Lessons that held up:** ship source as ONE tarball; verify by IMPORTING every module the
+agent loads, not by compiling them (compileall passed on both machines while imports failed);
+set `local_chat: false` before the first start on any node you are not sure has spare RAM.
+
 ## ADDENDUM, 2026-08-21 06:10 — PLACEMENT COLLAPSED OVERNIGHT AND WAS REPAIRED
 
 **Everything below was written at 01:50. Between then and 06:00 the chain collapsed on its own,
