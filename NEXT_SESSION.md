@@ -1,3 +1,110 @@
+# Handoff — start of Session 72
+
+## STATE AT CLOSE, 2026-08-21 (late) — READ THE FALLBACK LINE FIRST
+
+**Fallback: tag `good-state-2026-08-21-final`** (pushed). Also `good-state-0.20.21`, and the
+installer `dist/installer/NEURON-Setup-0.20.21.exe`.
+
+```
+this PC   agent-optinovate-6ff49d        0-9     driver + stage 1   0.20.21 installed
+OptiPlex  agent-optiplex-server-ce473b   0-9     stage-1 replica    claimed today
+Pavilion  agent-raman-...-e4920b         10-27   last stage
+coordinator  AGENT_VERSION 0.20.17 published; ledger.py DEPLOYED with the owner-forward
+wallet  847.59 NRN · 5 machines · 0.00 unswept
+```
+
+**THE INSTALLED APP DIFFERS FROM ITS INSTALLER.** Three files were dropped straight into
+`%LOCALAPPDATA%\Programs\NEURON\_internal\ui\static\` rather than rebuilt, because a full
+build is ~20 minutes and these were copy/asset fixes:
+
+  * `workspace/assets/index-CeOXSjCm.js` + `workspace/index.html` (wallet copy, the signing link)
+  * `sign_payout.html`
+  * `chat.html`
+
+**Reinstalling NEURON-Setup-0.20.21.exe reverts all three.** The repo carries the same files, so
+the NEXT REAL BUILD makes them permanent — and should be cut before anything is published.
+Rollback for the bundle alone: `scratchpad/workspace-rollback-0.20.21.tgz`.
+
+## The money is fixed, and this is the important one
+
+**Node earnings now go to the owner's wallet automatically. No more sweeping.**
+
+[P39] recorded ownership and left the money on the machine. `emission.py` routed to the owner
+(`get_node_owner(node_id) or node_id`); `ledger.settle` paid `ESCROW -> node` and stopped. So
+availability emission was spendable and REQUEST earnings were not — they piled up on an account
+nobody can sign into, drained only by running `claim_node_earnings.py` by hand, forever.
+
+`ledger.py` now forwards each share to the owner after paying the node. Paid to the node FIRST
+so `requests_served`/`total_earned` still show the machine's work; a failed forward leaves the
+share on the node (today's behaviour, recoverable by the sweep) and can never fail a settlement.
+**Deployed and verified with a real request:** unswept stayed 0.00, node `total_earned` rose,
+node balance stayed 0.00. `coordinator/test_earnings_reach_the_owner.py`, 11 assertions.
+
+**Swept 98.99 NRN** across five machines first (wallet 748.60 -> 847.59), invariant OK at every
+step, logged to `claim_log.json` on the VM. The sweep tool is now a REPAIR for unowned nodes,
+not routine maintenance.
+
+## Claiming, and the trap that hid a machine
+
+The OptiPlex was **never claimed** and had **28.87 NRN** belonging to nobody. "My machines" lists
+only nodes whose `owner_wallet_id` is your wallet, so an unclaimed machine simply does not
+appear — absence again.
+
+Claiming was a BROWSER action and a headless node (`local_chat: false`) has no page to click.
+Now: `payout_key.claim_for_owner` is the rule with no browser in it, `agent.py --claim WALLET_ID`
+drives it, and an unclaimed node logs a WARNING on every registration naming the fix. It stays
+silent when it merely could not ask.
+
+## Wallets: any EIP-1193 extension works
+
+`ui/static/sign_payout.html` uses `window.ethereum` + `eth_requestAccounts` + `personal_sign` —
+the standard interface. **MetaMask, Rabby, Coinbase Wallet, Brave Wallet, Trust Wallet** all
+work. It is provider-agnostic: no `isMetaMask` check anywhere. With several extensions installed
+the browser decides which one owns `window.ethereum`, which is the usual multi-wallet ambiguity
+and not something this page controls.
+
+It is served at **`/static/sign_payout.html`** now. It used to be `tools/sign_payout.html` — a
+source path that shipped nowhere and 404'd, while THREE UIs told people to use it.
+
+## Still open
+
+  * **A real build is owed.** Three drop-ins live only in the install. Build before publishing.
+  * **[P56] part three** — declared precision. Needs MEASURED tolerances per dtype.
+  * **[P60] residual** — a node learns a new range only when it next registers ([P37]).
+  * **[P61] — the installer is unsigned and F-Secure quarantines it.** The founder REMOVED
+    F-Secure to install; suggest putting it back with an exclusion. Code signing deferred by
+    decision; no plumbing was wired, so nothing is half-built.
+  * **Node id flip** between `-6ff49d` and `-7fc2ff`, plus stale `node-c-pavilion`. 5 registered,
+    3 real.
+  * **"3 nodes online for bigger models"** while one is a replica — wording, fix on next build.
+  * **[P30] phase 2** — imported by nothing.
+
+## Traps this session paid for
+
+  * **`cd` persists between commands in one bash call.** A commit meant for NEURON landed in
+    Trust chat and swept in `skills.ts`/`docx.ts`, which must stay uncommitted. Use `git -C`.
+  * **Deleting a function signature can still PARSE** — the orphaned body attaches to the
+    function above. Import success proves nothing; run the tests.
+  * **Truncated debug output invents bugs.** `healthy` and `total_earned` both existed and were
+    cut off by a key limit.
+  * **`NEURON_ONLY=1` AND `NEURON_BASE=/workspace/` AND `MSYS_NO_PATHCONV=1`** — all three, every
+    workspace build. `ui/test_workspace_bundle_is_neuron_only.py` checks the artefact.
+  * A source-text test pins the code it was written against; four broke on refactors today.
+
+## Facts that save time
+
+  * Full suite **122/122**. No pytest: `.venv\Scripts\python.exe -m <module>`.
+    `packaging/` has no `__init__.py` — run its test as a FILE.
+  * Rebuild the workspace UI:
+    `cd "C:\Users\optin\Trust chat" && MSYS_NO_PATHCONV=1 NEURON_ONLY=1 NEURON_BASE=/workspace/ npx vite build`
+    then REPLACE `ui/static/workspace/assets/` (never merge).
+  * Attest before trusting a chat result after any placement change or restart.
+  * VM: `SSH_AUTH_SOCK=/c/Users/optin/.ssh/neuron-agent.sock ssh-add /c/Users/optin/.ssh/oracle_coordinator`
+    then `bash coordinator/deploy.sh`. **Deploying code is not publishing** — the live version is
+    governed by `/etc/systemd/system/neuron-coordinator.service.d/zz-agent-release.conf`.
+
+---
+
 # Handoff — start of Session 71
 
 ## STATE AT CLOSE, 2026-08-21 — 0.20.21 INSTALLED AND VERIFIED
