@@ -13,7 +13,7 @@ coordinator  AGENT_VERSION 0.20.17 published; ledger.py DEPLOYED with the owner-
 wallet  847.59 NRN · 5 machines · 0.00 unswept
 ```
 
-**THE INSTALLED APP DIFFERS FROM ITS INSTALLER.** Three files were dropped straight into
+**RESOLVED 2026-08-21: 0.20.22 was built and installed, so the installer now carries all three drop-ins. The paragraph below is kept for the reasoning.** ~~THE INSTALLED APP DIFFERS FROM ITS INSTALLER.~~ Three files were dropped straight into
 `%LOCALAPPDATA%\Programs\NEURON\_internal\ui\static\` rather than rebuilt, because a full
 build is ~20 minutes and these were copy/asset fixes:
 
