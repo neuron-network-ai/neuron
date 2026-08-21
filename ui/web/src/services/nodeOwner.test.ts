@@ -190,7 +190,7 @@ describe('claimNodeEarnings — the path no test has ever executed', () => {
     const res = await claimNodeEarnings(undefined);
     expect(res.phase).toBe('error');
     expect(res.retryable).toBe(true);
-    expect(res.message).toMatch(/sign_payout\.html/);
+    expect(res.message).toMatch(/\/static\/sign_payout\.html/);
   });
 
   it('a locked wallet returning no account is explained, not thrown', async () => {

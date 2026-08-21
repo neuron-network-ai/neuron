@@ -623,7 +623,7 @@ function buildPayoutSection(){
       // switch -- so offering a control here that always fails would be a check that cannot
       // pass, dressed up as a feature.
       stat.textContent = "Changing this needs a signature from the current address too — "
-        + "use tools/sign_payout.html for that.";
+        + "use /static/sign_payout.html for that.";
     } else {
       val.textContent = "not set — earnings have no on-chain destination yet";
       wrap.append(btn);
@@ -637,7 +637,7 @@ function buildPayoutSection(){
   btn.addEventListener("click", async () => {
     if(!window.ethereum){
       stat.textContent = "No wallet extension in this browser. Open NEURON in the browser that "
-        + "holds your wallet, or use tools/sign_payout.html.";
+        + "holds your wallet, or use /static/sign_payout.html.";
       return;
     }
     btn.disabled = true;
@@ -759,7 +759,7 @@ async function runNodeClaim(setStatus){
 
   if(!window.ethereum){
     setStatus("No wallet extension in this browser. Open NEURON in the browser that holds "
-              + "your wallet, or use tools/sign_payout.html.");
+              + "your wallet, or use /static/sign_payout.html.");
     return null;
   }
   try{

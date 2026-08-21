@@ -115,7 +115,7 @@ export type ClaimProgress = (phase: ClaimPhase, message: string) => void;
 
 const NO_WALLET =
   'No wallet extension in this browser. Open NEURON in the browser that holds your wallet, ' +
-  'or use tools/sign_payout.html.';
+  'or open /static/sign_payout.html — the signing tool this app serves.';
 
 /**
  * Is this the user declining, rather than something breaking?

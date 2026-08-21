@@ -199,7 +199,10 @@ def main():
           "needs a signature from the current address too" in SRC
           and "wrap.append(btn)" in SRC)
     check("no browser wallet is a stated condition with a way out, not a dead button",
-          "No wallet extension in this browser" in SRC and "tools/sign_payout.html" in SRC)
+          "No wallet extension in this browser" in SRC
+          and "/static/sign_payout.html" in SRC,
+          "the tool must be named at a path the app actually SERVES — `tools/...` is a source "
+          "path, 404s everywhere, and is not shipped in the installer at all")
 
     print("\n-- the claim is REACHABLE, which is the whole difference between built and shipped")
     # Live 2026-08-17: zero of three nodes on the network had an owner recorded, and 120.11 NRN
