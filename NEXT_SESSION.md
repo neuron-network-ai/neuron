@@ -18,20 +18,35 @@ agent-optiplex-server-ce473b                     10-18   OptiPlex, MIDDLE relay
 agent-raman-hp-pavilion-laptop-15-eh3xxx-e4920b  19-27   Pavilion, last stage
 ```
 
-## THE TWO THINGS ONLY YOU CAN DO
+## DEPLOYED — 2026-08-21. Publishing is complete and the [P59] fix is live.
 
-Both need the coordinator VM, whose SSH key carries a passphrase:
+The founder loaded the key; the coordinator was deployed and verified. What a node now sees
+from `/agent/version`:
 
 ```
-SSH_AUTH_SOCK=/c/Users/optin/.ssh/neuron-agent.sock ssh-add /c/Users/optin/.ssh/oracle_coordinator
-bash coordinator/deploy.sh
+{"version": "0.20.16",
+ "download_url": ".../releases/download/v0.20.16/NEURON-Setup-0.20.16.exe",
+ "sha256": "bf8589376027503051d4aec6f7bae7dbab36b06a3d2a354603c895f4997a42e7"}
 ```
 
-1. **Until that deploy, publishing has NOT taken effect.** `AGENT_VERSION` is read by the
-   coordinator process, so the live coordinator still says 0.20.3 and no node is told to
-   update. The three on the network are on 0.20.16 because they were updated by hand.
-2. **The [P59] auto-repair fix is in that same deploy** — written, tested (15 assertions),
-   committed, not live.
+`repair_blocked` is live on `/status` (currently `None` — nothing blocking), and
+`preparing_since` is in the deployed `migration.py`.
+
+**A TRAP TO KNOW ABOUT, because it nearly ended the session looking finished when it was not.**
+`deploy.sh` shipped `config.py` with `AGENT_VERSION = 0.20.16` and `/agent/version` kept
+answering **0.20.3** — because the live service is pinned by a systemd drop-in,
+`/etc/systemd/system/neuron-coordinator.service.d/zz-agent-release.conf`, whose
+`Environment=NEURON_AGENT_VERSION` overrides the file default. `test_download_links.py` says
+this in its own failure text: *"Production is only correct while an env pin overrides it."*
+**Deploying the code is not publishing. Check `/agent/version` afterwards, every time.** The
+previous pin is backed up beside it as `zz-agent-release.conf.bak-pre-0.20.16`, and the whole
+coordinator tree as `~/coordinator-backup-pre-0.20.16.tgz` on the VM.
+
+**Also checked before deploying, and worth repeating:** `deploy.sh` ships
+`coordinator/node_tokens.json` from the local checkout. It was byte-identical to the VM's and
+only `register_nodes.py` reads it, so it was harmless here — but a stale local copy going over
+live remote state is exactly the shape of Session 67's unexplained token divergence. Compare
+before shipping.
 
 ## [P60] — a node served garbage at 3 tok/s while every light was green
 
