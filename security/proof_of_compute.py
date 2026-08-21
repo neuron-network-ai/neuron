@@ -118,7 +118,14 @@ def challenge_node(host, port, s2, n, inp, timeout=CHALLENGE_TIMEOUT_S):
     """Speak the last-stage wire protocol: config -> act(challenge) -> read output."""
     s = socket.create_connection((host, port), timeout=timeout)
     try:
-        common.send_msg(s, {"type": "config", "s2": s2, "n": n})
+        # THE DRIVER'S OWN MESSAGE, from the driver's own constructor. This used to be a dict
+        # written out here, which meant the challenge and the request were two shapes that
+        # merely happened to agree -- and [P55] is what happened when they stopped. The node
+        # reached the last-stage branch for this message only because `s1` was absent, an
+        # inference rather than a statement; `stage: "last"` now says it, exactly as a real
+        # request does. `hidden_size` is deliberately not passed, so no `wire` field is sent
+        # and the reply comes back losslessly -- see `verify`. [P56].
+        common.send_msg(s, common.stage_config(s2, stage="last", n=n))
         ack = common.recv_msg(s)
         if not ack.get("ok"):
             # A NAMED refusal, surfaced as such. `range_mismatch` in particular must never be
@@ -213,14 +220,148 @@ def challenge_middle_node(host, port, s1, s2, inp, timeout=CHALLENGE_TIMEOUT_S):
         s.close()
 
 
+class _RelaySink:
+    """A one-connection stand-in for the NEXT hop, so a middle node can be challenged in the
+    role it actually serves.
+
+    **Why this exists.** `challenge_middle_node` sends `probe: True`, which puts the node in a
+    role NO user request ever produces: it runs `layers[s1:s2]` in isolation and answers the
+    caller directly. Its production role is different code -- it dials a next hop, forwards
+    what it computed, and relays the reply back. So the middle role has never been verified at
+    all, only a role adjacent to it. That is [P56] in its sharpest form.
+
+    A relay needs somewhere to relay TO. This is that somewhere: it accepts the node's onward
+    connection, acks its config, and **captures the hidden state the node forwards** -- which
+    is precisely the middle node's own output, computed through the same
+    `_batcher("middle", s1, s2)` that serves users.
+
+    The ack carries NO `wire` field on purpose. `node_server` negotiates the onward codec from
+    what comes back here, so acking without one keeps the forwarded tensor in the lossless
+    legacy framing -- the same reason `verify` keeps the challenge itself lossless, and for the
+    same failure it would otherwise open.
+    """
+
+    def __init__(self, bind_host="0.0.0.0"):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind((bind_host, 0))
+        self.sock.listen(1)
+        self.port = self.sock.getsockname()[1]
+        self.forwarded = None
+        self.error = None
+
+    def serve_once(self, timeout):
+        """Accept one relay, answer it, and keep what it forwarded. Runs on its own thread —
+        the node does not dial until it has taken our config, and it does not answer us until
+        this has answered it, so doing it inline would deadlock."""
+        try:
+            self.sock.settimeout(timeout)
+            try:
+                conn, _addr = self.sock.accept()
+            except (socket.timeout, TimeoutError):
+                # NOT an error to re-raise. Nobody dialled: either the node cannot reach this
+                # verifier (NAT, no route — a fact about the network between us) or it took the
+                # config and relayed nothing. Both leave `forwarded` None, which
+                # `challenge_relay_node` turns into a NAMED ChallengeRefused, so the caller can
+                # fall back to the probe AND record why. A bare TimeoutError here would reach
+                # the verifier's blanket `except Exception` and be scored against the node —
+                # [P28]'s rule, reporting one event as another.
+                return
+            try:
+                conn.settimeout(timeout)
+                cfg = common.recv_msg(conn)
+                if cfg.get("type") != "config":
+                    raise ChallengeRefused(f"relay opened with {cfg.get('type')!r}, not config")
+                common.send_msg(conn, {"ok": True, "layers": cfg.get("n")})
+                act = common.recv_msg(conn)
+                if act.get("type") != "act":
+                    raise ChallengeRefused(f"relay sent {act.get('type')!r}, not act")
+                self.forwarded = act["hidden"]
+                # Hand back something the right shape so the node completes its exchange and
+                # answers the challenger normally. Its content is never read: what is under
+                # test is what the node SENT here, not what it does with a reply.
+                common.send_msg(conn, {"hidden": self.forwarded, "b_compute_ms": 0.0})
+            finally:
+                conn.close()
+        except Exception as e:                       # kept, not raised — this is a worker thread
+            self.error = e
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+def challenge_relay_node(host, port, s1, s2, inp, sink_host, timeout=CHALLENGE_TIMEOUT_S):
+    """Challenge a MIDDLE node through the role it really serves: as a relay.
+
+    `sink_host` is the address THIS verifier is reachable at from the node. There is no way to
+    infer it -- the node may be across a relay, a tailnet or a LAN -- so it is required rather
+    than guessed, and `attest_via_coordinator` falls back to the probe when the node cannot
+    dial back. A fallback that is not recorded would be worse than no fallback at all, so the
+    caller is told which path ran ([P56]: an attestation must not claim more than it checked).
+    """
+    import threading
+    sink = _RelaySink()
+    worker = threading.Thread(target=sink.serve_once, args=(timeout,), daemon=True)
+    worker.start()
+    try:
+        s = socket.create_connection((host, port), timeout=timeout)
+        try:
+            # The DRIVER's middle-hop message, from the driver's own constructor — the whole
+            # point. No `wire`, so the reply to us stays lossless; no `grant_b`, so the node
+            # does not attempt a [P52] handshake with a sink that holds no channel.
+            common.send_msg(s, common.stage_config(s2, stage="middle", s1=s1,
+                                                   host_b=sink_host, port_b=sink.port))
+            ack = common.recv_msg(s)
+            if not ack.get("ok"):
+                err = ack.get("error")
+                detail = ack.get("detail") or ack
+                if err == "range_mismatch":
+                    raise RangeMismatch(f"node refused config: {detail}")
+                raise ChallengeRefused(f"node refused config ({err}): {detail}")
+            _check_range(ack, s1, s2 - 1, f"s1={s1}, s2={s2}")
+            common.send_msg(s, {"type": "act", "hidden": inp})
+            common.recv_msg(s)              # the relayed reply; the sink holds what we grade
+            common.send_msg(s, {"type": "bye"})
+        finally:
+            s.close()
+    finally:
+        worker.join(timeout=timeout)
+        sink.close()
+    if sink.error is not None:
+        raise sink.error
+    if sink.forwarded is None:
+        raise ChallengeRefused(
+            f"the node took a middle-hop config but relayed nothing to {sink_host}:{sink.port} "
+            f"within {timeout}s — it either cannot reach this verifier or did not forward")
+    return sink.forwarded
+
+
 def attest(host, port, s2, n, seed=0, atol=0.05):
     """Full challenge: make -> send -> verify. Returns a result dict."""
     inp, expected = make_challenge(s2, n, seed)
     t0 = time.time()
     output = challenge_node(host, port, s2, n, inp)
     passed, err = verify(output, expected, atol)
-    return {"passed": passed, "max_err": round(err, 6),
+    return {"passed": passed, "max_err": round(err, 6), "path": "last",
             "ms": int((time.time() - t0) * 1000), "layers": [s2, n - 1]}
+
+
+def attest_relay(host, port, s1, s2, sink_host, seed=0, atol=0.05):
+    """Full MIDDLE-node challenge through the RELAY path — the one users are served by.
+
+    The expected value is the same `common.mid_stage` the probe compares against, because the
+    layers a relay runs and the layers a probe runs are the same layers. What differs is the
+    code that decides to run them, and that is the half [P55] proved can be wrong on its own.
+    """
+    inp, expected = make_middle_challenge(s1, s2, seed)
+    t0 = time.time()
+    output = challenge_relay_node(host, port, s1, s2, inp, sink_host)
+    passed, err = verify(output, expected, atol)
+    return {"passed": passed, "max_err": round(err, 6), "path": "relay",
+            "ms": int((time.time() - t0) * 1000), "layers": [s1, s2 - 1]}
 
 
 def attest_middle(host, port, s1, s2, seed=0, atol=0.05):
@@ -229,12 +370,12 @@ def attest_middle(host, port, s1, s2, seed=0, atol=0.05):
     t0 = time.time()
     output = challenge_middle_node(host, port, s1, s2, inp)
     passed, err = verify(output, expected, atol)
-    return {"passed": passed, "max_err": round(err, 6),
+    return {"passed": passed, "max_err": round(err, 6), "path": "probe",
             "ms": int((time.time() - t0) * 1000), "layers": [s1, s2 - 1]}
 
 
 def attest_via_coordinator(coordinator, node_id, register_secret, n=None,
-                           seed=0, atol=0.05):
+                           seed=0, atol=0.05, sink_host=None):
     """Verify a node the coordinator knows about and record the result (Session 12 — open
     join). Looks the node up in /node/list, challenges it (last-stage nodes get the full
     challenge incl. norm; any other node gets the middle no-relay probe), then POSTs the
@@ -254,8 +395,28 @@ def attest_via_coordinator(coordinator, node_id, register_secret, n=None,
     if is_last:
         res = attest(node["tailscale_ip"], node["port"], node["layer_start"], total, seed, atol)
     else:
-        res = attest_middle(node["tailscale_ip"], node["port"],
-                            node["layer_start"], node["layer_end"] + 1, seed, atol)
+        # THE RELAY PATH FIRST, because it is the one a user's request takes. The probe is
+        # kept only as a fallback for a node that cannot dial this verifier back -- and the
+        # result says WHICH ran, because a probe pass is a weaker claim than a relay pass and
+        # reporting them as the same number is the whole of [P56]. `sink_host` is required and
+        # never guessed: only the operator knows the address this verifier is reachable at
+        # from the node, so with none configured the probe is all that is honestly available.
+        res, fallback_reason = None, None
+        if sink_host:
+            try:
+                res = attest_relay(node["tailscale_ip"], node["port"], node["layer_start"],
+                                   node["layer_end"] + 1, sink_host, seed, atol)
+            except RangeMismatch:
+                raise                     # placement, not compute — must not fall back to a
+                                          # second challenge that would report it as a failure
+            except (ChallengeRefused, OSError) as e:
+                # Unreachable-for-relay is a fact about the network between us, not about the
+                # node's arithmetic. Fall back, and say so.
+                res, fallback_reason = None, f"{type(e).__name__}: {e}"
+        if res is None:
+            res = attest_middle(node["tailscale_ip"], node["port"],
+                                node["layer_start"], node["layer_end"] + 1, seed, atol)
+            res["relay_fallback"] = fallback_reason or "no sink_host configured"
     r = requests.post(f"{coordinator}/node/{node_id}/attest",
                       json={"passed": res["passed"], "max_err": res["max_err"]},
                       headers={"X-Register-Secret": register_secret}, timeout=10)
@@ -263,7 +424,8 @@ def attest_via_coordinator(coordinator, node_id, register_secret, n=None,
     return {"challenge": res, "attestation": r.json()}
 
 
-def verify_loop(coordinator, register_secret, interval=60, seed=0, atol=0.05, n=None):
+def verify_loop(coordinator, register_secret, interval=60, seed=0, atol=0.05, n=None,
+                sink_host=None):
     """Continuously find probationary nodes and verify them -- no more running the CLI by
     hand for every new arrival. Skips already-flagged nodes (the coordinator already excludes
     them from routing after repeated failures, per Session 16 reputation; re-challenging a
@@ -284,11 +446,15 @@ def verify_loop(coordinator, register_secret, interval=60, seed=0, atol=0.05, n=
             for nd in pending:
                 try:
                     out = attest_via_coordinator(coordinator, nd["node_id"], register_secret,
-                                                 n=n, seed=seed, atol=atol)
+                                                 n=n, seed=seed, atol=atol,
+                                                 sink_host=sink_host)
                     ch = out["challenge"]
                     print(f"[{time.strftime('%H:%M:%S')}] {nd['node_id']} "
                          f"({'PASSED' if ch['passed'] else 'FAILED'}, "
-                         f"max_err={ch['max_err']}, layers={ch['layers']})")
+                         f"max_err={ch['max_err']}, layers={ch['layers']}, "
+                         f"path={ch.get('path')})"
+                         + (f"  relay fallback: {ch['relay_fallback']}"
+                            if ch.get("relay_fallback") else ""))
                 except Exception as e:
                     print(f"[{time.strftime('%H:%M:%S')}] could not verify "
                          f"{nd['node_id']}: {e}")
@@ -315,6 +481,13 @@ def main():
                     help="with --coordinator (no --node-id): loop forever, auto-verifying "
                          "every probationary node found, instead of a one-shot check")
     ap.add_argument("--interval", type=int, default=60, help="--auto poll interval, seconds")
+    ap.add_argument("--sink-host", default=os.environ.get("NEURON_VERIFY_SINK_HOST"),
+                    help="the address THIS verifier is reachable at FROM a node. Given it, a "
+                         "middle node is challenged as a RELAY -- the role a user's request "
+                         "actually puts it in -- with the probe kept only as a recorded "
+                         "fallback. Without it only the probe is available, which verifies a "
+                         "path nobody is served by ([P56]). Defaults to "
+                         "$NEURON_VERIFY_SINK_HOST.")
     # direct mode
     ap.add_argument("--host")
     ap.add_argument("--port", type=int, default=50999)
@@ -330,18 +503,23 @@ def main():
         if not args.register_secret:
             ap.error("--register-secret (or $NEURON_REGISTER_SECRET) is required for --auto")
         verify_loop(args.coordinator, args.register_secret, interval=args.interval,
-                   seed=args.seed, atol=args.atol)
+                   seed=args.seed, atol=args.atol, sink_host=args.sink_host)
     elif args.coordinator:
         if not args.node_id:
             ap.error("--coordinator requires --node-id (or --auto to verify all pending)")
         if not args.register_secret:
             ap.error("--register-secret (or $NEURON_REGISTER_SECRET) is required to attest")
         out = attest_via_coordinator(args.coordinator, args.node_id, args.register_secret,
-                                     n=args.n, seed=args.seed, atol=args.atol)
+                                     n=args.n, seed=args.seed, atol=args.atol,
+                                     sink_host=args.sink_host)
         print(json.dumps(out, indent=2))
     elif args.host is not None and args.s1 is not None and args.s2 is not None:
-        print(json.dumps(attest_middle(args.host, args.port, args.s1, args.s2,
-                                       args.seed, args.atol)))
+        if args.sink_host:
+            print(json.dumps(attest_relay(args.host, args.port, args.s1, args.s2,
+                                          args.sink_host, args.seed, args.atol)))
+        else:
+            print(json.dumps(attest_middle(args.host, args.port, args.s1, args.s2,
+                                           args.seed, args.atol)))
     else:
         if args.host is None or args.s2 is None:
             ap.error("direct mode requires --host and --s2 (+ --s1 for a middle node), "

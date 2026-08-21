@@ -88,10 +88,15 @@ def main():
 
     seen = []
     real_attest_via_coordinator = poc.attest_via_coordinator
-    poc.attest_via_coordinator = lambda coordinator, node_id, secret, n=None, seed=0, atol=0.05: (
+    # **kwargs, not a fixed signature.** This stub is standing in for a real function, and
+    # spelling out its parameters means every new one (`sink_host`, [P56]) fails here as a
+    # TypeError that the loop's own `except Exception` then reports as "could not verify" --
+    # a verifier bug wearing the costume of a bad node.
+    poc.attest_via_coordinator = lambda coordinator, node_id, secret, **kw: (
         seen.append(node_id),
         (_ for _ in ()).throw(RuntimeError("boom")) if node_id == "n-broken"
-        else {"challenge": {"passed": True, "max_err": 0.0, "layers": [0, 1]}}
+        else {"challenge": {"passed": True, "max_err": 0.0, "layers": [0, 1],
+                            "path": "relay"}}
     )[-1]
     real_get2 = poc.requests.get
     real_sleep = poc.time.sleep

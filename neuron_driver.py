@@ -298,32 +298,25 @@ class _Driver:
             # network simply omits the field and the relay carries the request, exactly as it
             # does today. See lan_direct and [P57] -- the relay costs 88 ms where a LAN
             # neighbour costs 5.3.
-            cfg = {"type": "config", "s2": chain["s2"],
-                   "stage": "middle" if chain["host_b"] else "last",
-                   "lan_hint": lan_direct.local_prefixes(),
-                   "wire": wire_codec.preference(model.config.hidden_size)}
             # host_b present -> the next hop relays to a further stage (node_c's role); absent
             # -> it IS the final stage and returns the normed hidden itself (node_b's role).
-            # Sending host_b=None would satisfy `"host_b" in msg` at the far end and send it
-            # looking for a hop that does not exist, so the keys are omitted, not nulled.
-            if chain["host_b"]:
-                # `s1` is where THIS driver's own layers stop, and only a middle relay has
-                # anything to do with it (`layers[s1:s2]`). A last stage has never read it --
-                # its own start is implied by `s2` -- so sending it there was a field with no
-                # meaning to its recipient, and the ambiguity [P55] turned on existed only
-                # because it was sent anyway. Omitted rather than merely disambiguated,
-                # because that is what repairs the live network WITHOUT waiting for every node
-                # to update: a node on any build, including one that predates `stage`, reads a
-                # config with no `s1` as real last-stage traffic. `_is_range_probe` on the node
-                # covers the other direction, for drivers older than this line.
-                cfg["s1"] = self.s1
-                cfg["host_b"], cfg["port_b"] = chain["host_b"], chain["port_b"]
-                # The middle node cannot mint its own grant for the last hop -- it does not
-                # hold that node's token -- so the driver carries it down. Sealed to the last
-                # node, so the middle one cannot read or retarget it either.
-                _gb = (chain.get("grants") or {}).get(chain.get("node_b"))
-                if _gb:
-                    cfg["grant_b"], cfg["node_b"] = _gb, chain["node_b"]
+            # `common.stage_config` omits the keys rather than nulling them, because sending
+            # host_b=None would satisfy `"host_b" in msg` at the far end and send it looking
+            # for a hop that does not exist.
+            #
+            # BUILT THERE, NOT HERE, and that is the point of [P56]: proof_of_compute builds
+            # the same message for its challenges, so a hand-maintained copy in this function
+            # is a second shape waiting to drift from the first. It drifted once already and
+            # cost a day of garbage answers -- see [P55] and stage_config's docstring.
+            cfg = common.stage_config(
+                chain["s2"],
+                stage="middle" if chain["host_b"] else "last",
+                s1=self.s1 if chain["host_b"] else None,
+                host_b=chain["host_b"] or None, port_b=chain["port_b"] if chain["host_b"] else None,
+                hidden_size=model.config.hidden_size,
+                lan_hint=lan_direct.local_prefixes(),
+                grant_b=(chain.get("grants") or {}).get(chain.get("node_b")),
+                node_b=chain.get("node_b"))
             common.send_msg(s, cfg)
             a = common.recv_msg(s)
             if not a.get("ok"):

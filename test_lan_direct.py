@@ -139,8 +139,10 @@ def main():
 
     # ---- 5. the relay stays the address of record ----------------------------- #
     src = open("neuron_driver.py", encoding="utf-8").read()
+    # Passed to `common.stage_config` rather than written into a dict literal here — the
+    # message has one constructor since [P56]. Still the driver asking, which is the property.
     check("the driver ASKS rather than the node volunteering",
-          '"lan_hint": lan_direct.local_prefixes()' in src)
+          "lan_hint=lan_direct.local_prefixes()" in src)
     check("the driver re-checks the answer before trusting it",
           "lan_direct.usable(ack.get(\"direct\")" in src)
     check("a failed direct dial keeps the relay connection, never drops the request",

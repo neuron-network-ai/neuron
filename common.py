@@ -467,6 +467,71 @@ def apply_lm_head(model, hidden):
 
 
 # --------------------------------------------------------------------------- #
+# The `config` message — one constructor, for every caller there is
+# --------------------------------------------------------------------------- #
+
+def stage_config(s2, *, stage, s1=None, host_b=None, port_b=None, n=None,
+                 hidden_size=None, lan_hint=None, grant_b=None, node_b=None):
+    """THE `config` message a caller sends a chain hop. Built here, by everybody.
+
+    **Why one function instead of three call sites that each know the shape.** The RECEIVER
+    reads its ROLE out of this message -- `agent/node_server.serve` branches on `host_b`,
+    then on `_is_range_probe(msg)`, and runs different layers with a different final norm
+    depending on the answer. [P55] was two callers disagreeing about the shape: `neuron_driver`
+    sent `s1` on every config, `proof_of_compute` sent it only for a probe, and the node read
+    the presence of `s1` as "a verifier is probing me". So every real request to a two-stage
+    chain's last node ran WITHOUT the final norm, returned `'  1  2   3'`, and was billed for
+    -- while proof-of-compute, which builds its own message, was told the node was fine on
+    5662 consecutive challenges.
+
+    [P56] is that gap stated generally: **a verifier that constructs its own challenge is
+    verifying a path of its own construction.** The fix is not to keep the two shapes in step
+    by hand, it is to make there be one shape. If this constructor changes, both the request
+    and the challenge change with it, and the node cannot tell them apart on any field that
+    decides its role.
+
+    **`wire` is included only when `hidden_size` is given, and the verifier gives none.**
+    That is deliberate and must stay: `proof_of_compute.verify` needs the reply in the lossless
+    legacy framing, because a quantized codec's ~0.3% error lands inside its `atol` budget and
+    would give a cheating node cover rather than failing loudly. It is safe to differ here
+    precisely because `wire` is role-INERT -- `_is_range_probe` and the `host_b` branch never
+    read it, so omitting it changes the transport and nothing else.
+
+    `n` is likewise role-inert: the last stage uses its own `self.n`, and only a middle relay
+    forwards it. It is carried because a middle relay passes it to the next hop and older
+    agents read it there.
+
+    The PROBE role has no constructor here on purpose. It is not a shape any caller of a real
+    request produces -- see `proof_of_compute.challenge_middle_node`, and [P56] for why
+    challenging a middle node that way verifies a path no user is ever served by.
+    """
+    if stage not in ("middle", "last"):
+        raise ValueError(f"stage must be 'middle' or 'last', not {stage!r}")
+    cfg = {"type": "config", "s2": s2, "stage": stage}
+    if lan_hint:
+        cfg["lan_hint"] = lan_hint
+    if hidden_size is not None:
+        cfg["wire"] = wire_codec.preference(hidden_size)
+    if n is not None:
+        cfg["n"] = n
+    if stage == "middle":
+        if s1 is None or host_b is None or port_b is None:
+            raise ValueError("a middle hop needs s1, host_b and port_b — without host_b the "
+                             "receiver is not a relay at all and would answer as a last stage")
+        # `s1` is where the CALLER's own layers stop, so `layers[s1:s2]` is what this hop runs.
+        # Only a relay has any use for it; a last stage infers its start from `s2`, which is why
+        # sending it there was a field with no meaning to its recipient and the ambiguity [P55]
+        # turned on existed only because it was sent anyway.
+        cfg["s1"], cfg["host_b"], cfg["port_b"] = s1, host_b, port_b
+        if grant_b:
+            # The relay cannot mint its own grant for the last hop -- it does not hold that
+            # node's token -- so the caller carries it down, sealed to the last node so the
+            # relay can neither read nor retarget it.
+            cfg["grant_b"], cfg["node_b"] = grant_b, node_b
+    return cfg
+
+
+# --------------------------------------------------------------------------- #
 # Length-prefixed tensor framing over a raw TCP socket
 # --------------------------------------------------------------------------- #
 # A peer may be anywhere in the fleet's upgrade cycle, so the outer framing (8-byte

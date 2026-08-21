@@ -139,12 +139,14 @@ def main():
             ("the shard load", "common.load_model_shard(0, self.s1"),
             ("the stage batcher", "model, self.s1, ids, cache, lengths"),
             ("the chain request", "self.s1, wallet_id"),
-            # `cfg["s1"] = ...`, not a key in the dict literal: since [P55] the driver sends
-            # `s1` ONLY to a middle relay, which is the only hop that has ever read it. A last
-            # stage that receives it cannot tell real traffic from a verifier's probe. The
-            # thing this loop pins is unchanged -- every consumer reads self.s1, so none of
+            # The config message is built by `common.stage_config` now, so what is pinned
+            # here is the ARGUMENT the driver passes it. Since [P55] `s1` goes ONLY to a middle
+            # relay -- the only hop that has ever read it -- because a last stage that receives
+            # it cannot tell real traffic from a verifier's probe; since [P56] the verifier
+            # builds its challenge from the same constructor, so the two can no longer drift.
+            # The thing this loop pins is unchanged: every consumer reads self.s1, so none of
             # them can disagree about how wide stage 1 is.
-            ("the config sent on the wire", 'cfg["s1"] = self.s1')):
+            ("the config sent on the wire", 's1=self.s1 if chain["host_b"] else None')):
         check(f"{consumer} uses self.s1", snippet in body)
     check("no consumer inside _Driver still reads the module constant",
           not any(ln.strip().startswith("#") is False and "S1" in ln and "self.s1" not in ln
