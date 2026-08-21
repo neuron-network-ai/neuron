@@ -35,13 +35,29 @@ those numbers travel to other volunteers' machines.
 |---|---|
 | anyone on the internet between the machines | **no** |
 | whoever runs the relay | **no** |
-| **the NEURON coordinator itself** | **no** |
+| **the NEURON coordinator itself** | **no, from v0.20.23** — see the correction below |
 | the volunteer machines computing your answer | they hold numbers, not your words — see below |
 
 Each link is separately encrypted, with a one-time key, using an ephemeral key exchange
 (`security/wire_crypto.py`). "Ephemeral" is the part that matters: even the coordinator — which
 introduces the two machines and knows their credentials — cannot decrypt a recorded session
 afterwards.
+
+### A correction to this document, and when it takes effect
+
+**Up to and including v0.20.22, the row above was wrong.** Before your machine could use the
+network it asked the coordinator which machines to use, and that request carried your prompt —
+`node_a.coord_get_chain` sent `{"prompt": ...}` to `/infer`. The coordinator never read it: both
+uses were its LENGTH, one for a cost estimate and one for the character count kept against the
+request, and the text was never stored (`coordinator/models.py` keeps `prompt_len` only) and
+never logged. But it was sent, and "nothing reads it" is a weaker promise than the one this
+table made. Found and fixed on 2026-08-22; recorded as [P65] in
+[PROBLEMS.md](PROBLEMS.md), which is where this project keeps its mistakes.
+
+**What changed:** your machine now sends the number of characters instead of the characters
+(`prompt_chars`). The coordinator still accepts the old shape, because agents already installed
+still send it — so the fix reaches you when you update, and the row above is true of v0.20.23
+onward. If you are running an earlier build, it is not yet true of yours.
 
 ### The limitation, stated rather than glossed
 

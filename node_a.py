@@ -91,7 +91,14 @@ def coord_get_chain(base, prompt, max_tokens, expected_s1, wallet_id, prompt_tok
 
     The complete_token authenticates the later /complete call ([P12]); wallet_id is who pays
     (Workstream B — /infer now holds the worst-case cost from this wallet before dispatch)."""
-    body = {"prompt": prompt, "max_tokens": max_tokens, "wallet_id": wallet_id}
+    # THE PROMPT ITSELF DOES NOT GO TO THE COORDINATOR. Only how long it is.
+    #
+    # The coordinator's two uses of this field were both `len(...)`: a worst-case cost estimate
+    # and the character count stored against the request. Sending the text handed the user's
+    # words to a machine that never read them, and made PRIVACY.md's "the coordinator cannot
+    # read it" untrue at the one moment it mattered. The length is computed here, on the user's
+    # own machine, and is the only thing that leaves it.
+    body = {"prompt_chars": len(prompt), "max_tokens": max_tokens, "wallet_id": wallet_id}
     if prompt_tokens_estimate is not None:
         body["prompt_tokens_estimate"] = prompt_tokens_estimate
     r = requests.post(f"{base}/infer", json=body, timeout=15)

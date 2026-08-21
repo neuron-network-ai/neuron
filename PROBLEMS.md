@@ -366,6 +366,91 @@ Related: [P53] (the claim this was supposed to have fixed), [P54] (one thing reg
 several places, each failing silently), [P39] (ownership crediting, which is what a claim
 turns on).
 
+### [P65] 🟡 The prompt went to the coordinator on every request, and PRIVACY.md told people it did not (2026-08-22)
+
+**The document says, in a table, of the coordinator: "can they read it? **no**".** It could.
+`node_a.coord_get_chain` put the user's whole prompt in the body of every `/infer`:
+
+```python
+body = {"prompt": prompt, "max_tokens": max_tokens, "wallet_id": wallet_id}
+```
+
+and the coordinator used it exactly twice, both times as a LENGTH — `max(1, len(body.prompt)
+// 3)` for the cost estimate, and `len(body.prompt)` for the character count stored against the
+request. The text itself was never read, never logged, and never written to the database.
+
+**"Nothing reads it" is a different promise from "it is not sent", and only the second one was
+made.** A field that arrives sits in that process's memory, would appear in a core dump of it,
+and would be captured by any body-logging proxy put in front of it — none of which is visible to
+the person who read the promise and decided to type something private.
+
+**The storage half of this was already fixed and that is what hid the rest.** `models.py` carries
+the note: the coordinator "used to store every request's FULL raw prompt", stopped, and kept
+`prompt_len`. That fix was real, it was documented, and it made the remaining exposure invisible
+— the database was clean, so the question looked closed. The prompt was still crossing the wire
+on every single request.
+
+**Fixed by sending the number instead of the string.** `prompt_chars` is computed on the user's
+own machine; `InferBody.prompt` is now optional and read in exactly one place, a fallback for
+drivers already installed. That ordering is the point: this coordinator accepts both shapes, so
+it can be deployed BEFORE the release that stops sending text, never after — the opposite order
+would 422 every driver in the field.
+
+`coordinator/test_prompt_text_stays_on_the_users_machine.py`, 11 assertions, including that the
+POST body contains no substring of the prompt, that a body with no text prices identically to
+one with it, and that `/infer` reads `body.prompt` in exactly one place.
+
+**Not closed until a release ships it.** The coordinator half is deployed; the driver half
+reaches users in the next installer. Until then an installed 0.20.22 still sends the text, so
+the landing page still says "partial" and PRIVACY.md names the version this becomes true from.
+Claiming it before it ships would be [P31] again — a capability documented ahead of being run.
+
+Related: [P52] (per-hop encryption, which protects this same text from everyone EXCEPT the
+endpoint it is addressed to), [P31] (documenting a thing before it has run).
+
+### [P64] 🟢 The public site was two branches and nineteen releases behind, and its SHA-256 matched nothing (2026-08-22)
+
+**Three different answers to "what do I install", and not one of them broken.** The live page
+offered v0.19.0, `docs/index.html` in the repo said v0.20.3, and `/agent/version` told every
+running node to install v0.20.22.
+
+GitHub Pages built from `main:/docs`. Every session works on `main-full` — the repo's own default
+branch, 181 commits ahead. So the site had been frozen since whenever `main` was last touched,
+and no amount of editing `docs/` on the branch people actually use could move it.
+
+**Nothing surfaced it because nothing failed.** A stale release link downloads an older installer
+perfectly happily, and that installer then auto-updates itself within a day. The only cost is
+silent: a stranger's first run is on a build from before [P52], [P55], [P56] and [P60] — the
+window in which this network served fluent nonsense while reporting itself healthy.
+
+**The SHA-256 was the sharp end.** The installer is unsigned ([P61]), so both pages tell people
+to verify the hash by hand before running it. `docs/index.html` printed `80eb83a2...`, `README.md`
+printed `b9d486b1...`, for the SAME v0.20.3 — whose published asset actually hashes to
+`01867f43...` (read from the release asset's own digest). Neither was ever right. **The only
+person harmed by a wrong hash is the careful one:** they check, find a mismatch on a completely
+legitimate download, and learn that checking is noise.
+
+**The page now reads the release from `/agent/version`** — version, url and hash, the same source
+the fleet's updater installs from, so the page cannot disagree with what a running node is told
+to run and a release never again needs somebody to remember this file. All three move together
+or not at all: applying them separately is how a page ends up showing build A's hash beside
+build B's link, which is the same mismatch reintroduced by the fix. An empty `sha256` is a real
+state ("released, do not install") and the honest answer to it is the last complete triple. The
+url must be on our own releases host, because this page hands a visitor an executable.
+
+**Pages now builds from `main-full:/docs`** (founder's decision, 2026-08-22), so the site tracks
+the branch that is actually edited.
+
+**`test_download_links.py` had three checks and all three passed throughout**, because they ask
+whether the repo agrees WITH ITSELF — and it agreed perfectly, at 0.20.3, for nineteen releases.
+Two more now: every download link names the version the coordinator publishes, and every
+SHA-256 beside one is that installer's. Both were verified to FAIL when perturbed — the first
+draft of the hash check could not fail at all, because a literal backspace byte had landed in
+its regex where `\b` was meant, and a check that cannot fail is worse than no check.
+
+Related: [P48] (the repo self-consistent while the served thing is wrong), [P61] (unsigned
+installer, which is what makes the hash load-bearing), [P31] (claiming what was never run).
+
 ### [P63] 🟢 I shipped the standalone product wearing NEURON's URL, twice, and the wallet disappeared (2026-08-21)
 
 **The founder reported "and in chrome wallet is gone too" after installing 0.20.19. That was
@@ -608,10 +693,40 @@ The true last stage still attests clean (`max_err` 5.5e-05) and the network answ
 which worked before is refused now — a true last stage, a middle relay, and a verifier's probe
 to both a mid-range and a full-model node all still take the arms they always did.
 
-**What is still open under this entry** is the notification itself: the node still learns its
-new range only when it next registers ([P37]). This turns that window from *wrong answers* into
-*reroutes*, which is the difference between a bug and an outage — but the window remains, and
-closing it means the node re-reading `slice-info` on a heartbeat.
+**~~What is still open under this entry~~ CLOSED 2026-08-22 — the node is now told.** The
+residual was the notification: the node learned its new range only when it next registered
+([P37]), so this fix turned the window from *wrong answers* into *reroutes* without shortening
+it.
+
+The assignment now rides on the heartbeat, which is the fourth fact to do so and for the fourth
+identical reason — it is the one call every live node makes continuously, and the only channel
+that reaches a node behind NAT. `ping()` returns `layer_start`/`layer_end`; the agent records
+them and the MIGRATION loop applies them, because that is the one thread that downloads slices
+and reloads the server. Doing the work on the heartbeat would stop the heartbeat for the length
+of a multi-GB download, and a node that stops beating is marked offline and routed around — it
+would lose the coverage it still has while preparing the coverage it was asked for.
+
+Three decisions worth keeping:
+
+  * **the ASSIGNMENT is sent, not a "you changed" flag.** A flag is state the coordinator must
+    remember to clear, and one missed heartbeat drops it forever. A range is idempotent: a node
+    already on it does nothing, every beat, for as long as it stays right;
+  * **it is compared against what the SERVER is loaded with, never against config.json.** config
+    is what the node believes it was told; `server.lo/hi` is what the machine actually computes,
+    and every version of this bug is those two disagreeing while all the reporting is drawn from
+    the first;
+  * **the heartbeat's range is a hint and slice-info is the authority.** The hint is confirmed
+    before anything moves, and slice-info also carries the model, the total, and whether this
+    node is first or last — none of which can be inferred from two layer numbers. A different
+    MODEL is refused here and left to the migration path, which stages it without dropping
+    coverage.
+
+A slice already covering the new range is reloaded in place with no download (re-splits usually
+land inside what an earlier one fetched); anything else downloads to a staging directory and
+swaps, so the file the running model holds open is never deleted underneath it. A failed
+download or a refused reload leaves the node serving what it already had and retries.
+`agent/test_placement_reaches_the_node.py`, 28 assertions, each verified to fail against three
+mutations of the fix.
 
 Related: [P37] (filed this exact gap and left it open), [P56] (whose verifier diagnosed it),
 [P55] (the same symptom from a different cause), [P42] (unmaterialized layers, the check that

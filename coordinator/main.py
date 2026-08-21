@@ -85,7 +85,22 @@ class RegisterBody(BaseModel):
 
 
 class InferBody(BaseModel):
-    prompt: str
+    # THE PROMPT TEXT IS NOT SENT HERE, AND THIS FIELD IS ONLY FOR DRIVERS ALREADY INSTALLED.
+    #
+    # It used to be required, so every network request delivered the user's words to this
+    # process. Nothing here ever read them: both uses were `len(body.prompt)` -- a cost estimate
+    # and the character count stored against the request. Storage was fixed earlier (models.py
+    # keeps prompt_len and stopped writing the text); TRANSMISSION was not, so PRIVACY.md's
+    # "the NEURON coordinator itself -- can they read it? no" was false for as long as a driver
+    # sent it. A field nobody reads is still a field that arrives, sits in this process's
+    # memory, and would appear in any crash dump or body-logging proxy in front of it.
+    #
+    # `prompt_chars` carries the only thing that was ever wanted. `prompt` stays optional
+    # because drivers in the field still send it and must keep working -- which also fixes the
+    # deployment order: this coordinator accepts both, so it can go out BEFORE the release that
+    # stops sending text, never after.
+    prompt: str | None = None
+    prompt_chars: int | None = None             # len(prompt), computed on the user's machine
     max_tokens: int = 200
     wallet_id: str                              # who pays -- required (Workstream B)
     prompt_tokens_estimate: int | None = None   # driver's rough estimate for the hold quote
@@ -783,6 +798,19 @@ def ping(node_id: str, node=Depends(require_node_token)):
     return {"status": "alive", "node_id": node_id, "last_seen": time.time(),
             "coordinator_url": config.PUBLIC_URL,
             "standing": node.get("standing", "trusted"),
+            # And the node's CURRENT ASSIGNED RANGE, for the fourth time on the same theme --
+            # this one is [P37]/[P60]. `models.update_layers` writes a re-placement here and
+            # nothing pushed it to the node, so the node learned its new range only when it
+            # next happened to register. On 2026-08-21 that window served garbage for as long
+            # as it lasted; it now serves reroutes instead, but a node that is not serving the
+            # range the coordinator routes to it is an outage either way.
+            #
+            # Sending the ASSIGNMENT rather than a "you changed" flag is deliberate: a flag is
+            # state the coordinator would have to remember to clear, and one missed heartbeat
+            # (a NAT'd node's tunnel restarting, a sleeping laptop) would drop it forever. The
+            # range is idempotent -- a node that has already applied it does nothing, every
+            # beat, for as long as it stays right.
+            "layer_start": node["layer_start"], "layer_end": node["layer_end"],
             # And `want_logs` for a third variation on the same theme: the heartbeat is the only
             # channel that reaches a node behind NAT, so anything the coordinator needs to ASK a
             # node to do has to ride on it. Here it asks for a tail of agent.log — see
@@ -1035,14 +1063,18 @@ def infer(body: InferBody):
     # Fixed-supply ledger (Workstream B): hold the worst-case cost BEFORE dispatching anything.
     # A driver that doesn't know its real tokenizer count yet gets a cheap char/3 estimate --
     # only an upper bound is needed here, settle() charges the real metered cost afterward.
+    # How LONG the prompt is, which is all this endpoint has ever needed of it. From the
+    # driver when it says so, and from the text only when an older driver still sends text.
+    prompt_chars = (body.prompt_chars if body.prompt_chars is not None
+                    else len(body.prompt or ""))
     est_input = (body.prompt_tokens_estimate if body.prompt_tokens_estimate is not None
-                else max(1, len(body.prompt) // 3))
+                else max(1, prompt_chars // 3))
     hold_amount = ledger.quote(body.max_tokens, est_input)
     if not models.hold(request_id, body.wallet_id, hold_amount):
         raise HTTPException(status_code=402,
                             detail=f"insufficient NRN balance; this request needs "
                                    f"{hold_amount} NRN held")
-    models.create_request(request_id, len(body.prompt), body.max_tokens, plan_node_ids,
+    models.create_request(request_id, prompt_chars, body.max_tokens, plan_node_ids,
                           complete_token, wallet_id=body.wallet_id, hold_amount=hold_amount)
     return {"chain": router.chain_public(chain, request_id=request_id),
             "request_id": request_id,
