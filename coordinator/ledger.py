@@ -84,6 +84,27 @@ def settle(request_id, wallet_id, hold_amount, prompt_tokens, completion_tokens,
                                              count_request=True):
                 breakdown[node["node_id"]] = share
                 paid = round(paid + share, 6)
+                # ...and forward it to the owner, so it is SPENDABLE without a sweep.
+                #
+                # `emission.py` already does this for hourly availability -- `payee =
+                # get_node_owner(node_id) or node_id` -- and per-request settlement never
+                # learned the same trick. So an owned node's emission went to the wallet while
+                # its request earnings piled up on a machine account nobody can sign in as, and
+                # the only way to reach them was `claim_node_earnings.py` run by hand, forever.
+                # Live 2026-08-21: 98.99 NRN across five machines, of which 28.87 belonged to a
+                # node that had no owner at all until it was claimed.
+                #
+                # Paid to the node FIRST and forwarded second, rather than paid straight to the
+                # owner, because the node's `requests_served` and `total_earned` are what the
+                # dashboard and "My machines" report -- settling elsewhere would leave the
+                # machine that did the work showing nothing. This is the manual sweep made
+                # automatic, using the same primitive, with the same total_earned semantics.
+                #
+                # A forward that fails leaves the share on the node, which is exactly today's
+                # behaviour and is recoverable by the sweep. It must never fail the settlement.
+                owner = models.get_node_owner(node["node_id"])
+                if owner:
+                    models.transfer(node["node_id"], owner, share)
 
     if fee > 0 and models.transfer(config.ESCROW_LEDGER_ID, config.COORDINATOR_LEDGER_ID, fee):
         breakdown[config.COORDINATOR_LEDGER_ID] = fee
