@@ -1,9 +1,40 @@
 # Handoff — start of Session 69
 
+## ADDENDUM, 2026-08-21 06:10 — PLACEMENT COLLAPSED OVERNIGHT AND WAS REPAIRED
+
+**Everything below was written at 01:50. Between then and 06:00 the chain collapsed on its own,
+with both machines up the whole time, and it is the most likely thing to be broken when you
+next look.**
+
+At 05:46 the coordinator reassigned the Pavilion `[0, 27]` while this PC also spanned the whole
+model. Two nodes each holding everything → `build_chain` advances to the farthest `layer_end`
+and the pinned stages collapse into one. `chain_ranges` was `[[0,27]]`, `routable false`,
+`network_healthy false`. Nobody could chat over the network.
+
+**Repaired with:**
+
+```
+bash coordinator/pin_layers.sh --driver agent-optinovate-7fc2ff
+```
+
+`--driver` is REQUIRED — the roster has `head_ms: None` on every node, so the script cannot work
+out which machine you chat from and refuses rather than guessing. Verified after: `[[0,9],
+[10,27]]`, routable, `stage1_ok`, and a real network answer — *"Hello! How can I assist you
+today?"*, 9 tokens, 0 reroutes, 2.16 decode tok/s.
+
+**This will recur, and it is now the top item — above [P56].** Two facts sit under it and they
+are probably the same fact: this PC's node id keeps flipping between `agent-optinovate-7fc2ff`
+and `-6ff49d` across restarts (both are registered for one machine), and the coordinator
+gap-heals a briefly-absent node by handing the survivor the whole model without ever handing it
+back. `pin_layers.sh` is a repair, not a fix — it has now been needed twice in two days, and a
+network that needs a human to run a shell script after every restart cannot be given to
+strangers. Find out WHY a node that is up gets reassigned `[0,27]`, and whether the id flip is
+what triggers it.
+
 ## STATE AT SHUTDOWN, 2026-08-21 — READ THIS FIRST
 
-**Network HEALTHY, verified at shutdown:** 2 nodes, 2 stages, `[[0,9],[10,27]]`, routable,
-`stage1_ok`. Both machines are up.
+**Network HEALTHY, re-verified 06:10 after the repair above:** 2 nodes, 2 stages,
+`[[0,9],[10,27]]`, routable, `stage1_ok`. Both machines are up.
 
 **0.20.15 is built and INSTALLED on this PC, and `/` is now the workspace UI.**
 
@@ -116,7 +147,18 @@ Kill by PID, or use a bracketed pattern.
        node is indistinguishable from a cheating one. This needs a MEASURED tolerance per
        declared dtype, not a guessed table — run the same challenge against a shard loaded
        fp32 and fp16 and read the drift. `agent/test_weight_dtype_report.py` already exists,
-       so the node has somewhere to declare it.
+       so the node has somewhere to declare it. **And the declaration has to COST something:**
+       if declaring q4 only buys a looser tolerance, every cheat declares q4. It has to be the
+       same number the node is placed and paid on.
+     * **Build order: 1, then 2. Treat 3 as gated on [P30]** — it becomes urgent the day
+       k-quants land, not before.
+     * **What none of it solves, and the endgame.** A challenge that is DISTINGUISHABLE from
+       real traffic can always be special-cased by a node that wants to; parts 1 and 2 narrow
+       the gap, they do not close it in principle. The durable answer is verification by
+       REPLICATION: the coordinator sends the same real request down two independent chains on
+       a sampled fraction of traffic and compares. It never needs to know the right answer —
+       only that two machines disagree. It is the only version a node cannot detect, because
+       there is nothing to detect. Cost is one duplicated request per sample.
 2. **Publishing, or a decision not to.** 70+ commits, nothing on GitHub, `AGENT_VERSION` 0.20.3.
    Until that happens the fleet stays on 0.20.3 and none of this reaches anyone.
 3. **[P30] phase 2**, unchanged: `engine/ggml_pipeline.py` is imported by nothing; the
