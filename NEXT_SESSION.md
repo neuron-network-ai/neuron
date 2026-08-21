@@ -1,3 +1,95 @@
+# Handoff — start of Session 71
+
+## STATE AT CLOSE, 2026-08-21 — 0.20.21 INSTALLED AND VERIFIED
+
+**Fallback point: tag `good-state-0.20.21`** (pushed), installer at
+`dist/installer/NEURON-Setup-0.20.21.exe`, bundle source tagged `neuron-good-0.20.21` in
+`C:\Users\optin\Trust chat`. `git reset --hard good-state-0.20.21` returns here.
+
+```
+this PC   agent-optinovate-6ff49d        0-9     driver + stage 1   0.20.21 installed
+OptiPlex  agent-optiplex-server-ce473b   0-9     REPLICA of stage 1 0.20.17
+Pavilion  agent-raman-...-e4920b         10-27   last stage         0.20.17
+coordinator AGENT_VERSION 0.20.17 (published, SHA verified)
+```
+
+Network routable and healthy. **A request walks 2 stages, so the footer says "2 nodes" while
+the bar says "3 nodes online" — both correct.** The OptiPlex holds the same range as this PC,
+so it is redundancy and throughput, not depth, and it never appears in a chain.
+
+**Founder's decision, 2026-08-21: leave it that way.** Measured on these machines: 2 stages is
+2.2-3.0 tok/s, 3 stages is 1.84-1.9. Splitting layers does not reduce compute, it adds a hop.
+To put all three in the chain (slower per answer, and the only way to serve a model two
+machines cannot hold):
+
+```
+bash coordinator/pin_layers.sh --driver agent-optinovate-6ff49d
+```
+
+**0.20.21 is NOT released.** No tag on GitHub, `AGENT_VERSION` still 0.20.17. The installer is
+unsigned and antivirus-flagged ([P61]), which is the reason to think before publishing.
+
+## What this session fixed, after 0.20.18
+
+  * **[P62]** — a web-search citation blanked the whole workspace. `rag/retriever.py` has always
+    sent `{title, href}`; the client typed it `string[]` and rendered each entry directly, so an
+    object reached React as a child and the render unwound the ENTIRE tree. Fired for anyone who
+    ticked "Web search", and persisted, because the object form is written to localStorage.
+    Fixed at the render site (so threads already on disk work) plus a **per-message error
+    boundary** — one bad message must never take out the app.
+  * **[P63]** — **I shipped the wrong product twice.** `ui/static/workspace/` is compiled from
+    another repo and needs `NEURON_ONLY=1` as well as `NEURON_BASE=/workspace/`. I passed only
+    the second, so `{__NEURON_ONLY__ && <NeuronBar />}` compiled away and the wallet, balance,
+    sign-in link and server-conversation import vanished — in 0.20.19 AND 0.20.20 — while the
+    app still worked perfectly. `ui/test_workspace_bundle_is_neuron_only.py` now checks the
+    artefact by what it contains; all 11 assertions would have failed on what I shipped.
+  * **A deleted chat came back on refresh.** The client never called `DELETE /conversations/{id}`,
+    so `fetchServerThreads` re-imported it on the next load. It calls it now.
+  * **Signing out hid the sign-in link.** `fetchSession` collapsed "could not ask" into "not
+    signed in", and the bar hid on both — removing the only way back in. [P24]'s rule applied to
+    a session.
+
+## Traps this session paid for, worth not paying again
+
+  * **`NEURON_BASE=/workspace/` under Git Bash becomes `/Program Files/Git/workspace/`** — MSYS
+    path translation. Use `MSYS_NO_PATHCONV=1`, and read the emitted `index.html` afterwards.
+  * **Rendering in a clean browser profile proves nothing** about a browser holding real data.
+    Two blank-page diagnoses were wrong because of this. Ask for the CONSOLE error first.
+  * **Truncated debug output nearly produced two false bug reports** (`healthy`, `total_earned`
+    both existed and were cut off by a key limit). Print the whole thing before concluding.
+  * **A source-text test pins the code it was written against.** Three suites broke on the
+    [P56] constructor refactor — `test_driver_s1`, `test_lan_direct`,
+    `test_last_stage_is_not_a_probe`. All updated to pin the property, not the literal.
+  * `packaging/` has no `__init__.py`, so its test runs as a FILE, not `-m`.
+
+## Still open
+
+  * **[P56] part three** — declared precision. Needs a MEASURED tolerance per dtype and a
+    declaration that costs something. Urgent the day [P30] lands.
+  * **[P60] residual** — a node still learns a new range only when it next registers ([P37]).
+    Now a reroute rather than wrong answers, but the window remains.
+  * **[P61] — the installer is unsigned and F-Secure quarantines it.** The founder removed
+    F-Secure to install; **suggest putting it back with an exclusion.** Code signing was offered
+    and deferred; the plumbing was deliberately NOT wired, so nothing is half-built.
+  * **The node id keeps flipping** between `agent-optinovate-6ff49d` and `-7fc2ff`, and
+    `node-c-pavilion` is a second stale identity for the Pavilion. Five registered, three real.
+  * **The bar says "3 nodes online for bigger models"** while one of them is a replica, which
+    does not help with bigger models. Wording, not a defect — fix on the next bundle build.
+  * **[P30] phase 2** — still imported by nothing.
+
+## Facts that save time
+
+  * Full suite: **121 modules, all clean.** No pytest —
+    `C:\Users\optin\neuron\.venv\Scripts\python.exe -m <module>`.
+  * Rebuilding the workspace UI:
+    `cd "C:\Users\optin\Trust chat" && MSYS_NO_PATHCONV=1 NEURON_ONLY=1 NEURON_BASE=/workspace/ npx vite build`
+    then copy `dist/index.html` + `dist/assets/*` into `ui/static/workspace/`, **replacing** the
+    assets directory rather than merging it.
+  * Attest before trusting a chat result after any placement change or restart. Speed is not
+    evidence — [P60]'s garbage ran at the fastest tok/s this network has produced.
+
+---
+
 # Handoff — start of Session 70
 
 ## STATE AT CLOSE, 2026-08-21 — 0.20.18 INSTALLED HERE, 0.20.17 IS WHAT THE FLEET IS TOLD
