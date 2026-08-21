@@ -366,6 +366,51 @@ Related: [P53] (the claim this was supposed to have fixed), [P54] (one thing reg
 several places, each failing silently), [P39] (ownership crediting, which is what a claim
 turns on).
 
+### [P62] 🟢 A web-search citation blanked the entire workspace, and the failure was total (2026-08-21)
+
+**`/workspace/` rendered nothing while the server served it correctly.** `curl` returned the
+right HTML, both assets 200'd, and the same URL rendered in a browser with no stored data. The
+console had the answer the whole time:
+
+```
+Uncaught Error: Minified React error #31 ... object with keys {title, href}
+```
+
+**Both ends of one field, and each was self-consistent.** `rag/retriever.py` has always sent
+objects — `sources = [{"title": r.get("title"), "href": r.get("href")} for r in results]` —
+while the client declared `neuronSources?: string[]` and rendered each entry directly:
+`label = src` … `<span title={src}>{label}</span>`. An object reached React as a child, React
+threw, and **the render unwound the whole tree**: no sidebar, no threads, no composer.
+
+**Not a corner case, and not transient.** It fired for anyone who ticked *"Web search — answer
+with current info"*, and the object form is written into
+`localStorage.localai_chat_threads_v1`, so the thread stayed unopenable afterwards. The
+founder's own console located it exactly: `0.messages.3.neuronSources[0..4]`.
+
+**Fixed in two places, and the second matters more.** The render site now accepts either shape
+— normalised THERE rather than at the fetch boundary, because conversations already on disk
+carry the object form and a fix that only cleaned new replies would leave every existing thread
+broken forever. The object form is now strictly better: `title` becomes the tooltip, where
+before the tooltip was the raw url the hostname label was already derived from. And
+`NeuronSource = string | {title?, href?}` puts that fact in the type.
+
+**Then a per-message error boundary**, because one malformed field three messages back must not
+be able to take out the workspace. React unwinds the whole tree on a render error, so the
+symptom was a blank screen with nothing to read — the field fix is one line, and *that* is why
+it cost a day. Scoped per message, not around the list: a boundary around the list would keep
+the app alive and still lose the conversation.
+
+**What this cost, and the lesson that is actually mine.** I checked the page in a browser with
+no extensions and no stored conversation, saw it render, and concluded "the bundle is fine" —
+then diagnosed a caching bug ([P61], real, and not this), shipped it, and the page was still
+blank. **Rendering in a clean profile is not evidence about a browser holding real data.** The
+console error was available from the first screenshot and I did not ask for it. The founder
+said "last time also you said that", and was right.
+
+Related: [P61] (the caching bug found while looking for this one — genuine, and a red herring
+for this), [P55]/[P60] (the same shape at the wire level: two components each self-consistent
+about a field they disagreed on).
+
 ### [P61] 🟡 The workspace page could be served from cache while its bundle was two builds old — and the installer is blocked by antivirus (2026-08-21)
 
 **Reported as "I don't see anything here" on a blank `/workspace/`, while the server was serving
