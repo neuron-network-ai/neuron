@@ -149,7 +149,7 @@ MS_PER_LAYER_TTL_S = float(os.environ.get("NEURON_MS_PER_LAYER_TTL_S", "21600"))
 # never released) and production was correct only because a systemd drop-in pinned 0.20.3 over
 # it. Bump this when a release is PUBLISHED, not when one is built; test_download_links.py
 # refuses a value with no release notes.
-AGENT_VERSION = os.environ.get("NEURON_AGENT_VERSION", "0.20.3")
+AGENT_VERSION = os.environ.get("NEURON_AGENT_VERSION", "0.20.16")
 # Where a node fetches that version, and the hash it must match before anything is run.
 # The download is NOT served from here: this VM has 1 GB of RAM and the installer is ~200 MB,
 # so the coordinator only advertises metadata and GitHub Releases does the bandwidth.
@@ -160,7 +160,8 @@ AGENT_DOWNLOAD_URL = os.environ.get(
 # SHA-256 of that file. Empty until a release is published and hashed -- and an EMPTY hash
 # means no node will install anything, which is the correct failure direction: an unverified
 # binary pushed to every volunteer's machine is the worst thing this project could ship.
-AGENT_SHA256 = os.environ.get("NEURON_AGENT_SHA256", "")
+AGENT_SHA256 = os.environ.get("NEURON_AGENT_SHA256",
+                             "bf8589376027503051d4aec6f7bae7dbab36b06a3d2a354603c895f4997a42e7")
 # THE WAY BACK. An agent only ever moved forward, so a bad release could not be undone: the
 # install ends in os._exit(0), the machine is behind a NAT in somebody's house, and "reinstall
 # it" does not scale past the machines one person can name. Setting this to 1 -- together with
