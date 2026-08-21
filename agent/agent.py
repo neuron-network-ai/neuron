@@ -504,6 +504,11 @@ class Agent:
         # agent can eventually say out loud that it is serving nothing (see note_standing).
         self.standing = None
         self._probation_beats = 0
+        # The range the COORDINATOR currently assigns this node, refreshed by every heartbeat
+        # ([P37]/[P60]). None until a ping answers, and None from a coordinator too old to send
+        # it -- never a guess. Applied by migration_loop, which is the one thread that downloads
+        # slices and reloads the server.
+        self.assigned = None
 
     # -- config persistence -------------------------------------------------- #
     def _save(self):
@@ -895,6 +900,7 @@ class Agent:
             return                  # a ping that isn't JSON is still a successful heartbeat
         self.adopt_coordinator_url(data)
         self.note_standing(data.get("standing"))
+        self.note_assignment(data)
         if data.get("want_logs"):
             self.upload_log()
 
@@ -930,6 +936,36 @@ class Agent:
                      len(body.encode("utf-8")))
         except requests.RequestException as e:
             log.debug("log upload failed (%s) — will retry on the next heartbeat", e)
+
+    def note_assignment(self, data):
+        """Learn a re-placement from the HEARTBEAT rather than from the next registration.
+
+        [P37] filed this gap and [P60] is what it cost. `models.update_layers` moves a node's
+        range on the coordinator and nothing pushed it here, so this machine went on serving the
+        range it was handed at start-up. On 2026-08-21 the Pavilion held 10-18 while the
+        coordinator routed 10-27 to it, and it answered -- over a skeleton whose layers 19-27
+        were never downloaded. Every indicator was green and decode hit 3.00 tok/s, the fastest
+        this network has produced, because a node running nine layers instead of eighteen is
+        genuinely quicker. A restart happened to fix it, which is why every earlier occurrence
+        looked like a transient.
+
+        node_server now refuses a role it cannot serve, so the same window costs reroutes rather
+        than wrong answers. This closes the window itself: the assignment rides on the one call
+        every live node makes continuously, which is also the only channel that reaches a node
+        behind NAT.
+
+        RECORDED here, APPLIED by migration_loop. Downloading a slice on this thread would stop
+        the heartbeat for the length of a multi-GB download, and a node that stops beating is
+        marked offline and routed around -- so it would lose the coverage it still has while
+        preparing the coverage it has been asked for.
+        """
+        lo, hi = data.get("layer_start"), data.get("layer_end")
+        if lo is None or hi is None:
+            return          # a coordinator too old to say. Never inferred from anything else.
+        try:
+            self.assigned = (int(lo), int(hi))
+        except (TypeError, ValueError):
+            log.debug("ping carried an unreadable layer range (%r, %r) — ignoring", lo, hi)
 
     def note_standing(self, standing):
         """Track what the coordinator says this node's standing is, and SAY when it is stuck.
@@ -1526,10 +1562,12 @@ class Agent:
         prepared = None   # {model_id, layer_start, layer_end, total_layers, slice_dir, ready}
         while not self._stop.is_set():
             if self.server is not None:
+                migrating = False
                 try:
                     asg = requests.get(
                         f"{self.base}/node/{self.cfg['node_id']}/migration", timeout=15).json()
-                    if asg.get("migrating"):
+                    migrating = bool(asg.get("migrating"))
+                    if migrating:
                         is_new_target = prepared is None or (
                             prepared["model_id"] != asg["model_id"] or
                             prepared["layer_start"] != asg["layer_start"] or
@@ -1544,7 +1582,116 @@ class Agent:
                         prepared = None
                 except requests.RequestException as e:
                     log.warning("migration poll failed: %s", e)
+                # A RE-PLACEMENT within the model we already serve is applied by this thread
+                # too ([P37]/[P60]). One thread owning every slice download and every reload is
+                # the whole reason there is no lock here: a model migration and a re-split can
+                # both want `model_slice_migrating` and both want to call `server.reload`, and
+                # two threads doing that would interleave in ways no test would find twice.
+                # A migration in flight wins -- it is staged, it is confirmed with the
+                # coordinator before cutover, and the re-split will still be waiting after it.
+                if not migrating and prepared is None:
+                    self.resync_placement()
             self._stop.wait(MIGRATION_POLL_SECONDS)
+
+    def resync_placement(self):
+        """Serve the range the coordinator assigns NOW, without waiting for a restart ([P60]).
+
+        Compared against what the SERVER is actually loaded with, never against config.json.
+        config is what this node believes it was told; `server.lo/hi` is what this machine
+        really computes, and the whole class of bug here is those two disagreeing while every
+        report anybody reads is drawn from the first.
+
+        The heartbeat's range is a HINT, and this confirms it against slice-info before moving:
+        slice-info is the authority, and it also carries the model, the total, and whether this
+        node is first or last -- none of which can be inferred from two layer numbers.
+
+        Never raises. It runs on the thread that also performs model migrations, and an
+        exception here would take that thread down silently for the life of the process.
+        """
+        want, srv = self.assigned, self.server
+        if want is None or srv is None or srv.lo is None:
+            return                                   # nothing said yet, or nothing loaded yet
+        if (srv.lo, srv.hi) == want:
+            return                                   # already right: the common case, every poll
+        try:
+            info = self.slice_info()
+            assigned = (int(info["layer_start"]), int(info["layer_end"]))
+            if assigned == (srv.lo, srv.hi):
+                # The ping raced a re-placement that has since been undone, or was simply
+                # stale. Believe slice-info and say nothing: a node logging a move on every
+                # poll because of a hint it keeps re-reading is [P24] with a new cause.
+                self.assigned = assigned
+                return
+            if info["model_id"] != self.cfg.get("model_id"):
+                # A different MODEL is not this fix's business. The migration path stages that
+                # download while the node keeps serving and cuts over only once the coordinator
+                # confirms -- swapping models here would drop coverage, and could land this
+                # node on a model the network is not running.
+                log.info("placement moved to %d-%d, but on %s rather than the %s this node "
+                         "serves - leaving it to the migration path", assigned[0], assigned[1],
+                         info["model_id"], self.cfg.get("model_id"))
+                return
+            log.warning("the coordinator has re-placed this node on layers %d-%d; it is loaded "
+                        "with %d-%d. Applying it now rather than at the next registration - "
+                        "until it lands, traffic for the new range is refused as a "
+                        "range_mismatch and rerouted, which is what [P60] made safe.",
+                        assigned[0], assigned[1], srv.lo, srv.hi)
+            if self.cfg.get("layers_pinned"):
+                # Same rule as start-up: --layers is an opinion, placement is the coordinator's
+                # decision, and an override that silently does nothing is worse than one that
+                # is refused out loud ([P31]).
+                log.warning("--layers is set on this machine, but placement is decided "
+                            "coordinator-side (./coordinator/pin_layers.sh). Serving %d-%d.",
+                            assigned[0], assigned[1])
+            self._apply_range(info)
+        except requests.RequestException as e:
+            log.warning("could not confirm this node's placement (will retry): %s", e)
+        except Exception as e:                                              # noqa: BLE001
+            log.error("could not apply the new placement, staying on layers %d-%d and "
+                      "retrying on the next poll: %s", srv.lo, srv.hi, e)
+
+    def _apply_range(self, info):
+        """Load the newly-assigned range, downloading it first only if it is not already here."""
+        lo, hi = int(info["layer_start"]), int(info["layer_end"])
+        total = int(info.get("total_layers") or self.server.n)
+        slice_dir = os.path.join(HERE, os.path.normpath(self.cfg["slice_dir"]))
+        weights = os.path.join(slice_dir, "model.safetensors")
+        have = self.slice_layers_on_disk(weights) if os.path.exists(weights) else None
+        if (have and slice_downloader.slice_provenance(slice_dir) == info["model_id"]
+                and self._slice_covers(weights, have, (lo, hi), info)):
+            # A re-split usually lands INSIDE what some earlier assignment already downloaded,
+            # and re-fetching it is how one 8 GB machine downloaded the same weights four times
+            # in an afternoon. Reload from the file that is already here: nothing to download,
+            # and no directory to move, which also means nothing deleted out from under the
+            # model this server currently holds open.
+            log.info("the slice on disk holds %d-%d and covers the new %d-%d - reloading in "
+                     "place, no download needed", have[0], have[1], lo, hi)
+            self.server.reload(slice_dir, lo, hi, total)
+            self.cfg["layer_start"], self.cfg["layer_end"] = lo, hi
+            self._save()
+            self.state.update(layers=[lo, hi])
+            log.info("now serving layers %d-%d", lo, hi)
+            return
+        staged = os.path.join(HERE, "model_slice_migrating")
+        shutil.rmtree(staged, ignore_errors=True)
+        log.info("downloading layers %d-%d (~%.2f GB) for the new placement - this node keeps "
+                 "answering for %d-%d until it is ready", lo, hi,
+                 info.get("estimated_download_gb") or 0.0, self.server.lo, self.server.hi)
+        try:
+            slice_downloader.download_slice(info["model_id"], lo, hi, staged,
+                                            is_first_node=info["is_first_node"],
+                                            is_last_node=info["is_last_node"])
+        except Exception as e:                                              # noqa: BLE001
+            log.warning("the new range did not download; keeping layers %d-%d and retrying on "
+                        "the next poll: %s", self.server.lo, self.server.hi, e)
+            shutil.rmtree(staged, ignore_errors=True)
+            return
+        # Downloaded into a SEPARATE directory and swapped, exactly as a migration does: the
+        # running server holds the current file open, and on Windows deleting it underneath is
+        # a PermissionError rather than a clean failure.
+        self._swap_to({"model_id": info["model_id"], "layer_start": lo, "layer_end": hi,
+                       "total_layers": total, "slice_dir": staged, "ready": True},
+                      why="re-placement")
 
     def _prepare_migration_target(self, asg):
         """Download the target tier's slice into a SEPARATE dir — this node keeps answering
@@ -1598,8 +1745,8 @@ class Agent:
             return
         self._swap_to(prepared)
 
-    def _swap_to(self, prepared):
-        log.info("migration: cutting over to %s layers %d-%d", prepared["model_id"],
+    def _swap_to(self, prepared, why="migration"):
+        log.info("%s: cutting over to %s layers %d-%d", why, prepared["model_id"],
                  prepared["layer_start"], prepared["layer_end"])
         self.server.reload(prepared["slice_dir"], prepared["layer_start"],
                            prepared["layer_end"], prepared["total_layers"])
@@ -1610,7 +1757,7 @@ class Agent:
         self.cfg["layer_start"], self.cfg["layer_end"] = prepared["layer_start"], prepared["layer_end"]
         self._save()
         self.state.update(layers=[prepared["layer_start"], prepared["layer_end"]])
-        log.info("migration: now serving %s layers %d-%d", prepared["model_id"],
+        log.info("%s: now serving %s layers %d-%d", why, prepared["model_id"],
                  prepared["layer_start"], prepared["layer_end"])
 
     def bind_payout_address(self):
