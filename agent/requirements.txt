@@ -19,6 +19,20 @@ requests
 # still earns, it just cannot bind an address yet.
 eth-account
 
+# The [P52] wire encryption (security/wire_crypto.py). `agent/node_server.py` and
+# `neuron_driver.py` import it at MODULE SCOPE, so unlike eth-account above its absence is not
+# a degraded feature — it is an agent that cannot import its own modules and never reaches its
+# first log line. Verified the hard way on `optiplex-server`, 2026-08-21: a venv built from
+# this file gave `ModuleNotFoundError: No module named 'cryptography'` for neuron_driver,
+# node_server, agent.agent and api.openai_compat all at once.
+#
+# [P54] is exactly this, one file over. `security/` was a new top-level package, and the four
+# places that had to carry it each failed silently in their own way; `coordinator/requirements.txt`
+# got this line and a paragraph explaining why, and the file listing the NODE's dependencies —
+# which needs it for the same reason — did not. Nothing checks that a new package reaches every
+# manifest that must name it, which is why the fix is one line and the lesson is not.
+cryptography
+
 # Optional — the system-tray icon (green = earning, pause, NRN balance).
 # Uncomment on a desktop; leave commented on a headless server.
 # pystray

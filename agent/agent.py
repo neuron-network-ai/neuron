@@ -288,6 +288,33 @@ def ensure_config(path=CONFIG_PATH):
     return path
 
 
+class _Config(dict):
+    """This machine's config file in front, the build's defaults behind.
+
+    **The claim that every lookup falls back to DEFAULT_CONFIG was written down and was not
+    true.** `main()` logs "config predates this build; using built-in defaults for: ..." and
+    carries on, because a config from an older build is missing whatever this build added and
+    that is explicitly not meant to be an error. But the agent reads its config forty times
+    with a plain `self.cfg[...]`, and one of those is `slice_dir` in `ensure_slice` -- so a
+    config predating the key it added does not fall back at all, it raises `KeyError` out of
+    `setup()` and the agent crash-loops on startup.
+
+    Seen on `optiplex-server`, 2026-08-21, on a config that named only `coordinator` and
+    `local_chat`: `KeyError: 'slice_dir'`, logged as [CRASH], restarting every 10 seconds. A
+    fresh install writes the full dict so it never showed there, which is why a comment could
+    assert the opposite of the behaviour for this long.
+
+    `__missing__` makes the claim true for subscript reads without touching forty call sites.
+    Deliberately a `dict` subclass rather than a `ChainMap`: `_save()` and `main()` both
+    `json.dump` this object, and only the keys THIS machine actually set should reach the file
+    -- defaults belong to the build, not to the operator's disk. `in` and `.keys()` likewise
+    see only real keys, so the "predates this build" log keeps reporting what it always did.
+    """
+
+    def __missing__(self, key):
+        return DEFAULT_CONFIG[key]
+
+
 def load_config(path):
     """Read the config, falling back to the last known-good copy if it is unreadable.
 
@@ -301,7 +328,7 @@ def load_config(path):
     """
     try:
         with open(path) as f:
-            return json.load(f)
+            return _Config(json.load(f))
     except (OSError, ValueError) as first:
         prev = path + ".prev"
         try:
@@ -318,7 +345,7 @@ def load_config(path):
             pass
         with open(path, "w") as f:
             json.dump(cfg, f, indent=2)
-        return cfg
+        return _Config(cfg)
 
 
 log = logging.getLogger("neuron.agent")
@@ -1722,7 +1749,9 @@ def main():
              _version(), path, cfg.get("coordinator", DEFAULT_CONFIG["coordinator"]),
              cfg.get("donation_mode"))
     # A config written by an older build is missing whatever this one added. That is not an
-    # error -- every lookup falls back to DEFAULT_CONFIG -- but it belongs in the log, because
+    # error -- `_Config.__missing__` falls back to DEFAULT_CONFIG, which is what MAKES it not
+    # an error; the same sentence used to sit here as an unbacked claim while `self.cfg[...]`
+    # raised KeyError on any key the file predated. It belongs in the log either way, because
     # "upgraded in place over an older install" is the first thing to know when a version that
     # worked stops working ([P24]).
     missing = [k for k in DEFAULT_CONFIG if k not in cfg]
