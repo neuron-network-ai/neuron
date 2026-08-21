@@ -6296,3 +6296,80 @@ click settles it.
   the llama.cpp/GGUF path, which can't do this hand-written layer split.
 - Provisioning a new node needs a one-time manual hand-off (SSH pubkey + a sudo
   `apt install pythonX.Y-venv`); everything after that is automated.
+
+---
+
+## Session 72 (2026-08-22) — the page nobody was updating, and the prompt nobody was reading
+
+Two of the three things fixed here were invisible for months, and both were invisible for the
+same reason: **nothing failed.** A stale download link still downloads. A prompt nobody reads
+still gets answered. Neither produces an error, a red light, or a support message.
+
+### [P60]'s residual — a re-placement now reaches a running node
+
+The coordinator moved a node's range and nothing told the node; it learned only at its next
+registration. Yesterday's fix made the gap safe (a node refuses a role it cannot serve, and the
+driver reroutes) without making it shorter.
+
+The assignment now rides on the heartbeat — the fourth fact to do so, for the fourth identical
+reason: it is the one call every live node makes continuously, and the only channel that reaches
+a node behind NAT. `ping()` returns the range; `note_assignment` records it; the MIGRATION loop
+applies it, because one thread owning every slice download and every reload is what makes a lock
+unnecessary. A migration in flight wins.
+
+Three decisions worth keeping:
+- **the assignment is sent, not a "you changed" flag** — a flag is state that must be cleared and
+  one missed beat drops it forever; a range is idempotent;
+- **compared against the SERVER's loaded range, never config.json** — config is what the node
+  believes it was told, `server.lo/hi` is what the machine computes, and every version of this
+  bug is those two disagreeing while all the reporting comes from the first;
+- **the heartbeat's range is a hint; slice-info is the authority** — and it also carries the
+  model, which two layer numbers cannot imply. A model change is left to the migration path.
+
+28 assertions, each verified against three mutations of the fix.
+
+### [P64] — the public site was two branches and nineteen releases behind
+
+The founder asked why the landing page was not updating. It was not: GitHub Pages built from
+`main:/docs` while every session works on `main-full`, 181 commits ahead. The live page offered
+v0.19.0, the repo said v0.20.3, `/agent/version` said v0.20.22.
+
+**The SHA-256 was the sharp end.** The installer is unsigned, so both pages tell people to verify
+the hash by hand — and the page printed `80eb83a2...` while the README printed `b9d486b1...`, for
+the same v0.20.3, whose published asset hashes to `01867f43...`. Neither was ever right. The only
+person harmed by a wrong hash is the careful one.
+
+The page now reads version, url and hash from `/agent/version`, atomically — all three or none,
+because applying them separately is how a page shows build A's hash beside build B's link. Pages
+now builds from `main-full:/docs`.
+
+`test_download_links.py` had three checks and all three passed throughout, because they ask
+whether the repo agrees with ITSELF, and it agreed perfectly at 0.20.3 for nineteen releases.
+Two more now, both verified to fail when perturbed — the first draft of the hash check could not
+fail at all, because a literal backspace byte had landed in its regex where `\b` was meant.
+
+### [P65] — PRIVACY.md said the coordinator cannot read your prompt, and it could
+
+Asked to prove why the comparison table said "partial", the answer turned out to be worse than
+the row: `node_a.coord_get_chain` sent `{"prompt": ...}` to `/infer` on every network request.
+The coordinator used it exactly twice, both times as a length. It never read the text, never
+logged it, never stored it — the storage half had been fixed earlier, and that is precisely what
+hid the rest. The database was clean, so the question looked closed.
+
+**"Nothing reads it" is a weaker promise than "it is not sent",** and only the second one was
+made. Now `prompt_chars`, computed on the user's machine. `InferBody.prompt` stays optional for
+drivers already installed, which also fixes the deployment order: the coordinator accepts both
+shapes, so it goes out BEFORE the release that stops sending text. The other order 422s the fleet.
+
+Not claimed as done until a release ships it. The page still says "partial" and PRIVACY.md
+carries a correction naming the version it becomes true from — claiming it earlier is [P31].
+
+### Traps
+
+- **A check that cannot fail is worse than no check.** The hash check passed against a README
+  deliberately given the wrong hash. A backspace byte had been written into its regex by a shell
+  heredoc. Every new check here was perturbed until it failed before being trusted.
+- **Mutation-test the fix, not just the feature.** Three mutations of the [P60] fix; two of them
+  originally produced a traceback rather than a named FAIL, which was fixed by guarding the
+  assertions — a suite of 125 needs the failure to name itself.
+- **A test that writes to the real dev DB must generate its own ids**, or it passes once.

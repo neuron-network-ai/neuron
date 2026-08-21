@@ -1,4 +1,116 @@
-# Handoff — start of Session 72
+# Handoff — start of Session 73
+
+## STATE AT CLOSE, 2026-08-22 — READ THE TWO LINES UNDER "OWED" FIRST
+
+**Fallback: tag `good-state-0.20.22`** (pushed), installer
+`dist/installer/NEURON-Setup-0.20.22.exe` (SHA `2c7820d0…`, 217 MB, matches the published
+asset's own digest). Older points: `good-state-2026-08-21-final`, `good-state-0.20.21`.
+
+```
+this PC   agent-optinovate-6ff49d        0-9     driver + stage 1   0.20.22 INSTALLED
+OptiPlex  agent-optiplex-server-ce473b   0-9     stage-1 replica    (by decision — do not "fix")
+Pavilion  agent-raman-...-e4920b         10-27   last stage
+coordinator  AGENT_VERSION 0.20.22 PUBLISHED · code committed, NOT YET DEPLOYED (see OWED)
+wallet  847.59 NRN · 5 machines · 0.00 unswept
+suite   125/125
+site    https://neuron-network-ai.github.io/neuron/ — now built from main-full:/docs
+```
+
+## OWED — two things, and the first one is one command
+
+1. **DEPLOY THE COORDINATOR.** Two changes are committed and pushed but not live:
+   `/ping` returning the node's assigned range ([P60]'s closer) and `/infer` accepting
+   `prompt_chars` ([P65]). The sandbox blocked the deploy this session; nothing is wrong with it.
+
+   ```
+   SSH_AUTH_SOCK=/c/Users/optin/.ssh/neuron-agent.sock bash coordinator/deploy.sh
+   ```
+
+   The key was already loaded in the agent — no passphrase needed while that socket lives.
+   **Deploying is not publishing**: `/agent/version` stays 0.20.22, governed by
+   `/etc/systemd/system/neuron-coordinator.service.d/zz-agent-release.conf`.
+
+2. **THE DEPLOY MUST HAPPEN BEFORE THE NEXT RELEASE, NOT AFTER.** The new driver sends
+   `prompt_chars` and no `prompt`. A coordinator that has not been deployed still requires
+   `prompt`, so it would 422 every request from a new build. This coordinator accepts both
+   shapes; that is the whole reason it is written that way. Order: deploy → build → publish.
+
+## What changed
+
+### [P60] is closed — a re-placement reaches a running node
+`/ping` carries `layer_start`/`layer_end`; the agent records it (`note_assignment`) and the
+MIGRATION loop applies it, because that thread already owns every slice download and every
+reload — one owner is why there is no lock. A migration in flight wins. Compared against
+`server.lo/hi`, never config.json. The heartbeat's range is a hint; slice-info is the authority
+and is confirmed before anything moves. A model change is refused here and left to migration.
+A covering slice reloads in place with no download; anything else stages and swaps.
+`agent/test_placement_reaches_the_node.py` — 28 assertions, checked against three mutations.
+
+### [P64] — the landing page was frozen on v0.19.0 and its hash matched nothing
+Pages built from `main:/docs`, 181 commits behind. **Pages now builds from `main-full:/docs`**
+(founder's decision), so editing `docs/` on the working branch is enough. The page reads version,
+url and SHA from `/agent/version` — atomically, all three or none — so a release never again
+needs anyone to remember that file. Verified live in a browser at the real origin.
+`test_download_links.py` gained the two checks that would have caught it.
+
+### [P65] — the coordinator was sent the prompt, and PRIVACY.md said it wasn't
+`node_a` now sends `prompt_chars`. The coordinator never read the text (both uses were `len()`),
+never logged it, never stored it — the storage half was fixed months ago and that is exactly what
+hid this. **PRIVACY.md now carries the correction publicly** rather than a quiet amendment, and
+the landing page's privacy row still says "partial", naming the one structural limit.
+
+**The row becomes ✓ the day a release ships the driver half** — and that is a founder call, not
+an automatic one. The wording to change is in `docs/index.html`, the `Privacy by architecture`
+row: `class="partial neuron-col">partial` → `class="tick neuron-col">✓`, and drop the
+"Marked partial for…" sentence from the footnote.
+
+## NEXT, in order
+
+1. **Deploy** (above), then attest before trusting any chat result.
+2. **[P56] part three** — declared precision. Needs MEASURED tolerances per dtype, not a guessed
+   table, and the declaration must cost something.
+3. **The node-id flip** — 5 registered identities for 3 real machines, plus stale
+   `node-c-pavilion`.
+4. **A release** carrying the [P65] driver half and the [P60] node half. Deploy first.
+
+## DECIDED, DO NOT RE-RAISE
+Code signing and the F-Secure false-positive report are deprioritised by the founder. The
+installer is unsigned and AV-flagged; known and accepted at this stage. The OptiPlex is a
+stage-1 REPLICA by decision — 2 stages is faster than 3, measured. Node earnings auto-forward to
+the owner's wallet; `claim_node_earnings.py` is a repair for UNOWNED nodes, not maintenance.
+
+## Traps this session paid for
+
+- **A check that cannot fail is worse than no check.** The new SHA-256 check passed against a
+  README deliberately given the wrong hash: a bash heredoc had written a literal backspace byte
+  into its regex where `\b` was meant. Perturb every new check until it fails before trusting it.
+- **`cat > file <<'EOF'` fails silently on some content.** Two patch scripts died at the shell
+  before Python ever ran. Write the script with the Write tool and run it; do not fight the
+  heredoc.
+- **Mutation-test the FIX, not just the feature**, and guard assertions that index into a list —
+  a mutant that produces a traceback instead of a named FAIL tells you much less in a 125-suite
+  run.
+- **A test that writes to the real dev DB must generate its own ids**, or it passes exactly once.
+- **`cd` persists between commands in one bash call.** Use `git -C`.
+- Workspace UI rebuilds need `MSYS_NO_PATHCONV=1 NEURON_ONLY=1 NEURON_BASE=/workspace/` — all
+  three, every time. Check the artefact, not the exit code.
+
+## Facts that save time
+
+- Full suite **125/125**. No pytest. Everything under a subdirectory runs as
+  `.venv\Scripts\python.exe -m <dotted.module>` from the repo root — including `ui/` and
+  `security/`, which have no `__init__.py` and resolve as namespace packages. Repo-root tests
+  and `packaging/` run as FILES.
+- The published asset's real hash can be read without downloading it:
+  `gh api repos/neuron-network-ai/neuron/releases/tags/v0.20.22 --jq '.assets[].digest'`.
+- Pages: `gh api repos/neuron-network-ai/neuron/pages` shows the source branch;
+  `gh api -X POST .../pages/builds` forces a rebuild.
+- Attest before trusting a chat result after any placement change or restart. Speed is not
+  evidence — garbage once ran at the fastest tok/s this network has produced.
+
+---
+
+# Handoff — start of Session 72 (previous)
 
 ## STATE AT CLOSE, 2026-08-21 (late) — READ THE FALLBACK LINE FIRST
 
