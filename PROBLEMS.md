@@ -366,6 +366,66 @@ Related: [P53] (the claim this was supposed to have fixed), [P54] (one thing reg
 several places, each failing silently), [P39] (ownership crediting, which is what a claim
 turns on).
 
+### [P61] 🟡 The workspace page could be served from cache while its bundle was two builds old — and the installer is blocked by antivirus (2026-08-21)
+
+**Reported as "I don't see anything here" on a blank `/workspace/`, while the server was serving
+a correct page.** `curl` returned the right HTML, both assets 200'd, and the same URL rendered
+perfectly in another browser. Two things were true at once and each is a bug:
+
+  * **`/workspace/index.html` was served with no `Cache-Control` at all.** The `/` route has
+    carried `no-store` and a paragraph about exactly this since 2026-08-19 — *"genuinely
+    installed, genuinely served, verifiable with `curl`, and invisible to the person sitting in
+    front of it"*. The workspace UI is mounted through `StaticFiles`, which sends an ETag and
+    nothing else, so it never inherited the rule.
+  * **The installer never purged the workspace bundle.** `[InstallDelete]` clears
+    `static/app/assets` — the line [P46] added — and the workspace bundle, added later, did not
+    inherit it. Three builds' bundles were in that directory at once (`index-BZqz4suc.js`,
+    `index-CPoEaZR7.js`, `index-BRCSWGK2.js`).
+
+Together they mean a cached `index.html` naming an older hashed bundle **finds that bundle still
+on disk and loads it**. Not a 404 — a silent, working, two-builds-old app. **A stale page that
+404s is a bug report; a stale page that works is a mystery.**
+
+Both fixed. `_EntryPointNotCached` sets `no-store` on `.html` only, leaving the content-hashed
+assets cacheable, which is correct and free. `[InstallDelete]` now covers both asset
+directories. Verified on the wire: the page returns `no-store, must-revalidate` and the bundle
+returns no `Cache-Control`; after the install the assets directory holds exactly one JS and one
+CSS, down from three each. `ui/test_entry_point_is_never_stale.py`, 12 assertions.
+
+`ui/test_install_integrity.py` asserted `count("Type: filesandordirs") == 1` as a proxy for
+"scoped to assets" — so it FAILED the fix for the bug it exists to prevent. It now checks the
+property it names: every delete ends in `ssets`, and both bundle directories are covered.
+
+---
+
+**AND THE INSTALLER IS BEING QUARANTINED BY ANTIVIRUS, which is the larger finding.**
+
+F-Secure blocked `NEURON-Setup-0.20.18.exe` twice — *"Application blocked"* then *"Harmful file
+blocked"* — with `Reason: Drop.Win32.Startup.11003`, and removed `neuron-agent.exe` from the
+install directory.
+
+**This also explains something recorded wrongly earlier the same day.** The 0.20.15 install was
+described as exit-code-0 with the exe vanishing a minute later, and attributed to Inno's setup
+process returning before its child finishes. The event log shows F-Secure firing at **01:26 and
+01:28** with the same detection. **The antivirus was the cause; the timing explanation was
+wrong.** It is corrected here rather than left standing, because a wrong cause in a handoff is
+worse than no cause.
+
+`Drop.Win32.Startup.*` is a heuristic on an unsigned binary that writes a startup entry — which
+is exactly what this installer legitimately does. **It is almost certainly a false positive, and
+that does not make it less serious.** ROADMAP's One Rule is the first stranger; if F-Secure
+flags it on the founder's own machine, a stranger downloading it hits the same wall with far
+less patience and no way to tell a false positive from a real one.
+
+The durable fix is **code-signing the installer** — an Authenticode certificate, which is a
+purchase and a founder decision, not a code change. Until then every operator needs an exclusion
+they should not have to grant. Nothing here has been worked around: disabling or excluding on
+this machine is the founder's call, and the node was restored by running the agent from source
+instead.
+
+Related: [P46] (the merged-install failure this is the other half of), [P58]/[P54] (a rule
+applied in one place and not in the sibling added later — the same shape, three times today).
+
 ### [P60] 🟢 The coordinator moved a node's range, the node never learned, and the network served garbage while reporting healthy (2026-08-21, fixed same day)
 
 **[P37]'s open item, live.** Installing 0.20.16 restarted this PC's agent. The coordinator

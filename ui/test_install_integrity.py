@@ -137,9 +137,20 @@ def main():
     check("[InstallDelete] clears the hashed assets before the copy",
           "[InstallDelete]" in iss
           and r"{app}\_internal\ui\static\app\assets" in iss)
+    # EVERY delete must end in `\assets`, rather than there being exactly ONE delete. Counting
+    # was a proxy for "scoped", and it stopped being one the moment a second bundle needed the
+    # same treatment: the workspace UI shipped its own hashed assets and did not inherit the
+    # rule, which is how three builds' bundles ended up in one directory on 2026-08-21. A test
+    # that forbids the fix for the bug it exists to prevent is worse than no test.
+    deletes = [ln.split("Name:", 1)[1].strip().strip('"')
+               for ln in iss.splitlines() if ln.startswith("Type: filesandordirs")]
     check("...scoped to `assets`, not the whole install",
-          iss.count("Type: filesandordirs") == 1,
-          "a broader delete would throw away files this installer does not put back")
+          bool(deletes) and all(d.endswith(r"\assets") for d in deletes),
+          f"a broader delete would throw away files this installer does not put back: {deletes}")
+    check("...and every hashed bundle directory is covered, not just the first one",
+          any("static\\app\\assets" in d for d in deletes)
+          and any("static\\workspace\\assets" in d for d in deletes),
+          f"{deletes} — a bundle that is not purged merges with the next build")
     check("the running app is closed first ([P24])", "CloseApplications=yes" in iss)
     check("...and NOT silently restarted, since the user chose when to run it",
           "RestartApplications=no" in iss)

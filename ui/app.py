@@ -115,8 +115,37 @@ if (STATIC_DIR / "app" / "assets").is_dir():
 # static/app, so this build is made with NEURON_BASE=/workspace/ and asks for
 # /workspace/assets/... instead. Mounted only when a build exists, so a checkout that has never
 # run npm still starts -- same rule as the /assets mount above.
+class _EntryPointNotCached(StaticFiles):
+    """StaticFiles that refuses to let an HTML entry point be cached, while leaving the hashed
+    assets beside it cacheable.
+
+    **The same bug the `/` route already carries a paragraph about, one directory over.** That
+    route sets `no-store` because an upgraded agent ships a new page and a browser holding the
+    old one keeps showing it — "genuinely installed, genuinely served, verifiable with `curl`,
+    and invisible to the person sitting in front of it". `/workspace/index.html` is served by
+    `StaticFiles`, which sends an ETag and no `Cache-Control` at all, so it never got that.
+
+    Live 2026-08-21: the founder's browser showed a blank `/workspace/` while the server was
+    serving a correct page — `curl` returned the right HTML and both assets 200'd. The cached
+    `index.html` named an OLDER content-hashed bundle, and because the installer never purges
+    the assets directory that bundle was still on disk. So it loaded, silently, an app from two
+    builds ago. A stale page that 404s is a bug report; a stale page that works is a mystery.
+
+    Only `.html` is touched. Vite content-hashes everything else, so a changed asset is a
+    changed URL and caching those is correct and free — the same distinction `index_classic`
+    draws, for the same reason.
+    """
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        resp = super().file_response(full_path, stat_result, scope, status_code)
+        if str(full_path).lower().endswith(".html"):
+            resp.headers["Cache-Control"] = "no-store, must-revalidate"
+        return resp
+
+
 if (STATIC_DIR / "workspace" / "index.html").is_file():
-    app.mount("/workspace", StaticFiles(directory=str(STATIC_DIR / "workspace"), html=True),
+    app.mount("/workspace", _EntryPointNotCached(directory=str(STATIC_DIR / "workspace"),
+                                                 html=True),
               name="workspace")
 # The workspace UI's own /api/* routes, reimplemented in Python because its Express server
 # cannot ship inside a frozen binary. Skills and the secretary are real; memory refuses with a

@@ -8,7 +8,7 @@
 ; and on uninstall deregisters the node + deletes its slice/config.
 
 #define AppName "NEURON"
-#define AppVersion "0.20.17"
+#define AppVersion "0.20.18"
 #define AppExe "neuron-agent.exe"
 
 [Setup]
@@ -62,6 +62,14 @@ Name: "startup"; Description: "Start NEURON automatically when I sign in"; Group
 ; the rest of {app} is version-stable filenames that ignoreversion handles correctly, and a
 ; broader delete would throw away files this installer does not put back.
 Type: filesandordirs; Name: "{app}\_internal\ui\static\app\assets"
+; AND the workspace bundle, which was added later and did not inherit the rule above.
+; Live 2026-08-21: three builds' bundles were sitting in this directory at once
+; (index-BZqz4suc.js, index-CPoEaZR7.js, index-BRCSWGK2.js). A browser holding a cached
+; index.html from any of them found its bundle still present and loaded it — so instead of a
+; loud 404 the operator got a silent, working, TWO-BUILDS-OLD app. A stale page that 404s is a
+; bug report; a stale page that works is a mystery. Paired with the no-store on the HTML entry
+; point in ui/app.py: the page is never cached, and the assets it names are never stale.
+Type: filesandordirs; Name: "{app}\_internal\ui\static\workspace\assets"
 
 [Files]
 ; the whole PyInstaller onedir output (neuron-agent.exe + _internal\)
