@@ -126,8 +126,38 @@ Kill by PID, or use a bracketed pattern.
 
 ## Do these, in this order
 
-1. **[P56] — still the most serious open item, and it is now scoped.** The verifier does not
-   drive the path a user's request takes. Concretely, what to build:
+1. **[P56] — TWO OF THREE PARTS ARE NOW DONE (2026-08-21). Read this before the plan below.**
+
+   **Shipped to the repo, NOT yet to a build.** `common.stage_config()` is the only place the
+   `config` message is shaped, and `neuron_driver._connect`, `challenge_node` and the new
+   `challenge_relay_node` all call it. The middle role is challenged as a RELAY for the first
+   time — the node dials a sink the verifier opens and is graded on what it FORWARDED, which is
+   its own output through the same `_batcher("middle", s1, s2)` that serves users. `sink_host`
+   is required and never guessed; the probe survives only as a RECORDED fallback, and every
+   attest result now carries `path`. `security/test_verifier_drives_the_user_path.py`, 26
+   assertions. Verified live against the Pavilion: passed, `max_err` 0.000217, `path: last`.
+
+   **The installed 0.20.15 predates this.** The live driver still builds its own dict; the next
+   build carries the constructor. Nothing about the running network changed.
+
+   **To run the relay challenge you must give it an address the node can dial you at:**
+   `--sink-host <ip>` or `$NEURON_VERIFY_SINK_HOST`. On this testbed that is this PC's
+   Tailscale address. Note the live topology has NO middle node (driver 0-9 + last 10-27), so
+   the relay path cannot be exercised end to end here until there is a third machine — it is
+   covered by real sockets against a scripted node in the test instead.
+
+   **WHAT IS LEFT is part three, and it is a measurement, not a decision:** `verify()` compares
+   against fp32 with `atol=0.05`, so a legitimately quantized node is indistinguishable from a
+   cheating one. Load the same shard fp32 and in the declared dtype, run the same seeded
+   challenge, read the drift. And the declaration must COST something — if declaring q4 only
+   buys a looser tolerance, every cheat declares q4. Urgent the day [P30] lands, not before.
+
+   **And the endgame, which none of the above reaches:** a challenge that is DISTINGUISHABLE
+   from real traffic can always be special-cased. Verification by REPLICATION — the coordinator
+   sending one sampled real request down two chains and comparing — never needs to know the
+   right answer, only that two machines disagree, and is the only version a node cannot detect.
+
+   The original plan, kept because parts of it are still the reference:
      * **One constructor for the `config` message.** `neuron_driver._connect` builds it at
        `neuron_driver.py:301`; `proof_of_compute.challenge_node` and `challenge_middle_node`
        each build their own. Move it to `common.stage_config()` and have all three call it —
