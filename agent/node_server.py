@@ -695,11 +695,55 @@ class NodeServer:
                         common.send_msg(conn, {"ok": True, "layers": msg.get("n", self.n),
                                                "s2": s2, "holds": [self.lo, self.hi],
                                                **ack_wire, **ack_direct})
+                    elif not _is_range_probe(msg):
+                        # REAL last-stage traffic reached a node that is NOT the last stage.
+                        # **This is [P60], and it used to fall into the probe branch below.**
+                        #
+                        # That branch's comment asserted that a config with no `host_b` reaching
+                        # "a node whose own range does NOT include the model's final layer can
+                        # only be a verifier challenging this node in isolation". It cannot. It
+                        # is equally a node the COORDINATOR believes is last while the node
+                        # knows it is not -- placement moved and nobody told it ([P37]). The
+                        # coordinator writes a new range to its own DB and the node learns it
+                        # only when it next registers.
+                        #
+                        # Live 2026-08-21: the coordinator moved a node to 10-27 while it held
+                        # 10-18. The driver asked for a last stage; the node quietly answered as
+                        # a PROBE -- `mid_stage(10, 19)`, correct arithmetic over the nine layers
+                        # it really had, and NO FINAL NORM. The driver then ran `lm_head` on an
+                        # un-normed hidden state and the user got
+                        # "Sovereberg Sovere ABCDEFGHITestCategory" for a question about the sky,
+                        # while /status read routable, stage1_ok, healthy, 28/28 covered and
+                        # decode hit 3.00 tok/s -- the fastest this network has ever produced,
+                        # because a node running nine layers instead of eighteen is quicker.
+                        # Speed rose as correctness went to zero. Same ending as [P55], reached
+                        # down a different road.
+                        #
+                        # REFUSING IS THE WHOLE FIX, and it costs nothing: `range_mismatch` is
+                        # already a named refusal the driver turns into a reroute (PeerUnavailable
+                        # is a ConnectionError, so it lands in DEAD_PEER), and proof-of-compute
+                        # already declines to score it as a failed challenge -- a node telling the
+                        # truth about stale placement is not a node computing badly. The sibling
+                        # guard a few lines up refuses `s2 < self.lo` for the same reason; it
+                        # simply never ran here, because it lives inside the branch this node was
+                        # not taking.
+                        #
+                        # The rule, stated positively: a node answers real pipeline traffic only
+                        # for a role it can actually serve. Anything else is a reroute, never a
+                        # plausible-looking tensor.
+                        common.send_msg(conn, {
+                            "ok": False, "error": "range_mismatch",
+                            "detail": f"asked to serve the LAST stage from layer "
+                                      f"{msg.get('s2')} to {self.n - 1}, but this node holds "
+                                      f"{self.lo}-{self.hi} and does not hold the model's "
+                                      f"final layer. Placement here is stale -- re-register or "
+                                      f"re-place this node; it cannot apply the final norm.",
+                            "holds": [self.lo, self.hi]})
+                        return
                     else:
                         # PROBE role (security/proof_of_compute.py): a config with no host_b
-                        # that either names a real layer RANGE to challenge (`_is_range_probe`)
-                        # or reaches a node whose own range does NOT include the model's final
-                        # layer can only be a verifier challenging this node in isolation --
+                        # that names a real layer RANGE to challenge (`_is_range_probe`) is a
+                        # verifier challenging this node in isolation --
                         # calling last_stage() here would be WRONG (and likely crash: this
                         # shard was downloaded without norm/later layers, which stay on the
                         # meta device, uninitialized). Uses OUR OWN self.lo/self.hi, never the

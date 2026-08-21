@@ -366,7 +366,7 @@ Related: [P53] (the claim this was supposed to have fixed), [P54] (one thing reg
 several places, each failing silently), [P39] (ownership crediting, which is what a claim
 turns on).
 
-### [P60] 🔴 The coordinator moved a node's range, the node never learned, and the network served garbage while reporting healthy (2026-08-21)
+### [P60] 🟢 The coordinator moved a node's range, the node never learned, and the network served garbage while reporting healthy (2026-08-21, fixed same day)
 
 **[P37]'s open item, live.** Installing 0.20.16 restarted this PC's agent. The coordinator
 re-placed the roster while it was away, and the Pavilion's assignment moved from 10-18 to
@@ -411,6 +411,52 @@ a transient. Candidate fixes, in order of how little they trust:
 
 The second is the one that closes it without trusting the coordinator, the network, or timing —
 and it is the one that would have turned this incident into a reroute instead of an answer.
+
+---
+
+**FIXED, and the fix is one missing arm.** `serve()` chose its role in three branches: middle if
+the config carries `host_b`, LAST if this node holds the model's final layer and the message is
+not a probe, and PROBE for **everything else**. That third branch was a catch-all, and its own
+comment justified it with an inference that is false:
+
+> a config with no host_b that ... reaches a node whose own range does NOT include the model's
+> final layer can only be a verifier challenging this node in isolation
+
+It can equally be a node the COORDINATOR believes is last while the node knows it is not. So
+real pipeline traffic fell into the probe arm, ran `mid_stage` over the layers the node really
+had, skipped the final norm, and handed the driver something to run `lm_head` on.
+
+There is now a fourth arm: **real last-stage traffic reaching a node that is not the last stage
+is refused with `range_mismatch`**, naming what the node actually holds. Refusing costs nothing
+— the driver already turns a refused config into `PeerUnavailable`, which is a `ConnectionError`
+and therefore already in `DEAD_PEER`, so it reroutes; and proof-of-compute already reads
+`range_mismatch` as placement rather than as a failed challenge, so an honest node with stale
+bookkeeping is not flagged for it ([P28]). The sibling guard four lines up refuses
+`s2 < self.lo` for exactly this reason — it simply never ran here, because it lives inside the
+branch this node was not taking.
+
+**The rule, stated positively: a node answers real pipeline traffic only for a role it can
+actually serve.** Anything else is a named refusal, never a plausible-looking tensor.
+
+Proven against the live network, before and after. Before, the OptiPlex — holding 10-18 — was
+asked for a last stage and replied `ok: True` while reporting `holds: [10, 18]`. After:
+
+```
+ok=False  error='range_mismatch'  holds=[10, 18]
+asked to serve the LAST stage from layer 10 to 27, but this node holds 10-18 and does not
+hold the model's final layer. Placement here is stale -- re-register or re-place this node;
+it cannot apply the final norm.
+```
+
+The true last stage still attests clean (`max_err` 5.5e-05) and the network answers correctly.
+`agent/test_stale_placement_is_refused_not_answered.py`, 13 assertions, including that nothing
+which worked before is refused now — a true last stage, a middle relay, and a verifier's probe
+to both a mid-range and a full-model node all still take the arms they always did.
+
+**What is still open under this entry** is the notification itself: the node still learns its
+new range only when it next registers ([P37]). This turns that window from *wrong answers* into
+*reroutes*, which is the difference between a bug and an outage — but the window remains, and
+closing it means the node re-reading `slice-info` on a heartbeat.
 
 Related: [P37] (filed this exact gap and left it open), [P56] (whose verifier diagnosed it),
 [P55] (the same symptom from a different cause), [P42] (unmaterialized layers, the check that
