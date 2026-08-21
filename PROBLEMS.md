@@ -366,6 +366,56 @@ Related: [P53] (the claim this was supposed to have fixed), [P54] (one thing reg
 several places, each failing silently), [P39] (ownership crediting, which is what a claim
 turns on).
 
+### [P60] 🔴 The coordinator moved a node's range, the node never learned, and the network served garbage while reporting healthy (2026-08-21)
+
+**[P37]'s open item, live.** Installing 0.20.16 restarted this PC's agent. The coordinator
+re-placed the roster while it was away, and the Pavilion's assignment moved from 10-18 to
+10-27. **The node was never told.** It kept the slice it had, and served `layers[10:]` over a
+skeleton whose layers 19-27 were never materialised.
+
+```
+prompt : What colour is the sky on a clear day?
+answer :   Sovereberg   Sovere  ABCDEFGHITestCategory  ABCDEFGHI#Endowments  ???e
+```
+
+**And every indicator was green.** `/status` said `routable: true`, `stage1_ok: true`,
+`network_healthy: true`, 3 nodes, 28/28 covered. Decode was **3.00 tok/s — the fastest figure
+this network has ever produced** — because a node running nine layers instead of eighteen is
+genuinely quicker. Speed went UP as correctness went to zero, which is worth stating plainly:
+on this network throughput is not evidence of anything.
+
+**What found it in one command was [P56]'s own fix**, shipped hours earlier:
+
+```
+RangeMismatch: challenged on layers 10-27 (s2=10, n=28) but the node holds 10-18
+               -- placement disagreement, not a bad answer
+```
+
+Named the fault, named the node, and distinguished placement from compute — which is precisely
+the distinction that entry exists to preserve. Repaired with `pin_layers.sh` onto the shape the
+nodes actually hold, then a restart so they load it, then re-attested (`passed`, `max_err`
+2.8e-05 and 5.5e-05) BEFORE trusting any chat output.
+
+**The gap is the notification, not the placement.** `models.update_layers` writes the new range
+to the coordinator's DB and nothing pushes it to the node; the node discovers it only when it
+next registers. A restart happens to fix it, which is why every previous occurrence looked like
+a transient. Candidate fixes, in order of how little they trust:
+
+  * the node re-reads `slice-info` on a heartbeat and reloads when its range changed ([P37]);
+  * `node_server` refuses a config whose range exceeds what `unmaterialized_layers` says it can
+    actually serve — it already computes this at load time and then never consults it again. A
+    node asked for layers it does not hold should answer `range_mismatch`, which the driver
+    already handles as a reroute, instead of computing over meta tensors;
+  * the coordinator should not consider a chain routable until every node in it has
+    acknowledged its current range.
+
+The second is the one that closes it without trusting the coordinator, the network, or timing —
+and it is the one that would have turned this incident into a reroute instead of an answer.
+
+Related: [P37] (filed this exact gap and left it open), [P56] (whose verifier diagnosed it),
+[P55] (the same symptom from a different cause), [P42] (unmaterialized layers, the check that
+exists and is not consulted here).
+
 ### [P59] 🟡 A third stage costs a relay round trip per token, and the two nodes paying it share a LAN (2026-08-21)
 
 **Adding `optiplex-server` as a third node dropped the network from ~3.3 tok/s to ~2.1-2.4.**
