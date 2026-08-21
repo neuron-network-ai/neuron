@@ -1,5 +1,56 @@
 # Handoff — start of Session 70
 
+## STATE AT CLOSE, 2026-08-21 — 0.20.18 INSTALLED HERE, 0.20.17 IS WHAT THE FLEET IS TOLD
+
+```
+this PC       0.20.18   installed, running, serving the UI
+Pavilion      0.20.17   node
+OptiPlex      0.20.17   node
+coordinator   AGENT_VERSION 0.20.17  (published, with a matching SHA)
+```
+
+That is a legal, normal state — `test_version_lockstep` allows the coordinator to lag a built
+version so a build can exist before anyone is told to install it. **0.20.18 is built and
+installed but NOT released**: there is no v0.20.18 tag, no release notes, and `AGENT_VERSION`
+was deliberately left at 0.20.17. Publishing it is a decision, and the antivirus finding below
+is the reason to think about it first.
+
+Network: 3 nodes, `[[0,9],[10,27]]`, routable, healthy. Attested clean (`max_err` 0.000217)
+and answering — *"On a clear day, the sky is typically blue."*
+
+## [P61] — the blank workspace page, and the antivirus underneath it
+
+**Two bugs, both fixed and both verified from the installed build.** `/workspace/index.html` was
+served with no `Cache-Control` at all, and `[InstallDelete]` purged `static/app/assets` but not
+`static/workspace/assets`. Together, a cached `index.html` naming an older hashed bundle found
+that bundle still on disk and loaded it — a silent, working, two-builds-old app. Now: the page
+returns `no-store, must-revalidate`, hashed assets stay cacheable, and a stale bundle 404s.
+
+**The larger finding is that F-Secure quarantines the installer** —
+`Drop.Win32.Startup.11003`, and it removed `neuron-agent.exe` from the install directory. **This
+also corrects an entry written earlier the same day**, which blamed Inno's child-process timing
+for a vanishing exe; the event log shows the antivirus firing at 01:26 and 01:28 with the same
+detection. A wrong cause in a handoff is worse than no cause.
+
+The founder removed F-Secure to complete the install. **Suggest putting it back with an
+exclusion for the NEURON install directory rather than leaving the machine without it.**
+
+**Code signing was discussed and DEFERRED (founder, 2026-08-21).** The plumbing was NOT wired
+into `neuron.iss` — it was offered and declined, so there is nothing half-built to trip over.
+When it is wanted: an Authenticode certificate (Azure Trusted Signing is the cheapest and needs
+no hardware token; Certum has an open-source tier; EV is the only one that grants SmartScreen
+reputation immediately), then sign the PyInstaller exe and let Inno sign its own output, always
+with `/tr` timestamping. Signing is not an AV bypass — `Drop.Win32.Startup.*` is behavioural —
+so submit the false positive to F-Secure regardless; that costs nothing.
+
+**Why this is a roadmap item and not a chore:** ROADMAP's One Rule is the first stranger. This
+fired on the founder's own machine, where he knew it was safe and had the repo to check against.
+A stranger gets a scary warning, no context, and no way to tell a false positive from a real
+one — and the rational move for them is to delete it. **The installer is currently a wall in
+front of the one metric the project is measured on.**
+
+---
+
 ## [P60] IS FIXED, SHIPPED AND PUBLISHED — 0.20.17 (2026-08-21)
 
 **The fix is one missing arm.** `node_server.serve` chose its role in three branches and the
