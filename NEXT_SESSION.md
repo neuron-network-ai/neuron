@@ -2,11 +2,12 @@
 
 ## STATE AT CLOSE, 2026-08-21 (late) — READ THE FALLBACK LINE FIRST
 
-**Fallback: tag `good-state-2026-08-21-final`** (pushed). Also `good-state-0.20.21`, and the
-installer `dist/installer/NEURON-Setup-0.20.21.exe`.
+**Fallback: tag `good-state-0.20.22`** (pushed), installer
+`dist/installer/NEURON-Setup-0.20.22.exe`. Older points: `good-state-2026-08-21-final`,
+`good-state-0.20.21`.
 
 ```
-this PC   agent-optinovate-6ff49d        0-9     driver + stage 1   0.20.21 installed
+this PC   agent-optinovate-6ff49d        0-9     driver + stage 1   0.20.22 INSTALLED
 OptiPlex  agent-optiplex-server-ce473b   0-9     stage-1 replica    claimed today
 Pavilion  agent-raman-...-e4920b         10-27   last stage
 coordinator  AGENT_VERSION 0.20.17 published; ledger.py DEPLOYED with the owner-forward
