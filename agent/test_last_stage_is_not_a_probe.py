@@ -223,20 +223,27 @@ def main():
           not torch.equal(last, mid))
 
     # ---- 4. the driver still sends the shape this file pins ----------------- #
+    # The driver no longer writes the dict here: `common.stage_config` builds it, and
+    # proof_of_compute builds ITS challenges from the same function, so the request and the
+    # challenge cannot drift apart again ([P56]). What this section pins therefore moved from
+    # "the literal the driver writes" to "the arguments the driver passes" plus "the rules the
+    # constructor enforces" -- the same two properties, one level in.
     src = open("neuron_driver.py", encoding="utf-8").read()
-    cfg_src = src[src.index('cfg = {"type": "config"'):]
+    cfg_src = src[src.index("cfg = common.stage_config("):]
     cfg_src = cfg_src[:cfg_src.index("common.send_msg")]
-    # the dict LITERAL alone -- what every hop gets, before the host_b branch adds to it
-    literal = cfg_src[:cfg_src.index('if chain["host_b"]:')]
-    check("neuron_driver does NOT put `s1` in the config it builds for every hop",
-          '"s1"' not in literal, literal)
-    check("...it adds `s1` only inside the host_b branch, where a middle relay needs it",
-          'cfg["s1"] = self.s1' in src and
-          src.index('if chain["host_b"]:') < src.index('cfg["s1"] = self.s1'))
+    check("neuron_driver passes `s1` ONLY for a middle hop, never for a last one",
+          's1=self.s1 if chain["host_b"] else None' in cfg_src, cfg_src)
     check("neuron_driver names the stage outright",
-          '"stage"' in cfg_src and '"last"' in cfg_src, cfg_src)
-    check("...and calls the hop `middle` when it relays through one",
-          '"middle" if chain["host_b"]' in cfg_src, cfg_src)
+          'stage="middle" if chain["host_b"] else "last"' in cfg_src, cfg_src)
+    common_src = open("common.py", encoding="utf-8").read()
+    ctor = common_src[common_src.index("def stage_config("):]
+    ctor = ctor[:ctor.index("\ndef ", 1)]
+    check("...and the constructor refuses to emit `s1` for a last stage",
+          'if stage == "middle":' in ctor
+          and ctor.index('if stage == "middle":') < ctor.index('cfg["s1"]'),
+          "s1 outside the middle branch is exactly what [P55] turned on")
+    check("...and refuses a middle hop with no next hop at all",
+          "a middle hop needs s1, host_b and port_b" in ctor)
     # node_a.py is the driver neuron_driver superseded, and it still builds configs. It had
     # the same bug for the same reason, so it has to move with the rule, or the older path
     # resurrects [P55] the next time somebody runs it.

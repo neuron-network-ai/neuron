@@ -366,6 +366,56 @@ Related: [P53] (the claim this was supposed to have fixed), [P54] (one thing reg
 several places, each failing silently), [P39] (ownership crediting, which is what a claim
 turns on).
 
+### [P63] 🟢 I shipped the standalone product wearing NEURON's URL, twice, and the wallet disappeared (2026-08-21)
+
+**The founder reported "and in chrome wallet is gone too" after installing 0.20.19. That was
+me.** `ui/static/workspace/` is a compiled artefact from a separate repo, and two environment
+variables decide what comes out of that build:
+
+```
+NEURON_ONLY=1            strips Gemini/Ollama/KoboldCPP AND gates <NeuronBar />
+NEURON_BASE=/workspace/  makes the page ask for /workspace/assets/... not /assets/...
+```
+
+I rebuilt the bundle to fix [P62] and passed only the second. `{__NEURON_ONLY__ && <NeuronBar />}`
+therefore compiled away, and with it the wallet, the balance, the sign-in link and the
+server-conversation import — while the app itself still worked perfectly. **A build that
+succeeds with the wrong environment does not produce a broken product; it produces a DIFFERENT
+one.** It shipped that way in 0.20.19 and again in 0.20.20 before the missing bar was traced to
+its cause rather than to the user's session.
+
+`NEURON_BASE` went wrong the same afternoon in the other direction: under Git Bash it became
+`/Program Files/Git/workspace/` through MSYS path translation, and was caught only by reading
+the emitted `index.html`. Use `MSYS_NO_PATHCONV=1`.
+
+**Nothing checked either of them, because a compiled bundle cannot be reviewed in a diff.**
+`ui/test_workspace_bundle_is_neuron_only.py` now checks the artefact by what it CONTAINS: every
+asset reference lives under `/workspace/`, no reference carries a translated Windows path, every
+referenced file is on disk, there is exactly ONE bundle of each kind ([P61]), the wallet bar and
+the conversation import are compiled in, and the three [P62] fixes are present. Every assertion
+is a string that only survives the correct build.
+
+**Two real bugs were found underneath it while looking**, and both are fixed:
+
+  * **A deleted chat came back on refresh.** `fetchServerThreads` imports the wallet's
+    conversations and skips those already local — judged by the very thread the delete removed.
+    So the id dropped out of `known` and the next load re-imported it. The server copy was never
+    deleted; `DELETE /conversations/{id}` has existed the whole time and the client never called
+    it.
+  * **Signing out hid the way back in.** `fetchSession` collapsed "could not ask" and "asked,
+    nobody is signed in" into one value, and the bar hid on the second as if it were the first —
+    removing the sign-in link along with the wallet. That is [P24]'s rule ("we could not check"
+    must never render as a fact) applied to a session.
+
+**The lesson is mine and it is specific.** I verified 0.20.19 by checking that the page rendered
+and that the citation fix was in the bundle. Both were true. I never checked that the bundle was
+the same PRODUCT — and the one person who would notice was the one looking at a header that used
+to have his balance in it.
+
+Related: [P62] (the crash this rebuild was fixing), [P61] (stale bundles, the other way a
+compiled artefact goes wrong), [P46] (a build that verifies itself while the install is
+incoherent).
+
 ### [P62] 🟢 A web-search citation blanked the entire workspace, and the failure was total (2026-08-21)
 
 **`/workspace/` rendered nothing while the server served it correctly.** `curl` returned the
