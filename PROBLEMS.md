@@ -438,15 +438,27 @@ because the reason is usually transient or fixable and a node that gives up fore
 notices. The DRIVER had the same flaw and the same fix; it had simply never met a peer that
 offered an address it could not reach.
 
-**Still open: one firewall rule.** The LAN win is real and unclaimed until the OptiPlex accepts
-50999 from its own subnet, matching the rules already there for 22, 3001 and 3002:
+**The firewall rule went in, and the hop is now on the switch.** `ufw allow from
+192.168.1.0/24 to any port 50999 proto tcp`, and the LAN dial went from a 3 s timeout to
+**0.2 ms**. Confirmed on the wire rather than inferred — during a live generation the last node
+shows `192.168.1.10:50999 <- 192.168.1.11:36734`, the middle node's own LAN address, not the
+relay.
 
-```
-sudo ufw allow from 192.168.1.0/24 to any port 50999 proto tcp
-```
+| three-stage chain | decode | time to first token |
+|---|---|---|
+| before any of this | 1.66 tok/s | 2493 ms |
+| middle hop on the LAN | **1.90 tok/s** | **1887 ms** |
 
-That is the founder's to run. Until then the code is correct, costs one timeout per peer per
-five minutes, and takes the relay.
+**+14% and 606 ms off first token, which is ~76 ms per token — one relay round trip, the size
+[P57] predicted.** Two stages is still 2.16 tok/s, and that is the point of the entry above:
+the third machine costs a hop that splitting the layers does not earn back.
+
+**The remaining relay leg is the DRIVER's, and it is an accident of where the PC is sitting.**
+Both nodes are on `192.168.1`; this PC is on a phone hotspot at `192.168.137`, so its own
+`lan_hint` matches neither and the first hop still goes to Amsterdam. On the home network that
+hop would go direct too, which is worth roughly another 76 ms/token — enough to put the
+three-stage chain back level with two. `lan_direct` has been dormant since it shipped for
+exactly this reason, and nothing about it needs changing to find out.
 
 Related: [P57] (the bandwidth wall this sits on top of, and the 88 ms/5.3 ms measurement),
 [P30] (phase 3, where distribution first measured 8x), [P56] (the three-stage topology exists
