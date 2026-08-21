@@ -328,10 +328,29 @@ async def health_loop():
             # unroutable.
             with _migration_lock:
                 migrating = _migration.phase != "steady"
-            if not shape["routable"] and migrating:
-                print(f"[repair] chain is unroutable but a migration is {_migration.phase} — "
-                      f"leaving placement to it")
+                _prep_since = _migration.preparing_since
+            # A BOUNDED stand-down. Waiting for a migration is right; waiting forever is how a
+            # transient migration becomes a permanent outage. See config.REPAIR_STANDDOWN_S.
+            # A MISSING timestamp counts as stalled, not as "wait indefinitely". Some path
+            # that sets `preparing` without stamping the clock, or an older controller across
+            # an upgrade, would otherwise disable repair by omission — and failing open in the
+            # direction of "serve nobody" is the shape of every outage in PROBLEMS.md.
+            _stalled = (migrating and (_prep_since is None
+                                       or (time.time() - _prep_since) > config.REPAIR_STANDDOWN_S))
+            _repair_blocked = None
+            if not shape["routable"] and migrating and not _stalled:
+                _waited = int(time.time() - _prep_since) if _prep_since else 0
+                _repair_blocked = {"reason": "migration", "phase": _migration.phase,
+                                   "waited_s": _waited,
+                                   "stand_down_s": config.REPAIR_STANDDOWN_S}
+                print(f"[repair] chain is unroutable but a migration is {_migration.phase} "
+                      f"({_waited}s) — leaving placement to it")
             elif not shape["routable"]:
+                if _stalled:
+                    print(f"[repair] a migration has been {_migration.phase} for "
+                          f"{int(time.time() - _prep_since)}s and the chain is unroutable — "
+                          f"repairing anyway. A migration that has not converged is not a "
+                          f"reason to serve nobody.")
                 plan = router.canonical_assignment(
                     roster, sm_layers, serving_model_id=serving_model()["model_id"])
                 if plan:
@@ -355,9 +374,16 @@ async def health_loop():
                               f"expected to be OOM-killed; the network needs a smaller model "
                               f"or another machine.")
                 else:
+                    _repair_blocked = {"reason": "roster",
+                                       "nodes_known": len(roster),
+                                       "min_stages": config.MIN_PIPELINE_STAGES}
                     print(f"[repair] chain is unroutable and cannot be fixed from this roster: "
                           f"{len(roster)} node(s) known, need at least "
                           f"{config.MIN_PIPELINE_STAGES} online and eligible")
+            # Published so an operator can see WHY an unroutable chain is not being repaired
+            # without reading this process's stdout. That was the whole of the 2026-08-21
+            # outage: /status said `routable: false` and the reason existed only here.
+            globals()["_repair_status"] = _repair_blocked
             if shape["routable"] != _last_routable:
                 if shape["routable"]:
                     print(f"[health] chain is routable again: {shape['stages']} stage(s) "
@@ -1606,6 +1632,14 @@ def _network_summary():
         # answered a narrower question while presenting as that one.
         "network_healthy": (total_covered == sm_layers and shape["routable"]
                             and not models.model_mismatches(sm["model_id"])),
+        # WHY an unroutable chain is not being repaired. None when nothing is blocking, which
+        # is every healthy tick. Published because on 2026-08-21 a collapsed chain sat
+        # unroutable for hours while this endpoint said `routable: false` and the reason --
+        # auto-repair standing down for a migration that was preparing and not converging --
+        # existed only in the coordinator's stdout, on a VM whose SSH key needs a human.
+        # An operator who can see `routable: false` should be able to see the next question's
+        # answer in the same response.
+        "repair_blocked": globals().get("_repair_status"),
     }, nodes
 
 

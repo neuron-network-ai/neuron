@@ -166,6 +166,20 @@ class MigrationController:
         self.plan = []           # [{node_id, layer_start, layer_end}] for the target
         self.ready = set()       # node_ids that reported the target slice downloaded
         self.blocked = None      # why a warranted migration is NOT being attempted, or None
+        # WHEN this migration entered "preparing", so a caller can tell a migration that is
+        # working from one that is wedged. Auto-repair stands down while a migration is in
+        # flight ([P32]) because a repair that rewrote ranges mid-cutover would leave half the
+        # network on each model's partition -- unrecoverable rather than merely unroutable.
+        # But that stand-down had no bound, and `phase` only leaves "preparing" when EVERY
+        # planned node reports ready. A node that never reports leaves the chain unroutable
+        # for as long as it stays away, with repair switched off the whole time and nothing
+        # outside this process saying why.
+        #
+        # The reasoning is already written down twenty lines below, about `blocked`: "a
+        # 'blocked' phase would silently disable gap healing ... the network would be both
+        # unable to grow AND unable to repair." It is just as true of a preparing migration
+        # that is not progressing, and this timestamp is what lets the caller notice.
+        self.preparing_since = None
         # Self-heal state -- entirely separate from the tier-migration fields above.
         self.heal_plan = []      # [{node_id, layer_start, layer_end}] closing the current gap
         self.heal_ready = set()  # node_ids that reported the heal slice downloaded
@@ -228,6 +242,7 @@ class MigrationController:
                                        head_gb=self.target["head_gb"])
             self.ready = set()
             self.phase = "preparing"
+            self.preparing_since = now
             # A real tier migration always wins -- abandon any in-flight self-heal rather than
             # let a stale heal assignment linger through a cutover it was never part of.
             self._clear_heal()
@@ -273,6 +288,7 @@ class MigrationController:
 
     def _reset(self):
         self.phase, self.target, self.plan, self.ready = "steady", None, [], set()
+        self.preparing_since = None
 
     def _clear_heal(self):
         self.heal_plan, self.heal_ready, self.heal_target, self.heal_mode = [], set(), None, None
@@ -290,6 +306,9 @@ class MigrationController:
             # Not None means: a bigger model is qualified, and we are NOT going for it. The
             # network is healthy and serving; it just cannot hold what it qualifies for.
             "blocked": self.blocked,
+            # How long this migration has been preparing, for a caller deciding whether to keep
+            # standing down for it. None while steady. See `preparing_since`.
+            "preparing_since": self.preparing_since,
         }
 
     # ----------------------------------------------------------------------- #

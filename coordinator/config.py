@@ -90,6 +90,27 @@ PIPELINE_STAGES = int(os.environ.get("NEURON_PIPELINE_STAGES", "3"))
 # `network_healthy: true` reported throughout -- see PROBLEMS.md [P32]. Named here, next to the
 # ceiling, because the two are one rule and splitting them is what let half of it go unenforced.
 MIN_PIPELINE_STAGES = int(os.environ.get("NEURON_MIN_PIPELINE_STAGES", "2"))
+
+# How long auto-repair will stand down for a migration that is PREPARING before repairing the
+# chain anyway.
+#
+# The stand-down itself is right: a repair that rewrote ranges mid-cutover would leave half the
+# network on each model's partition, which is unrecoverable rather than merely unroutable. What
+# was wrong is that it had no bound. `phase` only leaves "preparing" when EVERY planned node
+# reports ready, so one node that never reports keeps repair switched off for as long as it
+# stays away -- and on 2026-08-21 that meant a collapsed chain sat unroutable from 05:46 until
+# a human ran pin_layers.sh, with `/status` saying `routable: false` and nothing anywhere
+# saying why.
+#
+# migration.py already makes this exact argument about `blocked`: "a 'blocked' phase would
+# silently disable gap healing ... the network would be both unable to grow AND unable to
+# repair." It is just as true of a migration that is preparing and not progressing.
+#
+# 20 minutes is deliberately longer than a slice download needs on a home connection, because
+# repairing UNDER a healthy migration is the failure this bound must not cause. Past it, an
+# unroutable network serves nobody and a migration that still has not converged is not a reason
+# to keep it that way.
+REPAIR_STANDDOWN_S = float(os.environ.get("NEURON_REPAIR_STANDDOWN_S", "1200"))
 # Layers the DRIVER holds: stage 1 is always exactly 0..DRIVER_STAGE1_LAYERS-1.
 #
 # Not a preference — `node_a.coord_get_chain` refuses any chain whose first stage is not its own
