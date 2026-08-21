@@ -846,7 +846,39 @@ class Agent:
         if standing == "probationary":
             log.info("PROBATIONARY: serving challenges only — a verifier must confirm this "
                      "node (proof-of-compute) before it receives live requests or earns NRN")
+        # EARNING INTO AN ACCOUNT NOBODY OWNS is silent otherwise, and it is not hypothetical:
+        # `agent-optiplex-server-ce473b` ran headless for a day and accumulated 28.87 NRN that
+        # belonged to no wallet. A node with `local_chat: false` has no page to click, so the
+        # browser claim -- the only one that existed -- could never reach it. The money is not
+        # lost, but nothing anywhere said it needed claiming, and "MY MACHINES" simply did not
+        # list the machine. Absence again, which is this project's favourite way to fail.
+        self._warn_if_unclaimed()
         return data["assigned_layers"]
+
+    def _warn_if_unclaimed(self):
+        """Say, out loud and on every registration, that this node's earnings belong to nobody.
+
+        Deliberately a WARNING and deliberately repeated. A node claims itself once, through a
+        browser on the machine, and a headless one never can -- so the only signal an operator
+        would otherwise get is a machine quietly missing from their wallet panel. `owner_of`
+        returns None for "nobody owns it" AND for "could not ask", so the two are separated
+        here rather than reported as the same thing ([P28]).
+        """
+        try:
+            from agent import payout_key
+            base = self.base.rstrip("/")
+            r = requests.get(f"{base}/node/{self.cfg['node_id']}/payout-address",
+                             headers={"X-Node-Token": self.cfg["node_token"]}, timeout=10)
+            r.raise_for_status()
+            owner = r.json().get("owner_wallet_id")
+        except Exception:                     # noqa: BLE001 - never block a start on this
+            return                            # could not ask: say nothing rather than guess
+        if owner:
+            return
+        log.warning("THIS NODE IS UNCLAIMED — anything it earns is credited to an account no "
+                    "wallet owns, and it will not appear under 'My machines'. Claim it with:  "
+                    "neuron-agent --claim <your wallet id>   (the wallet id is in the Chat "
+                    "UI's wallet panel). Nothing is lost meanwhile; it just has no owner yet.")
 
     def slice_info(self):
         r = requests.get(f"{self.base}/node/{self.cfg['node_id']}/slice-info", timeout=30)
@@ -1709,6 +1741,12 @@ def main():
     ap.add_argument("--no-relay", dest="relay", action="store_false",
                     help="advertise this machine's own address instead — only correct when "
                          "every peer is on the same LAN or tailnet")
+    ap.add_argument("--claim", metavar="WALLET_ID", default=None,
+                    help="record WALLET_ID as this node's owner and exit. For a HEADLESS node: "
+                         "the browser claim needs a page to click, and a node running with "
+                         "local_chat disabled has none — so it earns into an account nobody "
+                         "owns and nothing says so. Find your wallet id in the Chat UI's "
+                         "wallet panel.")
     ap.add_argument("--no-local-chat", action="store_true",
                     help="do not start this agent's own Chat UI (a second agent on the same "
                          "machine must not fight the first one for the chat port)")
@@ -1723,6 +1761,25 @@ def main():
         # the frozen app's state dir, a half-written file -- all of it used to be silent.
         crash_log(f"could not read the config at {args.config}")
         raise
+    # CLAIM AND EXIT. Before any of the config rewriting below, because this neither needs nor
+    # should cause a config change -- it records ownership at the coordinator and nothing else.
+    if args.claim:
+        from agent import payout_key as _pk
+        nid, tok = cfg.get("node_id"), cfg.get("node_token")
+        if not (nid and tok):
+            print("this machine has not registered a node yet — start the agent once first")
+            return 2
+        base = cfg.get("coordinator", DEFAULT_CONFIG["coordinator"]).rstrip("/")
+        status, payload = _pk.claim_for_owner(base, nid, tok,
+                                              os.path.dirname(path) or HERE, args.claim)
+        if status == 200:
+            print(f"claimed: {payload['node_id']} now belongs to "
+                  f"{payload['owner_wallet_id']}")
+            print(f"payout address unchanged: {payload['payout_address']}")
+            return 0
+        print(f"could not claim ({status}): {payload.get('error')}")
+        return 1
+
     dirty = False
     if args.donation_mode:
         cfg["donation_mode"], dirty = args.donation_mode, True

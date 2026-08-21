@@ -98,6 +98,105 @@ def current_binding(base, node_id, node_token, timeout=15):
     return r.json().get("payout_address")
 
 
+def owner_of(base, node_id, node_token, timeout=15):
+    """The wallet recorded as this node's owner, or None. Never raises.
+
+    None means EITHER "nobody owns it" or "we could not ask", and the caller must not treat
+    those alike -- see how `agent.py` words its warning.
+    """
+    try:
+        r = requests.get(f"{base}/node/{node_id}/payout-address",
+                         headers={"X-Node-Token": node_token}, timeout=timeout)
+        r.raise_for_status()
+        return r.json().get("owner_wallet_id")
+    except (requests.RequestException, ValueError):
+        return None
+
+
+def claim_for_owner(base, node_id, node_token, state_dir, wallet_id, timeout=12):
+    """Record `wallet_id` as this node's owner. Returns (status_code, payload).
+
+    **This is [P53]'s claim, extracted so there is ONE of it.** `ui/app.py`'s `/node/claim`
+    used to carry the whole rule inline, which was fine while a browser on the machine was the
+    only way to claim -- and that assumption is exactly what stranded the OptiPlex: a headless
+    node (`local_chat: false`) has no page to click, so it earned into an account nobody owned
+    and nothing ever said so. `agent.py --claim` needs the identical rule, and two copies of a
+    rule about who owns the money is not a risk worth taking.
+
+    The rule, unchanged: re-bind the address that is ALREADY bound, signed here by the key this
+    machine holds, carrying `owner_wallet_id`. `require_rebind_authority` exempts a bind to the
+    same address, so no `old_signature` and no register secret. The payout address never moves;
+    only ownership is recorded.
+
+    **What it still refuses.** A bound address this machine has no key for is a real address
+    CHANGE and must keep needing the incumbent key -- that requirement is what stops a copied
+    `node_token` redirecting somebody's earnings, and letting an account-claim override it
+    would hand an attacker the exact bypass the control exists to prevent.
+    """
+    try:
+        # The BINDING first, because it decides everything after it: with nothing bound this
+        # machine may mint a key and bind it, and with something bound it may only re-bind the
+        # very same address. Reading the key first would mint one even on the refusing path.
+        bound = current_binding(base, node_id, node_token, timeout)
+    except (requests.RequestException, ValueError) as e:
+        return 502, {"error": f"could not reach the coordinator: {e.__class__.__name__}"}
+
+    address, private_key = (load_or_create(state_dir) if not bound
+                            else _existing_key(state_dir))
+    if not address:
+        return 409, {"error": (
+            f"this node pays out to {bound}, and this machine holds no key at all — nothing "
+            f"here can sign for it. Use the browser-wallet claim, or ask the operator to "
+            f"rebind with the register secret." if bound else
+            "this machine could not create a payout key, so it has nothing to sign with.")}
+    if bound and bound.lower() != address.lower():
+        return 409, {"error": (
+            f"this node pays out to {bound}, which is not an address this machine holds a key "
+            f"for. Changing it needs a signature from that address — use the browser-wallet "
+            f"claim.")}
+
+    try:
+        r = requests.get(f"{base}/node/{node_id}/payout-challenge",
+                         params={"address": address},
+                         headers={"X-Node-Token": node_token}, timeout=timeout)
+        if r.status_code == 400:
+            return 400, {"error": r.json().get("detail", "bad address")}
+        r.raise_for_status()
+        ch = r.json()
+        signature = sign_binding(private_key, ch["message"])
+        if not signature.startswith("0x"):
+            signature = "0x" + signature
+        r = requests.post(f"{base}/node/{node_id}/payout-address",
+                          json={"address": address, "nonce": ch["nonce"],
+                                "signature": signature,
+                                # From the caller's SESSION or CLI argument, never from a page:
+                                # the browser must not be able to nominate somebody else.
+                                "owner_wallet_id": wallet_id},
+                          headers={"X-Node-Token": node_token}, timeout=timeout)
+        if r.status_code == 400:
+            return 400, {"error": r.json().get("detail", "claim refused")}
+        r.raise_for_status()
+        out = r.json()
+    except (requests.RequestException, ValueError) as e:
+        return 502, {"error": f"could not reach the coordinator: {e.__class__.__name__}"}
+
+    log.info("node %s claimed by %s (payout address unchanged: %s)", node_id, wallet_id, address)
+    return 200, {"node_id": node_id,
+                 "owner_wallet_id": out.get("owner_wallet_id", wallet_id),
+                 "payout_address": out.get("payout_address", address),
+                 "rebound": False}
+
+
+def _existing_key(state_dir):
+    """The key this machine already holds, WITHOUT creating one. `load_or_create` does what it
+    says, so reading the key to decide whether we CAN claim would mint one as a side effect --
+    including on the path that goes on to refuse. A key generated by a refusal is a key nobody
+    knows exists ([P53])."""
+    if not os.path.exists(key_path(state_dir)):
+        return None, None
+    return load_or_create(state_dir)
+
+
 def ensure_bound(base, node_id, node_token, state_dir, configured_address=None, timeout=15):
     """Bind this node's payout address if it is not bound already. Returns the bound address,
     or None if binding did not happen (for any reason -- this is best-effort by design).
