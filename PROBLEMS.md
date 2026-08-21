@@ -528,7 +528,7 @@ shut), [P2] (half precision is slower on these CPUs), [P56] (the verifier measur
 reference -- same shape as the precision problem above), [P55] (fixed the correctness that made
 these the first measurable numbers).
 
-### [P56] 🔴 Proof-of-compute certifies the PROBE path, and users are served by a different one (2026-08-19)
+### [P56] 🟡 Proof-of-compute certifies the PROBE path, and users are served by a different one (2026-08-19, two of three parts fixed 2026-08-21)
 
 **Filed out of [P55], and it is the larger half of it.** For a day the Pavilion returned garbage
 to every real request while `challenges_passed` stood at **5662/4**. That number was not broken.
@@ -564,8 +564,57 @@ the verifier**.
 **Not fixed here.** [P55]'s fix makes the two paths agree again; it does not make the verifier
 able to notice the next time they diverge.
 
+---
+
+**2026-08-21 — two of the three parts are fixed. The third is a measurement, not a decision.**
+
+**One constructor for the `config` message.** `common.stage_config()` is now the only place
+that message is shaped, and `neuron_driver._connect`, `challenge_node` and
+`challenge_relay_node` all call it. Two callers writing their own dict is two paths waiting to
+diverge, and the fix for that is not to keep them in step by hand — it is to make there be one
+shape. The last-stage challenge reached the right branch before this only because `s1` happened
+to be absent; it now sends `stage: "last"` outright, as a real request does. It still sends no
+`wire` field, deliberately: the reply must stay lossless or a quantized codec's ~0.3% error
+eats `verify()`'s `atol` budget and gives a cheating node cover. That is safe only because
+`wire` is role-INERT, which is now written down where both callers can see it.
+
+**The middle role is verified for the first time.** It was challenged with `probe: True` — a
+role no user request produces. Its production role is different code: dial a next hop, forward
+what it computed, relay the answer back, none of it ever exercised. `challenge_relay_node`
+gives the node a next hop it can really reach, a sink the verifier opens, and grades it on what
+it FORWARDED — its own output through the same `_batcher("middle", s1, s2)` that serves users.
+
+**Reachability is not assumed, and the fallback is not silent.** `sink_host` is required and
+never guessed; without one, the probe is all that is honestly available. When a relay attempt
+fails, the probe runs AND the result records why, because a probe pass is a weaker claim than a
+relay pass and reporting them as the same number is the whole of this problem. Every attest
+result now carries `path`. A `RangeMismatch` is never retried as a probe — placement is not
+compute. A node that never dials the sink is a NAMED refusal rather than a bare `TimeoutError`,
+or the verifier's blanket `except Exception` scores the network between us against the node
+([P28]).
+
+`security/test_verifier_drives_the_user_path.py` — 26 assertions, the load-bearing one being
+that the node's ROLE DECISION is identical for a request and a challenge across every chain
+shape. Verified live against the Pavilion: passed, `max_err` 0.000217, `path: last`.
+
+**STILL OPEN — part three, declared precision.** `verify()` compares against fp32 with
+`atol=0.05`, so a legitimately quantized node is numerically indistinguishable from a cheating
+one. This needs a tolerance per declared dtype that is **measured** — load the same shard fp32
+and in the declared dtype, run the same seeded challenge, read the drift — because a guessed
+threshold either flags honest nodes or hands cheats cover. And **the declaration has to cost
+something**: if declaring q4 only buys a looser tolerance, every cheat declares q4. It has to
+be the same number the node is placed and paid on. Urgent the day [P30] lands, not before.
+
+**And what none of this closes.** A challenge that is DISTINGUISHABLE from real traffic can
+always be special-cased by a node that wants to. Parts one and two narrow the gap; they do not
+close it in principle. The endgame is verification by REPLICATION: the coordinator sends one
+sampled real request down two independent chains and compares. It never needs to know the right
+answer — only that two machines disagree. It is the only version a node cannot detect, because
+there is nothing to detect. Cost is one duplicated request per sample.
+
 Related: [P55] (the divergence that exposed this), [P47] (a node the verifier skipped
-entirely, so it could not earn), [P16] (placement, which reads the same reputation signal).
+entirely, so it could not earn), [P16] (placement, which reads the same reputation signal),
+[P30] (whose quantized nodes part three is a precondition for).
 
 ### [P54] 🟢 [P52] shipped, was tested, was proven against a real relay — and had never once executed (2026-08-19)
 
