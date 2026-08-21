@@ -10,7 +10,7 @@
 this PC   agent-optinovate-6ff49d        0-9     driver + stage 1   0.20.22 INSTALLED
 OptiPlex  agent-optiplex-server-ce473b   0-9     stage-1 replica    claimed today
 Pavilion  agent-raman-...-e4920b         10-27   last stage
-coordinator  AGENT_VERSION 0.20.17 published; ledger.py DEPLOYED with the owner-forward
+coordinator  AGENT_VERSION 0.20.22 PUBLISHED; ledger.py DEPLOYED with the owner-forward
 wallet  847.59 NRN · 5 machines · 0.00 unswept
 ```
 
@@ -66,6 +66,19 @@ and not something this page controls.
 
 It is served at **`/static/sign_payout.html`** now. It used to be `tools/sign_payout.html` — a
 source path that shipped nowhere and 404'd, while THREE UIs told people to use it.
+
+## Published, and what was deliberately NOT done
+
+**v0.20.22 is released and live.** `/agent/version` returns it, the SHA matches the published
+asset byte for byte (verified by downloading it back), the coordinator is deployed and the
+systemd pin `zz-agent-release.conf` is updated — that pin, not `config.py`, is what actually
+governs what nodes are told.
+
+**Code signing and the antivirus false-positive report are DEPRIORITISED (founder, 2026-08-21).**
+The installer is unsigned and F-Secure quarantines it; that is known, recorded in [P61], and
+judged not important at this stage. **Do not re-raise it as urgent.** It becomes real the day
+somebody outside these three machines tries to install. F-Secure is currently removed from this
+PC rather than excluded — also a known, accepted state.
 
 ## Still open
 
