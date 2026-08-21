@@ -1,5 +1,56 @@
 # Handoff — start of Session 70
 
+## [P60] IS FIXED, SHIPPED AND PUBLISHED — 0.20.17 (2026-08-21)
+
+**The fix is one missing arm.** `node_server.serve` chose its role in three branches and the
+last was a catch-all. A node whose range excludes the model's final layer was assumed to be
+talking to a verifier; it can equally be a node the coordinator believes is last while the node
+knows it is not. Real traffic fell into the probe arm, ran the node's own layers, skipped the
+final norm, and the driver ran `lm_head` on it.
+
+There is now a fourth arm: **real last-stage traffic to a node that is not the last stage is
+refused with `range_mismatch`.** Refusing costs nothing — the driver already turns a refused
+config into a reroute, and proof-of-compute already reads `range_mismatch` as stale placement
+rather than as a failed challenge.
+
+**Proven live, before and after.** Before, the OptiPlex — holding 10-18 — was asked for a last
+stage and replied `ok: True`. After:
+
+```
+ok=False  error='range_mismatch'  holds=[10, 18]
+asked to serve the LAST stage from layer 10 to 27, but this node holds 10-18 and does not
+hold the model's final layer. Placement here is stale -- re-register or re-place this node
+```
+
+`agent/test_stale_placement_is_refused_not_answered.py`, 13 assertions, including that nothing
+which worked before is refused now.
+
+**Published as 0.20.17.** `/agent/version` returns it, and the SHA the coordinator requires
+(`38acc6a9…ff7d`) matches the published asset — verified by downloading it back. All three nodes
+report 0.20.17.
+
+**Current topology** (2 stages, the faster shape):
+
+```
+agent-optinovate-6ff49d          0-9     this PC, driver + stage 1
+agent-optiplex-server-ce473b     0-9     OptiPlex, stage-1 REPLICA (throughput, not depth)
+agent-raman-...-e4920b           10-27   Pavilion, last stage
+```
+
+Attested clean (`max_err` 0.000217) and answering correctly at ~1.9 tok/s.
+
+**What is STILL open under [P60]:** the notification itself. A node learns its new range only
+when it next registers ([P37]). This turns that window from *wrong answers* into *reroutes* —
+the difference between a bug and an outage — but the window remains. Closing it means the node
+re-reading `slice-info` on a heartbeat.
+
+**The operational rule this earned, and it is not optional:** after any placement change or
+restart, **attest before trusting a chat result.** Speed is not evidence — the garbage ran at
+the fastest tok/s this network has ever produced.
+
+---
+
+
 ## STATE, 2026-08-21 — 0.20.16 IS PUBLISHED AND TWO THINGS WAIT ON YOU
 
 **NEURON is on GitHub.** 115 commits pushed to `main-full`, release cut at
