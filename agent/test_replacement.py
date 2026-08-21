@@ -62,7 +62,15 @@ def _agent(tmp, name, **over):
 
 
 def _harness(agent, placement, standing="probationary"):
-    """Stub the two calls register() makes. Returns (registrations, placement_queries)."""
+    """Stub the calls register() makes. Returns (registrations, PLACEMENT queries).
+
+    Only `/node/placement` is recorded as a query. It used to be every GET, which was fine
+    while register() made exactly two calls — and then `_warn_if_unclaimed` added a third
+    (reading `/node/{id}/payout-address` to see whether anyone owns this node), and three
+    assertions about PLACEMENT started failing over a call that has nothing to do with it.
+    A harness that counts "requests" while its assertions say "placement" is measuring the
+    wrong thing and will break again on the next call added.
+    """
     regs, queries = [], []
 
     def fake_post(url, **kw):
@@ -72,8 +80,12 @@ def _harness(agent, placement, standing="probationary"):
                       "assigned_layers": [body["layer_start"], body["layer_end"]]})
 
     def fake_get(url, **kw):
-        queries.append(kw.get("params") or {})
-        return _Resp(placement)
+        if "/node/placement" in url:
+            queries.append(kw.get("params") or {})
+            return _Resp(placement)
+        # Anything else register() reads on the way past — ownership, for one. Answered
+        # plausibly so the code under test proceeds, and deliberately NOT counted.
+        return _Resp({"owner_wallet_id": "w_test", "payout_address": "0xTest"})
 
     agent.adopt_coordinator_url = lambda data: None
     agentmod.requests.post, agentmod.requests.get = fake_post, fake_get
