@@ -15,6 +15,13 @@ looks like good news. So the override now lives at the bottom of `local_gguf`, w
 caller that asks "can this machine serve it" inherits it, and these tests pin that it cannot be
 routed around — including by the model pin, which is a DIFFERENT question (which model to run
 locally) and must not smuggle a request back onto this machine.
+
+**THE DEFAULT INVERTED ON 2026-08-22** (founder's decision). The network is now the path every
+request takes, with no local fallback; local execution is opt-in behind `NEURON_LOCAL_FIRST=1`.
+`NEURON_FORCE_NETWORK` still works and now simply agrees with the default, so it is no longer
+the instrument that reaches the network — every request is. What these tests pin is unchanged
+in shape and inverted in direction: the chokepoint is still one function, both dispatch paths
+still inherit it, and the escape hatch still cannot be routed around by the model pin.
 """
 import os
 import sys
@@ -45,12 +52,15 @@ def main():
         # override rather than whatever RAM the test runner happens to have.
         local_gguf.can_serve = lambda mid, ram_gb=None: mid in local_gguf.GGUF_MODELS
 
-        print("\n-- off by default: nothing changes for an ordinary user")
+        print("\n-- the DEFAULT is the network, with nothing set at all")
         os.environ.pop("NEURON_FORCE_NETWORK", None)
         os.environ.pop("NEURON_LOCAL_MODEL", None)
-        check("network_forced() is False when unset", local_gguf.network_forced() is False)
-        check("...and a local model is still offered",
-              local_gguf.best_local_model(require_cached=False) is not None)
+        os.environ.pop("NEURON_LOCAL_FIRST", None)
+        check("network_forced() is True when nothing is set", local_gguf.network_forced() is True)
+        check("...and no local model is offered, so the request takes the chain",
+              local_gguf.best_local_model(require_cached=False) is None)
+        check("...and there is no fallback hiding behind it: available() says no too",
+              local_gguf.available("Qwen/Qwen2.5-1.5B-Instruct") is False)
 
         print("\n-- set: this machine stops volunteering to answer")
         os.environ["NEURON_FORCE_NETWORK"] = "1"
@@ -68,16 +78,27 @@ def main():
               "NEURON_LOCAL_MODEL answers WHICH model, not WHETHER to run locally")
         os.environ.pop("NEURON_LOCAL_MODEL", None)
 
-        print("\n-- only the exact value counts, so a typo fails safe (local, as before)")
-        for val in ("0", "true", "yes", ""):
-            os.environ["NEURON_FORCE_NETWORK"] = val
-            check(f"{val!r} does not force the network", local_gguf.network_forced() is False)
-
-        print("\n-- unset again: the machine goes back to answering locally")
+        print("\n-- a typo in the OPT-OUT fails safe: it stays on the network")
+        # This is the direction that matters now. NEURON_LOCAL_FIRST is the escape hatch, and a
+        # mistyped escape hatch must leave the machine where the default puts it rather than
+        # quietly answering locally -- silently answering here is exactly the blindness the
+        # default exists to end.
         os.environ.pop("NEURON_FORCE_NETWORK", None)
-        check("best_local_model() offers a model again",
+        for val in ("0", "true", "yes", ""):
+            os.environ["NEURON_LOCAL_FIRST"] = val
+            check(f"NEURON_LOCAL_FIRST={val!r} does not turn local back on",
+                  local_gguf.network_forced() is True)
+
+        print("\n-- the opt-out works, and is reversible without a reinstall")
+        os.environ["NEURON_LOCAL_FIRST"] = "1"
+        check("NEURON_LOCAL_FIRST=1 restores local-first",
+              local_gguf.network_forced() is False)
+        check("...and a local model is offered again",
               local_gguf.best_local_model(require_cached=False) is not None,
-              "the override must be reversible without a reinstall")
+              "the opt-out must be reversible without a reinstall")
+        os.environ.pop("NEURON_LOCAL_FIRST", None)
+        check("removing it puts the machine back on the network",
+              local_gguf.network_forced() is True)
 
         print("\n-- both dispatch paths consult it, and that is the whole point")
         api_src = open("api/openai_compat.py", encoding="utf-8").read()

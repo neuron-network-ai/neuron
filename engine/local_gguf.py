@@ -140,8 +140,25 @@ def network_forced():
     Answering it HERE rather than at each call site is the point: every present and future
     caller that asks "can this machine serve it itself" now gets the operator's override for
     free, instead of each one having to remember a flag that lives in a different module.
+
+    THE NETWORK IS THE DEFAULT PATH, AND THERE IS NO FALLBACK (founder's decision, 2026-08-22).
+    This returns True unless somebody asks for local-first back with NEURON_LOCAL_FIRST=1.
+
+    The reason is not speed. Local is faster for a model that fits, and that has not changed.
+    It is that a network nobody's requests reach is a network nobody can tell is broken: [P54]
+    is the proof, where the encrypted path raised NameError on EVERY request for a day while
+    the product looked perfectly healthy, because every token the founder had ever seen came
+    from their own PC. A silent local fallback would rebuild exactly that blindness -- the
+    chain could be dead for a week and the only symptom would be nodes quietly not earning.
+
+    So when the chain cannot serve, the request FAILS and says so. Keeping the network alive is
+    the network's job, and it cannot be anybody's job while a fallback is hiding whether it is.
+
+    NEURON_FORCE_NETWORK is still honoured and now simply agrees with the default.
     """
-    return os.environ.get("NEURON_FORCE_NETWORK") == "1"
+    if os.environ.get("NEURON_LOCAL_FIRST") == "1":
+        return False
+    return True
 
 
 def available(model_id):

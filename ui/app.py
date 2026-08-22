@@ -855,8 +855,12 @@ def _drive(prompt: str, max_new: int, wallet_id: str, use_rag: bool = False,
     # `use_network` is the per-request form of the same override. Either one sends this
     # request down the chain; neither changes the default, because local-first is still the
     # right tiering for a model that fits.
-    local_model = (None if (FORCE_NETWORK or use_network)
-                   else local_gguf.best_local_model(common.MODEL_ID))
+    # THE NETWORK IS THE DEFAULT AND THERE IS NO FALLBACK (founder's decision, 2026-08-22).
+    # `best_local_model` returns None unless NEURON_LOCAL_FIRST=1, so this normally takes the
+    # chain, and a chain that cannot serve produces a visible error rather than a quiet local
+    # answer. `use_network` is still accepted by the HTTP API and no longer changes anything
+    # here: it can only ask for what already happens.
+    local_model = local_gguf.best_local_model(common.MODEL_ID)
     if local_model:
         events = local_gguf.stream(messages, max_new, local_model,
                                    coordinator=COORDINATOR, wallet_id=wallet_id)
@@ -938,7 +942,7 @@ def chat(body: ChatBody, request: Request):
             # abuse can be acted on (SAFETY.md). Takes one click; nothing to install or set up.
             yield sse("error", {"detail": "Sign in to start chatting. It takes one click, and "
                                           "it's how NEURON keeps the network accountable — "
-                                          "answers on this machine are free.",
+                                          "it pays the volunteers whose machines answer you.",
                                 "code": "login_required"})
         return StreamingResponse(_login_required(), media_type="text/event-stream")
     return StreamingResponse(

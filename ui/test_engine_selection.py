@@ -63,21 +63,39 @@ def main():
     client = TestClient(app)
     client.cookies.set("session", _session_cookie({"wallet_id": "w_test"}))
     try:
-        # ---- machine CAN hold the model -> run here, bill nothing, touch no node ---- #
+        # ---- THE NETWORK IS THE DEFAULT, even on a machine that could answer alone ---- #
+        #
+        # Inverted 2026-08-22 (founder's decision). This block used to assert the opposite, and
+        # it passed for a reason worth recording: it stubbed `available()`, while `_drive`
+        # decides on `best_local_model()`. The stub never drove the decision at all — the test
+        # was reading this machine's real cache, so it would have said "local" no matter what
+        # the stub returned. A test whose setup does not reach the code under test proves
+        # whatever the developer's laptop happens to be.
         used.clear()
+        real_best = ui_app.local_gguf.best_local_model
         ui_app.local_gguf.available = lambda model_id: True
+        ui_app.local_gguf.best_local_model = real_best      # the real rule, nothing stubbed
         r = client.post("/chat", json={"prompt": "hello", "max_tokens": 20})
-        check("local-capable machine uses the local engine", used == ["local"])
+        check("a machine that COULD serve locally still takes the network", used == ["network"])
+        check("network answer streams to the browser (default path)", "net answer" in r.text)
+
+        # ---- and the opt-out still reaches the local engine ---- #
+        used.clear()
+        ui_app.local_gguf.best_local_model = lambda *a, **k: "Qwen/Qwen2.5-1.5B-Instruct"
+        r = client.post("/chat", json={"prompt": "hello", "max_tokens": 20})
+        check("NEURON_LOCAL_FIRST's path still runs here when a model is offered",
+              used == ["local"])
         check("local answer streams to the browser", "local answer" in r.text)
         check("local run reports no nodes involved", '"nodes": 0' in r.text)
         check("local run costs 0 NRN", '"cost_nrn": 0.0' in r.text)
         check("local run is flagged so the UI can say so", '"local": true' in r.text)
+        ui_app.local_gguf.best_local_model = real_best
 
-        # ---- machine CANNOT hold it -> the network, which is the point of NEURON ---- #
+        # ---- machine CANNOT hold it -> the network, as it always did ---- #
         used.clear()
         ui_app.local_gguf.available = lambda model_id: False
         r = client.post("/chat", json={"prompt": "hello", "max_tokens": 20})
-        check("machine that cannot hold the model falls back to the node network",
+        check("machine that cannot hold the model uses the node network",
               used == ["network"])
         check("network answer streams to the browser", "net answer" in r.text)
         check("network run reports the serving nodes", '"nodes": 1' in r.text)

@@ -17,11 +17,22 @@ Most people who run NEURON are both.
 
 ## If you chat
 
-### When the model fits on your machine, your prompt never leaves it
+### Your words never leave this computer, even though the network answers
 
-This is the ordinary case on a reasonably modern PC. NEURON checks whether your machine can hold
-the serving model and, if it can, runs it locally (`engine/local_gguf.py`). Your text is not sent
-anywhere, the answer costs 0 NRN, and there is nothing for anyone else to see.
+**The network answers every request (changed 2026-08-22).** NEURON used to run the model on your
+own machine whenever it fitted, and use the network only for models one machine could not hold.
+That is no longer the default: requests go to the node chain, and if the chain cannot serve one
+it fails and says so rather than quietly answering here. Local execution still exists and is
+opt-in — set `NEURON_LOCAL_FIRST=1` — and this document describes the default.
+
+**What that does and does not change for you.** Your prompt is turned into numbers *on this
+computer*: it holds the tokenizer, the embedding and the model's first layers, so what crosses
+the wire is activations, never your text. That was already true of the network path and is why
+the table below reads the way it does. What HAS changed is that this now happens on every
+message rather than only on the large ones, and each one costs NRN.
+
+A model running here answered for free and sent nothing at all. If that is what you want, the
+env var above restores it.
 
 The app tells you which is happening: the header reads **"Answers run here"** when your machine
 is serving itself, and **"Powered by N nodes"** when the network is.
@@ -68,7 +79,9 @@ became necessary.
 
 **It claims these, and each is checkable:**
 
-- an answer your machine can run never leaves your machine — not to us, not to anyone
+- your prompt TEXT never leaves this computer at all: the tokenizer, the embedding and the
+  model's first layers run here, so what is sent is activations (`neuron_driver.py`, `node_a.py`).
+  With `NEURON_LOCAL_FIRST=1` nothing leaves at all, because the whole model runs here
   (`engine/local_gguf.py`, and the header says which mode you are in);
 - when the network is used, every hop is separately encrypted with a one-time ephemeral key, so
   neither the relay operator nor the coordinator can read the wire, then or from a recording
