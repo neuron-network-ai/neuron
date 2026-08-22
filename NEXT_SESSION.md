@@ -2,18 +2,47 @@
 
 ## STATE AT CLOSE, 2026-08-22 — READ "THE VERSION TRAP" BEFORE BUILDING ANYTHING
 
-**Fallback: tag `good-state-0.20.22`.** The installer to ship is
-`dist/installer/NEURON-Setup-0.20.24.exe`, sha256
-`949cb9ad54b65d2cc673888a82e70732cdf895fa590c9a0ee5a2a7476933b44b`, 217.1 MB, built 17:15.
+**0.20.25 IS PUBLISHED AND LIVE. Nothing is owed.**
 
 ```
-this PC   agent-optinovate-6ff49d   0-9    driver + stage 1   running a 0.20.23 build (see below)
-OptiPlex  agent-optiplex-...ce473b  0-9    stage-1 replica
-Pavilion  agent-raman-...-e4920b    10-27  last stage
-coordinator  DEPLOYED with everything below · AGENT_VERSION still 0.20.22 (nothing published)
-site      privacy ✓ live · download link reads /agent/version, so it moves itself on publish
-suite     126/126
+published  v0.20.25 · sha256 039e60655cad6969b5ab21c83e63ca8491675ef4f023617f97b9360d63c72740
+           217.1 MB · GitHub's stored digest verified against the local file
+/agent/version  serves 0.20.25 with that hash · systemd pin zz-agent-release.conf updated
+site       download button on v0.20.25 · privacy ✓ live · #how no longer says "open localhost:8080"
+this PC    agent-optinovate-6ff49d   0-9    driver + stage 1
+OptiPlex   agent-optiplex-...ce473b  0-9    stage-1 replica
+Pavilion   agent-raman-...-e4920b    10-27  last stage
+network    3 online · 28/28 · routable · healthy
+suite      127/127
 ```
+
+**Fallback points, newest first:** `NEURON-Setup-0.20.24.exe` is still on disk and is a
+published release (`949cb9ad…`); tag `good-state-0.20.22` is the older one. Rolling the FLEET
+back means an older version AND its matching SHA in the systemd pin, plus
+`NEURON_AGENT_ROLLBACK=1` — walking a fleet backwards must be an explicit act.
+
+Three releases went out today. 0.20.23 was retired mid-flight and never published; see the
+version trap below, which is the reason.
+
+## WHAT 0.20.25 SHIPPED — the door
+
+The app had none. Every shortcut points at the exe, the exe starts a background process whose
+only surface is a tray icon Windows hides behind a chevron, and nothing ever opened a browser:
+somebody installed it, ticked "Start NEURON now", and watched nothing happen.
+
+One rule now: **a deliberate launch always ends at the Chat UI.**
+
+  * desktop / Start Menu -> agent starts if needed, waits for the port, opens the page;
+  * clicked again while running -> opens the page, and does NOT start a second agent (a bound
+    socket on 127.0.0.1:50998 is the lock — a pid file survives a power cut and then lies);
+  * auto-start at sign-in -> passes `--startup`, stays silent.
+
+The distinction is INTENT, not a counter. A first draft opened the page once per install via a
+marker file, which only moves the problem to day two. `agent/test_one_door.py` pins that with
+the assertion that would catch the regression: it must open again on the NEXT launch.
+
+The lock **fails open** — if the socket cannot be created at all, the app starts normally. A
+duplicate process is recoverable; an app that will not launch is somebody uninstalling.
 
 ## THE VERSION TRAP — the thing that cost this session most
 
@@ -33,16 +62,21 @@ in `PYZ.pyz` inside the exe. Use `PyInstaller.archive.readers.CArchiveReader` �
 `ZlibArchiveReader` → `marshal.dumps(ar.extract(mod))`. A byte-grep reports MISSING for code
 that is present, and I drew a wrong conclusion from it twice.
 
-## OWED — publishing 0.20.24, in this order
+## Publishing, for next time — the order that works
 
-1. Upload `NEURON-Setup-0.20.24.exe` to GitHub Releases as `v0.20.24`, write
-   `RELEASE_NOTES_v0.20.24.md` (`test_download_links.py` requires notes to exist).
-2. `AGENT_VERSION` -> `0.20.24`, `AGENT_SHA256` -> `949cb9ad…` in `coordinator/config.py`;
-   bump the download links in `README.md` and `docs/index.html` to match, or
-   `test_download_links.py` fails (it now checks the links name what the coordinator publishes,
-   and that every SHA beside a link is that installer's).
-3. Deploy, then update `/etc/systemd/system/neuron-coordinator.service.d/zz-agent-release.conf`
-   — **that pin, not config.py, governs what nodes are told.**
+1. Bump `updater.LOCAL_VERSION` + `packaging/neuron.iss` **when you rebuild**, not at release.
+2. Build, then verify the FROZEN binary rather than the tree (see the version trap).
+3. `RELEASE_NOTES_vX.md` — `test_download_links.py` refuses a version with no notes.
+4. `gh release create vX dist/installer/NEURON-Setup-X.exe --notes-file RELEASE_NOTES_vX.md`,
+   then check GitHub's stored `digest` against the local hash.
+5. `AGENT_VERSION` + `AGENT_SHA256` in `coordinator/config.py`, and the download links in
+   `README.md` and `docs/index.html` — the link test now refuses a page naming a different
+   version from the one the coordinator publishes.
+6. `bash coordinator/deploy.sh`, then **update the systemd pin**
+   `/etc/systemd/system/neuron-coordinator.service.d/zz-agent-release.conf` and restart.
+   **Deploying does not publish** — that file governs `/agent/version`, and it silently held
+   0.20.22 through a deploy today.
+7. Force a Pages build and read the live page back.
 
 ## What changed today
 
@@ -79,10 +113,19 @@ that is present, and I drew a wrong conclusion from it twice.
 
 ## NEXT, in order
 
-1. **Publish 0.20.24** (above).
-2. **[P56] part three** — declared precision, needs MEASURED tolerances per dtype.
-3. **The node-id flip** — 5 registered identities for 3 machines.
-4. Optional UI, unbuilt: a real failure state (error card + retry) now that a failed chain is
+1. **[P56] part three** — declared precision, needs MEASURED tolerances per dtype.
+2. **The node-id flip** — 5 registered identities for 3 machines.
+3. **The tray is still six items** — Chat UI, API Docs, Pause, Donation level, Compute device,
+   My Dashboard, Network Dashboard, Quit. Under "one page, one door" most belong inside the
+   page; deliberately NOT cut, because Network Dashboard is a coordinator page the UI does not
+   replicate yet. The account panel already covers "my machines".
+4. **A phone path does not exist and is a decision, not a setting.** The chat UI binds
+   127.0.0.1, and the driver (tokenizer + embedding + first layers) runs on the machine serving
+   the page — so a phone cannot be its own driver until llama.cpp lands on Android. A LAN bind
+   serves your own phone in your own house and is useless to a stranger. The only thing that
+   works for strangers is a HOSTED driver, which holds their prompts as text and is therefore a
+   different privacy promise from the one on the site today.
+5. Optional UI, unbuilt: a real failure state (error card + retry) now that a failed chain is
    an ordinary event, and an always-visible balance.
 
 ## An audit was run today and is worth reading before touching verification
