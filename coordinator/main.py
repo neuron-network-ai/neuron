@@ -8,9 +8,11 @@ own ping/delete need its X-Node-Token.
 """
 import asyncio
 import json
+import os
 import secrets
 import threading
 import datetime
+import hashlib
 import re
 import time
 
@@ -305,6 +307,86 @@ def apply_gap_heal(assignments):
 _last_routable = None
 
 
+def _status_state():
+    try:
+        with open(config.STATUS_STATE_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def post_network_summary():
+    """Post what the network did since the last summary. Returns True if something was sent.
+
+    Not a monitor and not an alert: it is a reason to open the channel. A project whose chat
+    room only ever contains people asking whether it is still alive is a project that looks
+    dead, and the numbers to answer that already exist -- they were just never anywhere a human
+    would see them.
+
+    NEVER RAISES INTO THE HEALTH LOOP. This is decoration on top of the one task that keeps
+    placement correct; a webhook being down must not stop nodes being swept.
+    """
+    if not config.DISCORD_STATUS_WEBHOOK:
+        return False
+    try:
+        st = status()                      # the same figures /status serves, not a second count
+        net, stats = st["network"], st["stats"]
+        prev = _status_state()
+        served = stats["total_requests_served"]
+        nrn = float(stats["total_nrn_distributed"])
+        toks = stats["total_tokens_generated"]
+
+        def delta(now, before, fmt="{:+,}"):
+            # An unknown previous value is not zero. After a restart with no state file the
+            # honest answer is silence, not a fabricated "+184 today".
+            return "" if before is None else "  (" + fmt.format(now - before) + ")"
+
+        fields = [
+            {"name": "Machines online", "value": f"{net['online_nodes']} of {net['total_nodes']}",
+             "inline": True},
+            {"name": "Model covered", "value": f"{net['total_layers_covered']}/{net['total_layers']} layers",
+             "inline": True},
+            {"name": "Can answer", "value": "yes" if net["network_healthy"] else "not right now",
+             "inline": True},
+            {"name": "Requests served",
+             "value": f"{served:,}{delta(served, prev.get('served'))}", "inline": True},
+            {"name": "Tokens generated",
+             "value": f"{toks:,}{delta(toks, prev.get('tokens'))}", "inline": True},
+            {"name": "NRN paid to machines",
+             "value": f"{nrn:,.2f}{delta(nrn, prev.get('nrn'), '{:+,.2f}')}", "inline": True},
+        ]
+        embed = {
+            "title": "NEURON today",
+            "description": ("Every machine here is somebody's own computer. "
+                            "[Bring one](https://neuron-network-ai.github.io/neuron/)."),
+            "color": 0x22C55E if net["network_healthy"] else 0xF59E0B,
+            "fields": fields,
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        r = requests.post(config.DISCORD_STATUS_WEBHOOK, json={"embeds": [embed]}, timeout=10)
+        r.raise_for_status()
+        tmp = config.STATUS_STATE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"served": served, "tokens": toks, "nrn": nrn, "at": time.time()}, f)
+        os.replace(tmp, config.STATUS_STATE_PATH)
+        return True
+    except Exception as e:                                              # noqa: BLE001
+        print(f"[status-post] could not post the summary: {e}")
+        return False
+
+
+async def status_loop():
+    """Fires the summary on its own schedule, separate from the health sweep.
+
+    Its own task rather than a counter inside health_loop: the sweep runs every 60s and exists
+    to keep placement correct, and hanging a once-a-day HTTP call off it means a slow webhook
+    delays the thing the network depends on.
+    """
+    while True:
+        await asyncio.sleep(config.STATUS_POST_INTERVAL_S)
+        post_network_summary()
+
+
 async def health_loop():
     global _last_routable
     prune_due_at = 0.0
@@ -518,10 +600,15 @@ async def lifespan(app: FastAPI):
     print(f"[coordinator] up | db={config.DB_PATH} | serving={sm['model_id']} "
           f"({sm['layers']} layers) | timeout={config.HEARTBEAT_TIMEOUT_S}s")
     task = asyncio.create_task(health_loop())
+    status_task = asyncio.create_task(status_loop()) if config.DISCORD_STATUS_WEBHOOK else None
+    if status_task:
+        print(f"[coordinator] network summary every {config.STATUS_POST_INTERVAL_S}s")
     try:
         yield
     finally:
         task.cancel()
+        if status_task:
+            status_task.cancel()
 
 
 # version from config, not a literal: the hardcoded "0.1" here and COORDINATOR_VERSION would
@@ -2387,6 +2474,10 @@ def agent_version():
 class FeedbackBody(BaseModel):
     text: str
     category: str | None = None
+    # WHO IS SENDING. Required, and checked against a real Google/GitHub login below — an
+    # endpoint that writes into a chat room humans read cannot be anonymous, or the first
+    # person who finds it owns the channel.
+    wallet_id: str | None = None
     # Only what the sender ticked a box to include. Never assembled here from what we happen
     # to know about them.
     context: dict | None = None
@@ -2398,6 +2489,22 @@ class FeedbackBody(BaseModel):
 # a harm the sender did not intend and would not spot. Redacting a false positive costs a few
 # characters of a bug report; not redacting a real one costs somebody their balance.
 _SECRETISH = re.compile(r"\b(?:wallet_[0-9a-fA-F]{8,}|[0-9a-fA-F]{32,})\b")
+
+# Per-ACCOUNT, in memory. Resets if the coordinator restarts, which is the honest trade for not
+# adding a table: the worst case is one person getting a second allowance after a deploy, and
+# the case that matters — somebody discovering the endpoint and pointing a loop at it — is
+# stopped by the login gate long before this.
+_feedback_hits = collections.defaultdict(collections.deque)
+
+
+def _feedback_sender_tag(wallet_id: str) -> str:
+    """A short stable handle for the sender, so a channel can tell one voice from many.
+
+    NOT the wallet id, which is a spending key, and not the email, which is theirs. A truncated
+    hash is enough to notice that eleven reports came from one person, and useless for anything
+    else.
+    """
+    return hashlib.sha256(wallet_id.encode()).hexdigest()[:6]
 
 
 @app.post("/feedback")
@@ -2411,6 +2518,30 @@ def feedback(body: FeedbackBody):
     text = (body.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="empty feedback")
+
+    # SIGNED IN, AND NOT BANNED. The same gate /infer uses, for the same reason: this writes
+    # somewhere people read, so it has to be attributable to an account that can be stopped.
+    # Without it the endpoint is a public write pipe into the project's Discord, and the first
+    # person to notice can send a thousand messages before anybody wakes up.
+    wallet = (body.wallet_id or "").strip()
+    if not wallet or not models.is_oauth_wallet(wallet):
+        raise HTTPException(status_code=403,
+                            detail="sign in to send feedback")
+    if models.wallet_moderation_status(wallet)["banned"]:
+        raise HTTPException(status_code=403, detail="this account is blocked")
+
+    now = time.time()
+    dq = _feedback_hits[wallet]
+    while dq and dq[0] < now - 3600:
+        dq.popleft()
+    if len(dq) >= config.FEEDBACK_PER_HOUR:
+        # Named and finite, so somebody with a lot to say knows to come back rather than
+        # thinking the feature is broken.
+        raise HTTPException(status_code=429,
+                            detail=f"that is {config.FEEDBACK_PER_HOUR} reports this hour — "
+                                   f"the rest can go in the Discord, or try again later")
+    dq.append(now)
+
     if not config.DISCORD_WEBHOOK_URL:
         # Not an error the sender caused, and not silent: the UI turns this into the invite
         # link so their report has somewhere to go.
@@ -2440,6 +2571,9 @@ def feedback(body: FeedbackBody):
         "description": text + ("\n\n*(truncated)*" if clipped else ""),
         "color": colour,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        # So one person sending eleven reports is visible as one person, without putting their
+        # wallet id or their email in a channel.
+        "footer": {"text": f"from {_feedback_sender_tag(wallet)}"},
     }
     ctx = body.context if isinstance(body.context, dict) else {}
     if ctx:
@@ -2460,6 +2594,13 @@ def feedback(body: FeedbackBody):
     except requests.RequestException as e:
         raise HTTPException(status_code=502, detail=f"could not deliver feedback: {e}")
     return {"delivered": True, "truncated": clipped}
+
+
+@app.post("/admin/status-post")
+def admin_status_post(_=Depends(require_register_secret)):
+    """Post the summary now. Operator-gated: it writes into a channel, so it is not something a
+    passer-by gets to trigger, and it is how the first one goes out without waiting a day."""
+    return {"posted": post_network_summary()}
 
 
 @app.get("/community")

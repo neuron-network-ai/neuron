@@ -183,6 +183,22 @@ DISCORD_INVITE = os.environ.get("NEURON_DISCORD_INVITE", "https://discord.gg/Cr5
 # Discord rejects a message body over 2000 characters. Cut here rather than letting the post
 # fail, and say it was cut, because a truncated report is worth more than a lost one.
 FEEDBACK_MAX_CHARS = int(os.environ.get("NEURON_FEEDBACK_MAX_CHARS", "1800"))
+# How many reports one ACCOUNT may send per hour. The global per-IP limiter is 120 requests a
+# minute, which is a DDoS guard and not a spam guard: it would wave through 7,200 messages an
+# hour into the project's chat room from a single machine. This endpoint writes into a channel
+# real people read, so the limit that matters is per identity, and small.
+FEEDBACK_PER_HOUR = int(os.environ.get("NEURON_FEEDBACK_PER_HOUR", "5"))
+
+# --- daily network summary -------------------------------------------------- #
+# A SECOND webhook, deliberately, and usually a second channel: reports from people and a robot
+# posting numbers are different kinds of noise, and mixing them is how both get muted. Empty
+# means the summary is off and nothing is posted.
+DISCORD_STATUS_WEBHOOK = os.environ.get("NEURON_DISCORD_STATUS_WEBHOOK", "").strip()
+STATUS_POST_INTERVAL_S = int(os.environ.get("NEURON_STATUS_POST_INTERVAL_S", "86400"))
+# Where the last post's totals are remembered, so the next one can say what CHANGED. A daily
+# line reading "184 requests served" for a week looks identical whether the network did nothing
+# or did everything twice; "+37 today" is the number a person actually reads.
+STATUS_STATE_PATH = os.environ.get("NEURON_STATUS_STATE", str(Path(DB_PATH).parent / "status_post.json"))
 
 # --------------------------------------------------------------------------- #
 # Coordinator self-update (see coordinator/selfupdate.py)

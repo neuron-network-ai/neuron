@@ -965,7 +965,7 @@ class FeedbackBody(BaseModel):
 
 
 @app.post("/feedback")
-def feedback(body: FeedbackBody):
+def feedback(body: FeedbackBody, request: Request):
     """Send what somebody typed to the project, via the coordinator.
 
     Proxied rather than posted from the page for the same reason every other coordinator call
@@ -978,7 +978,12 @@ def feedback(body: FeedbackBody):
     prompt, never the wallet. A feedback form is exactly where a well-meaning diagnostic bundle
     turns into a privacy incident, so the fields are listed rather than collected.
     """
-    payload = {"text": body.text, "category": body.category}
+    # From the SESSION, never from the page: a wallet id the browser could put in the body is a
+    # wallet id anybody could put in the body, and this is what the coordinator rate-limits on.
+    wallet_id = request.session.get("wallet_id")
+    if not wallet_id:
+        raise HTTPException(status_code=403, detail="sign in to send feedback")
+    payload = {"text": body.text, "category": body.category, "wallet_id": wallet_id}
     if body.include_context:
         ctx = {"version": updater.LOCAL_VERSION, "platform": sys.platform}
         try:
@@ -991,6 +996,12 @@ def feedback(body: FeedbackBody):
         payload["context"] = {k: v for k, v in ctx.items() if v is not None}
     try:
         r = requests.post(f"{COORDINATOR}/feedback", json=payload, timeout=15)
+        if r.status_code in (403, 429):
+            # Pass the coordinator's own words through: "sign in" and "that is 5 this hour" are
+            # different problems with different answers, and collapsing them into "failed"
+            # leaves the sender guessing.
+            raise HTTPException(status_code=r.status_code,
+                                detail=r.json().get("detail", "feedback refused"))
         if r.status_code == 503:
             # The relay is off. Say so honestly so the page can offer Discord directly instead
             # of pretending the message was delivered.

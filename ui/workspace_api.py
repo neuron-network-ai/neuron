@@ -168,17 +168,51 @@ def _sec_save(items):
     _write_json(_sec_file(), {"items": items})
 
 
+# THE CLIENT'S SHAPE IS THE CONTRACT, and this file was written against a different one.
+#
+# The workspace UI sends `{kind, title, body, status}` and renders `item.title`. This
+# reimplementation of its Express API invented `{text, done}` instead, so:
+#
+#   * ADD returned 400 "text is required" for every single task anybody typed, because `title`
+#     is not `text`. The client does not read the response, so the box just cleared and nothing
+#     appeared — no error, no row, no clue. Reported as "assistant is not adding task".
+#   * even a stored item would have rendered as a blank line, since `item.title` was undefined.
+#   * UPDATE only copied `text`/`done`, so ticking one off did nothing either.
+#
+# Reading BOTH names and writing the client's is deliberate. Anything already on disk from the
+# old shape keeps working, which matters because this is somebody's list of things to remember
+# and a rename is not a reason to lose it.
+def _sec_title(item):
+    return item.get("title") or item.get("text") or ""
+
+
+def _sec_done(item):
+    return bool(item.get("done")) or item.get("status") == "done"
+
+
+def _sec_normalise(item):
+    """One item in the shape the client declares, whichever shape it was stored in."""
+    return {**item,
+            "title": _sec_title(item),
+            "body": item.get("body") or "",
+            "status": "done" if _sec_done(item) else "open",
+            "done": _sec_done(item),
+            "kind": item.get("kind") or "task",
+            "createdAt": item.get("createdAt") or 0,
+            "updatedAt": item.get("updatedAt") or item.get("createdAt") or 0}
+
+
 def _sec_stats(items):
     return {"total": len(items),
-            "open": sum(1 for i in items if not i.get("done")),
-            "done": sum(1 for i in items if i.get("done"))}
+            "open": sum(1 for i in items if not _sec_done(i)),
+            "done": sum(1 for i in items if _sec_done(i))}
 
 
 @router.get("/api/secretary/list")
 def secretary_list(open: str = "", kind: str = ""):
-    items = _sec_items()
+    items = [_sec_normalise(i) for i in _sec_items()]
     if open == "1":
-        items = [i for i in items if not i.get("done")]
+        items = [i for i in items if not _sec_done(i)]
     if kind:
         items = [i for i in items if i.get("kind") == kind]
     return {"ok": True, "items": items, "stats": _sec_stats(_sec_items())}
@@ -187,8 +221,8 @@ def secretary_list(open: str = "", kind: str = ""):
 @router.get("/api/secretary/due")
 def secretary_due():
     now = time.time() * 1000
-    items = [i for i in _sec_items()
-             if not i.get("done") and i.get("dueAt") and float(i["dueAt"]) <= now]
+    items = [_sec_normalise(i) for i in _sec_items()
+             if not _sec_done(i) and i.get("dueAt") and float(i["dueAt"]) <= now]
     return {"ok": True, "items": items}
 
 
@@ -196,17 +230,27 @@ def secretary_due():
 async def secretary_add(request: Request):
     body = await request.json()
     items = _sec_items()
+    # `title` is what the client sends; `text` is accepted so anything written against the old
+    # shape still works.
+    title = str(body.get("title") or body.get("text") or "").strip()
+    if not title:
+        return JSONResponse({"ok": False, "error": "title is required"}, status_code=400)
+    now_ms = int(time.time() * 1000)
     item = {"id": uuid.uuid4().hex[:10],
-            "text": str(body.get("text") or "").strip(),
+            "title": title,
+            "body": str(body.get("body") or ""),
             "kind": body.get("kind") or "task",
             "dueAt": body.get("dueAt"),
+            "threadId": body.get("threadId"),
+            "threadTitle": body.get("threadTitle"),
+            "status": "open",
             "done": False,
-            "createdAt": int(time.time() * 1000)}
-    if not item["text"]:
-        return JSONResponse({"ok": False, "error": "text is required"}, status_code=400)
+            "createdAt": now_ms,
+            "updatedAt": now_ms}
     items.append(item)
     _sec_save(items)
-    return {"ok": True, "item": item, "items": items, "stats": _sec_stats(items)}
+    return {"ok": True, "item": item, "items": [_sec_normalise(i) for i in items],
+            "stats": _sec_stats(items)}
 
 
 @router.post("/api/secretary/update")
@@ -216,11 +260,19 @@ async def secretary_update(request: Request):
     items = _sec_items()
     for i in items:
         if i.get("id") == sid:
-            for k in ("text", "kind", "dueAt", "done"):
+            for k in ("title", "text", "body", "kind", "dueAt", "done", "status"):
                 if k in body:
                     i[k] = body[k]
+            # Ticking one off arrives as `status: "done"`; keep the two in step so an item
+            # cannot end up open by one field and done by the other.
+            if "status" in body:
+                i["done"] = body["status"] == "done"
+            elif "done" in body:
+                i["status"] = "done" if body["done"] else "open"
+            i["updatedAt"] = int(time.time() * 1000)
             _sec_save(items)
-            return {"ok": True, "item": i, "items": items, "stats": _sec_stats(items)}
+            return {"ok": True, "item": _sec_normalise(i),
+                    "items": [_sec_normalise(x) for x in items], "stats": _sec_stats(items)}
     return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
 
 
@@ -230,7 +282,8 @@ async def secretary_remove(request: Request):
     sid = str(body.get("id") or "")
     items = [i for i in _sec_items() if i.get("id") != sid]
     _sec_save(items)
-    return {"ok": True, "items": items, "stats": _sec_stats(items)}
+    return {"ok": True, "items": [_sec_normalise(i) for i in items],
+            "stats": _sec_stats(items)}
 
 
 # --------------------------------------------------------------------------- #

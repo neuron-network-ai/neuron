@@ -16,7 +16,11 @@ first two are about what must NOT happen:
     screen into a feedback box, and the wallet id is a SPENDING key the UI has to show them —
     posting one into a chat room nobody can un-see is a harm the sender never intended;
   * an unconfigured relay says so (503) rather than swallowing the message, because the UI
-    turns that into the Discord invite and the report still gets somewhere.
+    turns that into the Discord invite and the report still gets somewhere;
+  * IT IS NOT ANONYMOUS AND IT IS NOT UNLIMITED. A public write pipe into a chat room humans
+    read is owned by the first person who finds it. Feedback requires a real Google/GitHub
+    login and each account gets a small hourly quota — the global per-IP limiter is a DDoS
+    guard at 120 requests a minute, which would wave through 7,200 messages an hour.
 
 Posted as an EMBED rather than a line of text: feedback is read in a hurry, on a phone, mixed
 into a conversation, so it needs a coloured bar to find and labelled fields instead of a
@@ -48,8 +52,17 @@ class FakeResp:
         pass
 
 
+W = None            # a real OAuth-linked wallet, minted below
+
+
 def main():
+    global W
     real_post, real_hook = co.requests.post, config.DISCORD_WEBHOOK_URL
+    real_quota = config.FEEDBACK_PER_HOUR
+    co.models.init_db()
+    W, _ = co.models.wallet_for_oauth("test", "feedback-user", "feedback@example.com")
+    config.FEEDBACK_PER_HOUR = 1000        # the quota gets its own test at the end
+    co._feedback_hits.clear()
     sent = {}
 
     def fake_post(url, json=None, timeout=None):
@@ -60,7 +73,7 @@ def main():
         # -- the relay being off is an answer, not a black hole ------------------------ #
         config.DISCORD_WEBHOOK_URL = ""
         try:
-            co.feedback(co.FeedbackBody(text="the sidebar is too narrow"))
+            co.feedback(co.FeedbackBody(text="the sidebar is too narrow", wallet_id=W))
             check("an unconfigured relay refuses rather than silently dropping it", False)
         except HTTPException as e:
             check("an unconfigured relay refuses rather than silently dropping it",
@@ -72,7 +85,7 @@ def main():
         # -- empty is refused before anything is posted -------------------------------- #
         sent.clear()
         try:
-            co.feedback(co.FeedbackBody(text="   "))
+            co.feedback(co.FeedbackBody(text="   ", wallet_id=W))
             check("empty feedback is refused", False)
         except HTTPException as e:
             check("empty feedback is refused", e.status_code == 400)
@@ -81,7 +94,7 @@ def main():
         # -- an ordinary report gets through ------------------------------------------- #
         sent.clear()
         out = co.feedback(co.FeedbackBody(text="the wallet panel is much better now",
-                                          category="UI"))
+                                          category="UI", wallet_id=W))
         check("a report is delivered", out.get("delivered") is True)
         check("...to the configured webhook", sent["url"] == config.DISCORD_WEBHOOK_URL)
         emb = sent["body"]["embeds"][0]
@@ -92,7 +105,7 @@ def main():
         wallet = "wallet_9f3c7a21b8e64d5fa0c1e7b2d4839af6"
         sha = "2c7820d063d16ed53039ec0a42e0ddfbce5beb36d7c7360654beb322bfdd2721"
         sent.clear()
-        co.feedback(co.FeedbackBody(text=f"my id is {wallet} and the hash was {sha}"))
+        co.feedback(co.FeedbackBody(text=f"my id is {wallet} and the hash was {sha}", wallet_id=W))
         body = sent["body"]["embeds"][0]["description"]
         check("a pasted wallet id is redacted", wallet not in body)
         check("a pasted 64-hex secret is redacted", sha not in body)
@@ -101,7 +114,7 @@ def main():
 
         # -- context is whitelisted, not forwarded wholesale --------------------------- #
         sent.clear()
-        co.feedback(co.FeedbackBody(text="slow today", context={
+        co.feedback(co.FeedbackBody(text="slow today", wallet_id=W, context={
             "version": "0.20.23", "platform": "win32", "nodes_online": 3, "is_node": True,
             "wallet_id": wallet, "prompt": "something private"}))
         emb = sent["body"]["embeds"][0]
@@ -115,7 +128,7 @@ def main():
 
         # -- Discord's 2000-char limit is handled here, not by a failed post ------------ #
         sent.clear()
-        out = co.feedback(co.FeedbackBody(text="x" * (config.FEEDBACK_MAX_CHARS + 500)))
+        out = co.feedback(co.FeedbackBody(text="x" * (config.FEEDBACK_MAX_CHARS + 500), wallet_id=W))
         check("an over-long report is truncated rather than lost", out.get("truncated") is True)
         check("...and says so in the message",
               "(truncated)" in sent["body"]["embeds"][0]["description"])
@@ -123,8 +136,42 @@ def main():
         # -- the invite is served, so it can be rotated without a release -------------- #
         check("the community endpoint hands out the invite",
               str(co.community().get("discord", "")).startswith("https://discord.gg/"))
+        # -- ANONYMOUS IS REFUSED. Without this the endpoint is a public write pipe into
+        #    the project's chat room, and one person can send a thousand messages. ---------- #
+        for who, label in ((None, "no wallet at all"), ("", "an empty wallet"),
+                           ("wallet_invented_by_the_caller", "a wallet nobody logged into")):
+            try:
+                co.feedback(co.FeedbackBody(text="spam", wallet_id=who))
+                check(f"{label} is refused", False)
+            except HTTPException as e:
+                check(f"{label} is refused", e.status_code == 403)
+
+        # -- and a signed-in account still cannot flood it ----------------------------- #
+        config.FEEDBACK_PER_HOUR = 3
+        co._feedback_hits.clear()
+        sent.clear()
+        codes = []
+        for i in range(5):
+            try:
+                co.feedback(co.FeedbackBody(text=f"report {i}", wallet_id=W))
+                codes.append(200)
+            except HTTPException as e:
+                codes.append(e.status_code)
+        check("the first reports go through", codes[:3] == [200, 200, 200])
+        check("...and the rest are refused with 429, not silently dropped",
+              codes[3:] == [429, 429])
+
+        # -- the sender is identifiable in the channel WITHOUT exposing them ----------- #
+        config.FEEDBACK_PER_HOUR = 1000
+        co._feedback_hits.clear()
+        sent.clear()
+        co.feedback(co.FeedbackBody(text="who sent this?", wallet_id=W))
+        foot = sent["body"]["embeds"][0]["footer"]["text"]
+        check("the embed says which sender it came from", foot.startswith("from "))
+        check("...as a short hash, never the wallet id itself", W not in foot and len(foot) < 20)
     finally:
         co.requests.post, config.DISCORD_WEBHOOK_URL = real_post, real_hook
+        config.FEEDBACK_PER_HOUR = real_quota
 
     print(f"\n{ok} passed, {fail} failed")
     return fail == 0
