@@ -10,30 +10,42 @@ asset's own digest). Older points: `good-state-2026-08-21-final`, `good-state-0.
 this PC   agent-optinovate-6ff49d        0-9     driver + stage 1   0.20.22 INSTALLED
 OptiPlex  agent-optiplex-server-ce473b   0-9     stage-1 replica    (by decision — do not "fix")
 Pavilion  agent-raman-...-e4920b         10-27   last stage
-coordinator  AGENT_VERSION 0.20.22 PUBLISHED · code committed, NOT YET DEPLOYED (see OWED)
+coordinator  AGENT_VERSION 0.20.22 PUBLISHED · DEPLOYED and verified 2026-08-22
 wallet  847.59 NRN · 5 machines · 0.00 unswept
 suite   125/125
 site    https://neuron-network-ai.github.io/neuron/ — now built from main-full:/docs
 ```
 
-## OWED — two things, and the first one is one command
+## DEPLOYED — done 2026-08-22, and here is the evidence rather than the claim
 
-1. **DEPLOY THE COORDINATOR.** Two changes are committed and pushed but not live:
-   `/ping` returning the node's assigned range ([P60]'s closer) and `/infer` accepting
-   `prompt_chars` ([P65]). The sandbox blocked the deploy this session; nothing is wrong with it.
+The coordinator carrying both changes is live, and both were checked on the wire afterwards
+rather than assumed from a successful deploy:
 
-   ```
-   SSH_AUTH_SOCK=/c/Users/optin/.ssh/neuron-agent.sock bash coordinator/deploy.sh
-   ```
+  * **`/infer` accepts a body with no prompt text.** Three probes — `prompt_chars` only, the old
+    `prompt` shape, and neither — all returned **403** (the login gate), not 422. Before the
+    deploy the first and third would have been 422, so this is the field actually becoming
+    optional and not a guess about it.
+  * **`/ping` carries the assignment.** `agent-optinovate-6ff49d` pinged with its own token and
+    got back `layer_start: 0, layer_end: 9`, matching what it serves.
+  * **Compute re-attested after the restart**, because a restart is exactly when the rule says
+    not to trust a green light: the Pavilion on 10-27 passed on the REAL user path —
+    `passed: true, max_err: 0.000217, path: "last"`, 363 ms, `challenges_passed` 1145/0.
+  * Network: 3 online, 28/28 covered, `[[0,9],[10,27]]`, routable, healthy.
 
-   The key was already loaded in the agent — no passphrase needed while that socket lives.
-   **Deploying is not publishing**: `/agent/version` stays 0.20.22, governed by
-   `/etc/systemd/system/neuron-coordinator.service.d/zz-agent-release.conf`.
+**THE ORDER STILL MATTERS FOR THE NEXT RELEASE.** The new driver sends `prompt_chars` and no
+`prompt`. This coordinator accepts both shapes, which is why it went out first; if the
+coordinator is ever rolled back to a build before 2026-08-22, a new driver 422s on every
+request. Deploy → build → publish, always in that order.
 
-2. **THE DEPLOY MUST HAPPEN BEFORE THE NEXT RELEASE, NOT AFTER.** The new driver sends
-   `prompt_chars` and no `prompt`. A coordinator that has not been deployed still requires
-   `prompt`, so it would 422 every request from a new build. This coordinator accepts both
-   shapes; that is the whole reason it is written that way. Order: deploy → build → publish.
+**Deploying is not publishing**: `/agent/version` stays 0.20.22, governed by
+`/etc/systemd/system/neuron-coordinator.service.d/zz-agent-release.conf`.
+
+Deploy command, for next time (Git Bash, from the repo root — the `VAR=value cmd` prefix is
+POSIX and PowerShell rejects it):
+
+```
+cd /c/Users/optin/neuron && SSH_AUTH_SOCK=/c/Users/optin/.ssh/neuron-agent.sock bash coordinator/deploy.sh
+```
 
 ## What changed
 
@@ -66,12 +78,12 @@ row: `class="partial neuron-col">partial` → `class="tick neuron-col">✓`, and
 
 ## NEXT, in order
 
-1. **Deploy** (above), then attest before trusting any chat result.
-2. **[P56] part three** — declared precision. Needs MEASURED tolerances per dtype, not a guessed
+1. **[P56] part three** — declared precision. Needs MEASURED tolerances per dtype, not a guessed
    table, and the declaration must cost something.
-3. **The node-id flip** — 5 registered identities for 3 real machines, plus stale
-   `node-c-pavilion`.
-4. **A release** carrying the [P65] driver half and the [P60] node half. Deploy first.
+2. **The node-id flip** — 5 registered identities for 3 real machines, plus stale
+   `node-c-pavilion`. The dashboard shows `agent-optinovate-6ff49d` AND `-7fc2ff`.
+3. **A release** carrying the [P65] driver half and the [P60] node half. The coordinator side
+   of both is already live, so this release is safe to cut whenever you want it.
 
 ## DECIDED, DO NOT RE-RAISE
 Code signing and the F-Secure false-positive report are deprioritised by the founder. The
