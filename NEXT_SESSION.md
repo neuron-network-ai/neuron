@@ -1,4 +1,103 @@
-# Handoff — start of Session 73
+# Handoff — start of Session 74
+
+## STATE AT CLOSE, 2026-08-22 — READ "THE VERSION TRAP" BEFORE BUILDING ANYTHING
+
+**Fallback: tag `good-state-0.20.22`.** The installer to ship is
+`dist/installer/NEURON-Setup-0.20.24.exe`, sha256
+`949cb9ad54b65d2cc673888a82e70732cdf895fa590c9a0ee5a2a7476933b44b`, 217.1 MB, built 17:15.
+
+```
+this PC   agent-optinovate-6ff49d   0-9    driver + stage 1   running a 0.20.23 build (see below)
+OptiPlex  agent-optiplex-...ce473b  0-9    stage-1 replica
+Pavilion  agent-raman-...-e4920b    10-27  last stage
+coordinator  DEPLOYED with everything below · AGENT_VERSION still 0.20.22 (nothing published)
+site      privacy ✓ live · download link reads /agent/version, so it moves itself on publish
+suite     126/126
+```
+
+## THE VERSION TRAP — the thing that cost this session most
+
+**0.20.23 names TWO different binaries and one of them is installed on this PC.** Built at
+14:13 (before the task-list fix) and again at 15:48 (with it). Both report `0.20.23`, so
+nothing — not the app, not the updater, not `/agent/version` — can tell them apart. The
+symptom was a fixed feature still answering with the old error, and it took a read of the
+installed exe's own PYZ to see why.
+
+That is the failure an auto-updater cannot survive: a node on the 14:13 build sees
+`latest: 0.20.23`, matches its own version, and never updates. **Bump the version the moment
+you rebuild after a code change, not at release time.** 0.20.23 was retired for this reason;
+its installer was deleted rather than left on disk.
+
+**Reading a frozen build with grep does not work.** PyInstaller stores modules zlib-compressed
+in `PYZ.pyz` inside the exe. Use `PyInstaller.archive.readers.CArchiveReader` →
+`ZlibArchiveReader` → `marshal.dumps(ar.extract(mod))`. A byte-grep reports MISSING for code
+that is present, and I drew a wrong conclusion from it twice.
+
+## OWED — publishing 0.20.24, in this order
+
+1. Upload `NEURON-Setup-0.20.24.exe` to GitHub Releases as `v0.20.24`, write
+   `RELEASE_NOTES_v0.20.24.md` (`test_download_links.py` requires notes to exist).
+2. `AGENT_VERSION` -> `0.20.24`, `AGENT_SHA256` -> `949cb9ad…` in `coordinator/config.py`;
+   bump the download links in `README.md` and `docs/index.html` to match, or
+   `test_download_links.py` fails (it now checks the links name what the coordinator publishes,
+   and that every SHA beside a link is that installer's).
+3. Deploy, then update `/etc/systemd/system/neuron-coordinator.service.d/zz-agent-release.conf`
+   — **that pin, not config.py, governs what nodes are told.**
+
+## What changed today
+
+- **[P60] closed** — a re-placement reaches a running node on the heartbeat.
+- **[P65]** — the coordinator is sent `prompt_chars`, never the prompt. Coordinator half is
+  deployed; the driver half ships with this installer.
+- **[P64]** — the public site was 19 releases stale with a SHA matching nothing. It now reads
+  version/url/hash from `/agent/version`, and Pages builds from `main-full:/docs`.
+- **The network is the only path** (founder's decision). `NEURON_LOCAL_FIRST=1` restores
+  local-first. **No fallback, deliberately** — a silent local answer is how [P54] hid a dead
+  network path for a day.
+- **The assistant/secretary is gone from every place.** It injected the open task list into the
+  prompt on every turn, which since the network became the only path meant a private to-do list
+  was computed across volunteers' machines and billed per message.
+- **Feedback → Discord**, login-gated, 5/hour per account, credential-shaped text redacted.
+  Webhook lives in a root-only systemd drop-in, never in the app.
+- **Daily network summary** to a second webhook; `POST /admin/status-post` fires one now.
+- **UI**: NEURON mark, collapsible sidebar, account panel with masked wallet id and sign-in,
+  live network readiness on the empty state, Bring a machine, "New NEURON" threads.
+
+## Traps this session paid for
+
+- **A test that skips and returns True is a green tick that proves nothing.**
+  `test_stage1_challenge.py` SKIPs when `agent/model_slice_0_9` is absent — it runs here and
+  nowhere else.
+- **A check that cannot fail is worse than no check.** A bash heredoc wrote a literal backspace
+  byte into a regex where `\b` was meant; the check passed against deliberately wrong data.
+  Perturb every new check until it fails before trusting it.
+- **A static file server is not the product.** `python -m http.server` on `ui/static` renders
+  the UI and returns 501 for every POST, so hours were spent clicking dead buttons. Run
+  `uvicorn ui.app:app --port 8091` instead — `.claude/launch.json` has it as `neuron-app`.
+- **I asserted twice without checking** (chat.html's wallet id "leak" that did not exist; a
+  suggestion to build a per-reply chain line that was already built). Read the file first.
+
+## NEXT, in order
+
+1. **Publish 0.20.24** (above).
+2. **[P56] part three** — declared precision, needs MEASURED tolerances per dtype.
+3. **The node-id flip** — 5 registered identities for 3 machines.
+4. Optional UI, unbuilt: a real failure state (error card + retry) now that a failed chain is
+   an ordinary event, and an always-visible balance.
+
+## An audit was run today and is worth reading before touching verification
+
+Read-only, in this session's transcript. The short version: challenges use a hardcoded
+`seed=0`, are cached per layer-range, and carry no nonce — **so a node that passed once can
+replay a stored answer forever**. Real inference output is never correctness-checked. The live
+`verify_service.py` still calls the PROBE path, not the relay path [P56] added on 2026-08-21 —
+`verify_service.py` was last touched 2026-08-18 and never picked it up. `trusted` nodes earn
+without ever passing a challenge. None of this was changed; it is stated so the next session
+does not rediscover it.
+
+---
+
+# Handoff — start of Session 73 (previous)
 
 ## STATE AT CLOSE, 2026-08-22 — READ THE TWO LINES UNDER "OWED" FIRST
 
