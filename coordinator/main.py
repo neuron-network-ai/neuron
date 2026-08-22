@@ -10,6 +10,7 @@ import asyncio
 import json
 import secrets
 import threading
+import datetime
 import re
 import time
 
@@ -2419,24 +2420,42 @@ def feedback(body: FeedbackBody):
     clipped = len(text) > config.FEEDBACK_MAX_CHARS
     text = text[:config.FEEDBACK_MAX_CHARS]
 
-    lines = []
-    if body.category:
-        lines.append(f"**{str(body.category)[:40]}**")
-    lines.append(text)
-    if clipped:
-        lines.append("_(truncated)_")
+    # AN EMBED, NOT A LINE OF TEXT.
+    #
+    # The first version posted the category in bold, the message under it and the context in
+    # backticks — three unrelated things in one paragraph, indistinguishable at a glance from
+    # somebody talking in the channel. Feedback is read in a hurry, usually on a phone, mixed
+    # into a conversation, and it has to be skimmable: a coloured bar to find, a title that
+    # says what kind of report it is, and the facts as labelled fields instead of a run-on.
+    #
+    # NOT because the old format was broken. It was checked in the real channel and rendered
+    # correctly, underscores and all — the backticks did their job. This is a readability
+    # change and nothing more, recorded that way so nobody later "fixes" a bug that was never
+    # there.
+    kind = (str(body.category)[:40] if body.category else "Feedback")
+    colour = {"bug": 0xEF4444, "confusing": 0xF59E0B,
+              "praise": 0x22C55E, "idea": 0x3B82F6}.get(kind.strip().lower(), 0x15803D)
+    embed = {
+        "title": kind,
+        "description": text + ("\n\n*(truncated)*" if clipped else ""),
+        "color": colour,
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
     ctx = body.context if isinstance(body.context, dict) else {}
     if ctx:
         # Whitelisted, not passed through: a dict from a client is not a thing to forward
         # wholesale into a chat room.
         allowed = {k: str(v)[:60] for k, v in ctx.items()
                    if k in ("version", "platform", "nodes_online", "is_node", "network_healthy")}
+        pretty = {"version": "Version", "platform": "OS", "nodes_online": "Nodes online",
+                  "is_node": "Runs a node", "network_healthy": "Network healthy"}
         if allowed:
-            lines.append("`" + " · ".join(f"{k}={v}" for k, v in sorted(allowed.items())) + "`")
+            embed["fields"] = [{"name": pretty.get(k, k), "value": v, "inline": True}
+                               for k, v in sorted(allowed.items())]
 
     try:
         r = requests.post(config.DISCORD_WEBHOOK_URL,
-                          json={"content": "\n".join(lines)}, timeout=10)
+                          json={"embeds": [embed]}, timeout=10)
         r.raise_for_status()
     except requests.RequestException as e:
         raise HTTPException(status_code=502, detail=f"could not deliver feedback: {e}")

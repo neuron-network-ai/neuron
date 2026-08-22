@@ -17,6 +17,11 @@ first two are about what must NOT happen:
     posting one into a chat room nobody can un-see is a harm the sender never intended;
   * an unconfigured relay says so (503) rather than swallowing the message, because the UI
     turns that into the Discord invite and the report still gets somewhere.
+
+Posted as an EMBED rather than a line of text: feedback is read in a hurry, on a phone, mixed
+into a conversation, so it needs a coloured bar to find and labelled fields instead of a
+run-on. Purely a readability change — the previous plain-text format was checked in the real
+channel and rendered correctly.
 """
 import os
 import sys
@@ -79,15 +84,16 @@ def main():
                                           category="UI"))
         check("a report is delivered", out.get("delivered") is True)
         check("...to the configured webhook", sent["url"] == config.DISCORD_WEBHOOK_URL)
-        check("...carrying the text", "much better now" in sent["body"]["content"])
-        check("...and the category, so it can be triaged", "**UI**" in sent["body"]["content"])
+        emb = sent["body"]["embeds"][0]
+        check("...carrying the text", "much better now" in emb["description"])
+        check("...and the category as the title, so it can be triaged", emb["title"] == "UI")
 
         # -- THE ONE THAT MATTERS: a pasted credential never leaves --------------------- #
         wallet = "wallet_9f3c7a21b8e64d5fa0c1e7b2d4839af6"
         sha = "2c7820d063d16ed53039ec0a42e0ddfbce5beb36d7c7360654beb322bfdd2721"
         sent.clear()
         co.feedback(co.FeedbackBody(text=f"my id is {wallet} and the hash was {sha}"))
-        body = sent["body"]["content"]
+        body = sent["body"]["embeds"][0]["description"]
         check("a pasted wallet id is redacted", wallet not in body)
         check("a pasted 64-hex secret is redacted", sha not in body)
         check("...and the rest of the sentence survives, so the report is still readable",
@@ -96,18 +102,23 @@ def main():
         # -- context is whitelisted, not forwarded wholesale --------------------------- #
         sent.clear()
         co.feedback(co.FeedbackBody(text="slow today", context={
-            "version": "0.20.23", "platform": "win32", "nodes_online": 3,
+            "version": "0.20.23", "platform": "win32", "nodes_online": 3, "is_node": True,
             "wallet_id": wallet, "prompt": "something private"}))
-        body = sent["body"]["content"]
-        check("declared context fields are included", "version=0.20.23" in body)
+        emb = sent["body"]["embeds"][0]
+        fields = {f["name"]: f["value"] for f in emb.get("fields", [])}
+        check("declared context fields are included", fields.get("Version") == "0.20.23")
         check("...and undeclared ones are dropped, whatever the client sent",
-              "wallet_id" not in body and "something private" not in body)
+              not any("wallet" in n.lower() for n in fields)
+              and "something private" not in repr(fields))
+        # Keys are relabelled for a human reader rather than dumped as identifiers.
+        check("context keys are given readable names", "Runs a node" in fields)
 
         # -- Discord's 2000-char limit is handled here, not by a failed post ------------ #
         sent.clear()
         out = co.feedback(co.FeedbackBody(text="x" * (config.FEEDBACK_MAX_CHARS + 500)))
         check("an over-long report is truncated rather than lost", out.get("truncated") is True)
-        check("...and says so in the message", "_(truncated)_" in sent["body"]["content"])
+        check("...and says so in the message",
+              "(truncated)" in sent["body"]["embeds"][0]["description"])
 
         # -- the invite is served, so it can be rotated without a release -------------- #
         check("the community endpoint hands out the invite",
