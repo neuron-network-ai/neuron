@@ -1,7 +1,7 @@
 """ui/workspace_api.py — the endpoints the workspace UI needs that NEURON never had.
 
 **Why this file exists.** The workspace chat UI (`ui/static/workspace/`) was built against an
-Express server: skills, the secretary, memory and a tool loop all live behind `/api/*` routes
+Express server: skills, memory and a tool loop all live behind `/api/*` routes
 in `server.ts`. NEURON ships a FROZEN PYTHON BINARY and its own build notes are explicit that
 "Node is a build dependency only, never a runtime one", so that server cannot travel with it.
 Without these routes the features render and do nothing — switches a user flips and waits on.
@@ -53,8 +53,8 @@ def _read_json(path: Path, default):
 def _write_json(path: Path, data):
     """Write via a temp file and replace, so a crash mid-write cannot truncate the store.
 
-    The Express version did the same thing for the secretary and it is worth keeping: this is
-    the file holding somebody's reminders, and a half-written JSON array loses all of them.
+    The Express version did the same thing and it is worth keeping: these files hold the
+    user's own data, and a half-written JSON array loses all of it.
     """
     tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
