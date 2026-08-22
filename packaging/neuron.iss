@@ -8,7 +8,7 @@
 ; and on uninstall deregisters the node + deletes its slice/config.
 
 #define AppName "NEURON"
-#define AppVersion "0.20.24"
+#define AppVersion "0.20.25"
 #define AppExe "neuron-agent.exe"
 
 [Setup]
@@ -83,9 +83,18 @@ Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; IconFilename: "{app}\{#AppExe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; IconFilename: "{app}\{#AppExe}"; Tasks: desktopicon
-Name: "{userstartup}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: startup
+; --startup marks this as the machine starting NEURON rather than a person opening it, so
+; it does not throw a browser tab in somebody's face at every sign-in. Clicking the
+; desktop or Start Menu icon passes nothing and therefore opens the page, which is the
+; whole point: one door, and it always leads somewhere.
+Name: "{userstartup}\{#AppName}"; Filename: "{app}\{#AppExe}"; Parameters: "--startup"; Tasks: startup
 
 [Run]
+; "Start NEURON now" starts a BACKGROUND process whose only surface is a tray icon Windows
+; hides by default, so to the person who ticked it nothing happened at all. The app itself now
+; opens its Chat UI once the server answers (agent.py: _maybe_open_chat_once) -- done there
+; rather than with a second [Run] line because only the app knows when the port is ready, and
+; a browser opened too early greets a new user with a connection error.
 Filename: "{app}\{#AppExe}"; Description: "Start {#AppName} now"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]

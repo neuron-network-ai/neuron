@@ -206,6 +206,10 @@ RELAY_PROBE_TIMEOUT_S = 20
 # a favour to the network, not this node's job, and a newcomer waiting an extra minute costs
 # nothing next to needing a human to be awake.
 PEER_VERIFY_POLL_SECONDS = 60
+# How long to wait for the Chat UI's port before giving up on opening a browser. Generous
+# because the FIRST start of a fresh install downloads a slice and loads a model behind it, and
+# a browser that opens on a connection error is worse than one that never opens.
+CHAT_OPEN_WAIT_S = 120
 # How many heartbeats a node may sit PROBATIONARY before it says so, and keeps saying so.
 # 60 x 30 s = 30 minutes, comfortably longer than a healthy promotion takes (a peer verifier
 # polls every 60 s) and far shorter than the three days [P24]'s stranger waited in silence.
@@ -1444,6 +1448,44 @@ class Agent:
         return {"passed": bool(res["passed"]), "max_err": float(res["max_err"])}
 
     # -- personal Chat UI (agent/local_chat.py) ------------------------------ #
+    def _open_chat_when_ready(self):
+        """Open the Chat UI once this machine is actually serving it. Never fatal.
+
+        Silent when NEURON_NO_BROWSER is set, which is what the startup shortcut passes through
+        `--startup`. Auto-start at sign-in must not steal focus; a click must not be ignored.
+        """
+        if os.environ.get("NEURON_NO_BROWSER") == "1":
+            log.debug("started at sign-in — not opening a browser")
+            return
+        try:
+            port = self.cfg.get("local_chat_port", local_chat.DEFAULT_PORT)
+
+            def _open_when_ready():
+                # Waits for the port to ANSWER rather than opening immediately. Opening first
+                # races the server and greets a new user with a connection error, which is
+                # worse than the silence this replaces.
+                import socket
+                import webbrowser
+                for _ in range(CHAT_OPEN_WAIT_S):
+                    if self._stop.is_set():
+                        return
+                    try:
+                        with socket.create_connection(("127.0.0.1", port), timeout=1):
+                            pass
+                    except OSError:
+                        self._stop.wait(1)
+                        continue
+                    webbrowser.open(f"http://127.0.0.1:{port}")
+                    log.info("opened the Chat UI at http://127.0.0.1:%d", port)
+                    return
+                log.warning("the Chat UI did not come up within %ds, so nothing was opened. "
+                            "It is at http://127.0.0.1:%d when it does.",
+                            CHAT_OPEN_WAIT_S, port)
+
+            threading.Thread(target=_open_when_ready, daemon=True).start()
+        except Exception as e:                                          # noqa: BLE001
+            log.debug("could not schedule the Chat UI open: %s", e)
+
     def start_local_chat(self):
         """Best-effort: a broken/slow local Chat UI must never stop this machine from
         serving the network (that's the agent's primary job) -- local_chat.start() already
@@ -1457,6 +1499,19 @@ class Agent:
             return
         driver_slice_dir = os.path.join(HERE, "driver_slice")
         port = self.cfg.get("local_chat_port", local_chat.DEFAULT_PORT)
+        # CLICKING NEURON SHOWS YOU NEURON.
+        #
+        # Nothing in this app ever opened a browser by itself. A new user finished the
+        # installer, ticked "Start NEURON now", and watched nothing happen -- what starts is a
+        # background process whose only surface is a tray icon Windows hides behind a chevron.
+        #
+        # So a deliberate launch opens the page, EVERY time, not once. An earlier version of
+        # this used a marker file to open it exactly once per install, and that was worse than
+        # it sounds: on day two the person is back to hunting a hidden icon, which is the
+        # problem being fixed. What must not happen is a tab ambushing somebody at sign-in --
+        # and that is a question of INTENT, not of a counter. The startup shortcut passes
+        # --startup and gets silence; a human clicking the icon gets the page.
+        self._open_chat_when_ready()
         self.local_chat_server = local_chat.start(
             self.base, self.cfg["model_id"], driver_slice_dir,
             port=port, oauth_cfg=self.cfg.get("oauth"),
