@@ -195,6 +195,12 @@ FEEDBACK_PER_HOUR = int(os.environ.get("NEURON_FEEDBACK_PER_HOUR", "5"))
 # means the summary is off and nothing is posted.
 DISCORD_STATUS_WEBHOOK = os.environ.get("NEURON_DISCORD_STATUS_WEBHOOK", "").strip()
 STATUS_POST_INTERVAL_S = int(os.environ.get("NEURON_STATUS_POST_INTERVAL_S", "86400"))
+# How long after startup before the loop first looks. Long enough that a restart during a deploy
+# does not post from a half-warm network whose nodes have not checked in yet.
+STATUS_POST_STARTUP_DELAY_S = int(os.environ.get("NEURON_STATUS_STARTUP_DELAY_S", "180"))
+# How often it CHECKS whether a post is due. Checking is free; posting is what is rate-limited
+# by the recorded timestamp, which is why a restart cannot reset the schedule any more.
+STATUS_POST_CHECK_S = int(os.environ.get("NEURON_STATUS_CHECK_S", "1800"))
 # Where the last post's totals are remembered, so the next one can say what CHANGED. A daily
 # line reading "184 requests served" for a week looks identical whether the network did nothing
 # or did everything twice; "+37 today" is the number a person actually reads.

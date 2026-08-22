@@ -381,10 +381,25 @@ async def status_loop():
     Its own task rather than a counter inside health_loop: the sweep runs every 60s and exists
     to keep placement correct, and hanging a once-a-day HTTP call off it means a slow webhook
     delays the thing the network depends on.
+
+    THE SCHEDULE LIVES IN THE RECORDED TIMESTAMP, NOT IN THIS SLEEP.
+
+    It used to `sleep(INTERVAL)` and then post, which meant the clock restarted with the
+    process. Six deploys in a day is six resets, so on any day the coordinator was touched the
+    summary silently never fired -- and it looked automatic the whole time. Checked live: the
+    only post in the channel was one fired by hand, while the loop had been dutifully running
+    and sleeping through every restart.
+
+    So it POLLS and compares against `status_post.json`, which settle already writes. A restart
+    now costs at most one check interval instead of a whole day, and a coordinator that has been
+    down for a week posts once when it comes back rather than staying quiet for another day.
     """
+    await asyncio.sleep(config.STATUS_POST_STARTUP_DELAY_S)
     while True:
-        await asyncio.sleep(config.STATUS_POST_INTERVAL_S)
-        post_network_summary()
+        last = float(_status_state().get("at") or 0.0)
+        if time.time() - last >= config.STATUS_POST_INTERVAL_S:
+            post_network_summary()
+        await asyncio.sleep(config.STATUS_POST_CHECK_S)
 
 
 async def health_loop():
