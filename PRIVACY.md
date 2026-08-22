@@ -35,7 +35,7 @@ those numbers travel to other volunteers' machines.
 |---|---|
 | anyone on the internet between the machines | **no** |
 | whoever runs the relay | **no** |
-| **the NEURON coordinator itself** | **no, from v0.20.23** — see the correction below |
+| **the NEURON coordinator itself** | **no** — from v0.20.23; see the correction below |
 | the volunteer machines computing your answer | they hold numbers, not your words — see below |
 
 Each link is separately encrypted, with a one-time key, using an ephemeral key exchange
@@ -57,7 +57,40 @@ table made. Found and fixed on 2026-08-22; recorded as [P65] in
 **What changed:** your machine now sends the number of characters instead of the characters
 (`prompt_chars`). The coordinator still accepts the old shape, because agents already installed
 still send it — so the fix reaches you when you update, and the row above is true of v0.20.23
-onward. If you are running an earlier build, it is not yet true of yours.
+onward. If you are running an earlier build, it is not yet true of yours; the app updates itself
+daily, and you can force it from the tray.
+
+### What "privacy by architecture" claims, and what it does not
+
+The landing page marks NEURON with a tick on this. It is worth being exact about what that tick
+is claiming, because a privacy claim that is vaguer than the code is how the correction above
+became necessary.
+
+**It claims these, and each is checkable:**
+
+- an answer your machine can run never leaves your machine — not to us, not to anyone
+  (`engine/local_gguf.py`, and the header says which mode you are in);
+- when the network is used, every hop is separately encrypted with a one-time ephemeral key, so
+  neither the relay operator nor the coordinator can read the wire, then or from a recording
+  afterwards (`security/wire_crypto.py`);
+- the coordinator is sent the LENGTH of your prompt and never the prompt (`node_a.py`);
+- your conversations are stored only on your machine (`ui/conversations.py`);
+- nothing else is collected — see the list below, which is exhaustive.
+
+**It does not claim** that a volunteer whose machine is in your chain is mathematically unable to
+learn anything. That machine holds the numbers it computes on, in plaintext, because that is the
+work it is doing. What limits it is structural rather than cryptographic: it holds a middle slice
+of the layers and neither the part that reads text in nor the part that writes text out, so it
+cannot turn those numbers back into your words on its own; and different requests may take
+different routes, so no one machine holds a whole conversation.
+
+**No decentralised inference network can currently offer the mathematical version of that
+guarantee.** The techniques that would — homomorphic evaluation, or secure multi-party
+computation of a transformer — are orders of magnitude too slow to serve a chat, and the
+hardware-enclave route would mean only certain CPUs could join, which is the opposite of the
+point. If that changes, this document changes with it. Until then the tick means the
+architecture, not a promise, is what protects you — and the sentence above is the honest edge
+of it.
 
 ### The limitation, stated rather than glossed
 
