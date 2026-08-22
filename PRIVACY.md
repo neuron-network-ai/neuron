@@ -131,6 +131,20 @@ currently offer that one, and NEURON does not claim it.
    (`safety/moderation.py: report_violation`). **The text is never sent** — the snippet stays in
    a log on your own machine.
 
+### Feedback, if you send it
+
+The **Send feedback** box posts what you type to the project's Discord, through the coordinator.
+It is a third party, the message is visible to anyone in that channel, and none of it happens
+unless you write something and press Send.
+
+- **What goes**: your text, the category you picked, and — only if the box is ticked — your app
+  version, your operating system, and whether the network was healthy.
+- **What never goes**: your conversations, your prompts, your email, your wallet id. Anything
+  credential-shaped is stripped before it leaves the coordinator, because people paste what is
+  on their screen and the wallet id is a spending key (`coordinator/main.py`, `_SECRETISH`).
+- The thumbs up/down on each reply is **not** this. It is written to your own browser and sent
+  nowhere.
+
 ### What is stored, and where
 
 - **Your conversations stay on your machine**, in a SQLite file beside the app

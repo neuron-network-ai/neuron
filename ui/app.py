@@ -27,6 +27,7 @@ Env overrides:
 import json
 import logging
 import os
+import sys
 import threading
 import time
 import uuid
@@ -957,6 +958,58 @@ def chat(body: ChatBody, request: Request):
 # --------------------------------------------------------------------------- #
 # Conversation history (driver-side, per-wallet) — the ChatGPT-style sidebar
 # --------------------------------------------------------------------------- #
+class FeedbackBody(BaseModel):
+    text: str
+    category: str | None = None
+    include_context: bool = False
+
+
+@app.post("/feedback")
+def feedback(body: FeedbackBody):
+    """Send what somebody typed to the project, via the coordinator.
+
+    Proxied rather than posted from the page for the same reason every other coordinator call
+    is: the browser never talks to the coordinator directly, so there is one place that decides
+    what leaves this machine — and it is on this machine, where the person it belongs to can
+    read the source.
+
+    The CONTEXT is assembled here and only when they ticked the box. It is the version, the
+    platform and what this machine knows about the network — never the conversation, never the
+    prompt, never the wallet. A feedback form is exactly where a well-meaning diagnostic bundle
+    turns into a privacy incident, so the fields are listed rather than collected.
+    """
+    payload = {"text": body.text, "category": body.category}
+    if body.include_context:
+        ctx = {"version": updater.LOCAL_VERSION, "platform": sys.platform}
+        try:
+            net = requests.get(f"{COORDINATOR}/status", timeout=6).json().get("network", {})
+            ctx["nodes_online"] = net.get("online_nodes")
+            ctx["network_healthy"] = net.get("network_healthy")
+        except requests.RequestException:
+            pass                     # context is a nicety; the report is the point
+        ctx["is_node"] = bool(_node_identity()[0])
+        payload["context"] = {k: v for k, v in ctx.items() if v is not None}
+    try:
+        r = requests.post(f"{COORDINATOR}/feedback", json=payload, timeout=15)
+        if r.status_code == 503:
+            # The relay is off. Say so honestly so the page can offer Discord directly instead
+            # of pretending the message was delivered.
+            raise HTTPException(status_code=503, detail="feedback relay is not configured")
+        r.raise_for_status()
+        return r.json()
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"could not send feedback: {e}")
+
+
+@app.get("/community")
+def community():
+    """Where the project lives, from the coordinator, so it can be changed without a release."""
+    try:
+        return requests.get(f"{COORDINATOR}/community", timeout=6).json()
+    except requests.RequestException:
+        return {"discord": None}
+
+
 @app.get("/conversations")
 def list_conversations_endpoint(request: Request):
     wallet_id = request.session.get("wallet_id")

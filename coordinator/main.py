@@ -10,7 +10,14 @@ import asyncio
 import json
 import secrets
 import threading
+import re
 import time
+
+# Declared in coordinator/requirements.txt and used by the feedback relay. Imported at
+# module scope deliberately: a missing dependency must fail the START, loudly, rather
+# than the first time somebody sends feedback — 2026-08-19 is what a lazily-discovered
+# missing import costs here (a restart loop with /status 502 and the network unroutable).
+import requests
 import uuid
 from contextlib import asynccontextmanager
 
@@ -2374,6 +2381,73 @@ def agent_version():
             # before 0.20.1 ignore the field entirely, which is the correct behaviour for them:
             # they simply stay where they are rather than acting on something they cannot verify.
             "rollback": config.AGENT_ROLLBACK}
+
+
+class FeedbackBody(BaseModel):
+    text: str
+    category: str | None = None
+    # Only what the sender ticked a box to include. Never assembled here from what we happen
+    # to know about them.
+    context: dict | None = None
+
+
+# Anything that looks like a credential is removed before it leaves this process. People paste
+# whatever is on their screen into a feedback box, and the wallet id in particular is a
+# SPENDING key the UI has to show them -- posting one into a chat server nobody can un-see is
+# a harm the sender did not intend and would not spot. Redacting a false positive costs a few
+# characters of a bug report; not redacting a real one costs somebody their balance.
+_SECRETISH = re.compile(r"\b(?:wallet_[0-9a-fA-F]{8,}|[0-9a-fA-F]{32,})\b")
+
+
+@app.post("/feedback")
+def feedback(body: FeedbackBody):
+    """Relay in-app feedback to the project's Discord.
+
+    There was no way to tell anybody anything. The thumbs on each reply were written to the
+    sender's own browser and read by nobody, so a year of opinions about this product exists
+    only on the machines that formed them.
+    """
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="empty feedback")
+    if not config.DISCORD_WEBHOOK_URL:
+        # Not an error the sender caused, and not silent: the UI turns this into the invite
+        # link so their report has somewhere to go.
+        raise HTTPException(status_code=503, detail="feedback relay is not configured")
+
+    text = _SECRETISH.sub("[redacted]", text)
+    clipped = len(text) > config.FEEDBACK_MAX_CHARS
+    text = text[:config.FEEDBACK_MAX_CHARS]
+
+    lines = []
+    if body.category:
+        lines.append(f"**{str(body.category)[:40]}**")
+    lines.append(text)
+    if clipped:
+        lines.append("_(truncated)_")
+    ctx = body.context if isinstance(body.context, dict) else {}
+    if ctx:
+        # Whitelisted, not passed through: a dict from a client is not a thing to forward
+        # wholesale into a chat room.
+        allowed = {k: str(v)[:60] for k, v in ctx.items()
+                   if k in ("version", "platform", "nodes_online", "is_node", "network_healthy")}
+        if allowed:
+            lines.append("`" + " · ".join(f"{k}={v}" for k, v in sorted(allowed.items())) + "`")
+
+    try:
+        r = requests.post(config.DISCORD_WEBHOOK_URL,
+                          json={"content": "\n".join(lines)}, timeout=10)
+        r.raise_for_status()
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"could not deliver feedback: {e}")
+    return {"delivered": True, "truncated": clipped}
+
+
+@app.get("/community")
+def community():
+    """Where to find the project. Served rather than hardcoded in the app so the invite can be
+    rotated without shipping a build to everyone who already installed one."""
+    return {"discord": config.DISCORD_INVITE}
 
 
 @app.get("/models")

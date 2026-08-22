@@ -170,6 +170,20 @@ AGENT_SHA256 = os.environ.get("NEURON_AGENT_SHA256",
 # backwards must take an explicit act by an operator who knows they are doing it.
 AGENT_ROLLBACK = os.environ.get("NEURON_AGENT_ROLLBACK", "").strip().lower() in ("1", "true", "yes")
 
+# --- feedback relay (in-app feedback -> Discord) ---------------------------- #
+# The webhook lives HERE and nowhere else. Putting it in the installed app would ship a
+# write-credential for the project's own Discord to every volunteer's machine, where anyone
+# could read it out of the bundle and post as the app. One copy, on one server we control.
+#
+# Empty means the relay is OFF and /feedback says so plainly, so the UI can fall back to the
+# invite link instead of silently swallowing what somebody took the trouble to write.
+DISCORD_WEBHOOK_URL = os.environ.get("NEURON_DISCORD_WEBHOOK", "").strip()
+# The public invite, safe to ship: it is meant to be handed out.
+DISCORD_INVITE = os.environ.get("NEURON_DISCORD_INVITE", "https://discord.gg/Cr5eRwCPV").strip()
+# Discord rejects a message body over 2000 characters. Cut here rather than letting the post
+# fail, and say it was cut, because a truncated report is worth more than a lost one.
+FEEDBACK_MAX_CHARS = int(os.environ.get("NEURON_FEEDBACK_MAX_CHARS", "1800"))
+
 # --------------------------------------------------------------------------- #
 # Coordinator self-update (see coordinator/selfupdate.py)
 # --------------------------------------------------------------------------- #
