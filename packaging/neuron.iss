@@ -17,6 +17,32 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher=NEURON Labs
 AppSupportURL=https://github.com/neuron-network-ai/neuron
+AppCopyright=Copyright (C) 2026 NEURON Labs. Apache-2.0, source at the URL above.
+; WHAT THE FILE SAYS ABOUT ITSELF WHEN NOBODY IS THERE TO VOUCH FOR IT.
+;
+; Inno fills "Product version" from AppVersion but defaults VersionInfoVersion — the field
+; Windows labels "File version" — to 0.0.0.0, and leaves Company and Copyright blank unless
+; they are set here. So every installer this project has shipped told the Properties dialog it
+; was version zero, by nobody, copyright nobody. Somebody checking whether the 207 MB they just
+; downloaded is the real thing opens exactly that dialog and is shown the profile of a file
+; assembled by nothing in particular.
+;
+; On a SIGNED binary this would be cosmetic. On an unsigned one the version resource is most of
+; what is left: browser download reputation and Defender both weigh it, and a blank, zeroed
+; resource is a signal in the wrong direction on a 200 MB exe that no certificate is speaking
+; for. It does not replace code signing (PACKAGING.md, still the real fix) — it stops the file
+; from arguing against itself in the meantime.
+;
+; All of it derives from {#AppVersion}, so a release bumps one line and these follow;
+; packaging/test_installer_identity.py refuses a build that drops them or hardcodes a version
+; past this define.
+VersionInfoVersion={#AppVersion}.0
+VersionInfoProductVersion={#AppVersion}
+VersionInfoProductName={#AppName}
+VersionInfoDescription={#AppName} Setup
+VersionInfoCompany=NEURON Labs
+VersionInfoCopyright=Copyright (C) 2026 NEURON Labs. Apache-2.0.
+VersionInfoOriginalFileName={#AppName}-Setup-{#AppVersion}.exe
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes

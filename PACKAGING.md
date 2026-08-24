@@ -7,8 +7,16 @@ Add/Remove Programs entry, optional auto-start, clean uninstall that deregisters
 **Honest caveats first:**
 - **It's big.** The app bundles PyTorch → ~1–2 GB installed. This is not the "tiny 1 MB agent";
   that needs the llama.cpp engine (see `SCALING.md`, parked). Today it's a Python+PyTorch node, packaged.
-- **It's unsigned.** Windows SmartScreen / some antivirus will warn on an unsigned app and setup.
-  Removing that needs a code-signing certificate (~$100–400/yr). Until then users click through.
+- **It's unsigned.** Windows SmartScreen / some antivirus will warn on an unsigned app and setup,
+  and browsers increasingly block the **download** outright rather than only warning on the run.
+  Removing that needs a code-signing certificate (~$100–400/yr). Until then users click through —
+  README.md tells them how, and the SHA-256 is what actually proves the file.
+
+  Because there is no signature, the exe's **version resource** is a large part of what a browser
+  and Defender have left to judge it by, so `[Setup]` fills all of it (`VersionInfoVersion` and
+  friends). Inno defaults `VersionInfoVersion` to **0.0.0.0** and leaves Company/Copyright blank,
+  which is what every build up to 0.20.25 shipped — check Properties → Details on the output.
+  `packaging/test_installer_identity.py` fails the build recipe if those go missing again.
 - **Per-platform.** A Windows build must be built on Windows; Linux/macOS separately (no cross-compile).
 
 ## Architecture
@@ -36,7 +44,7 @@ From the repo root, with the venv active:
 pip install pyinstaller pystray Pillow
 pyinstaller packaging/neuron-agent.spec
 
-# 2. compile the installer  ->  dist\installer\NEURON-Setup-0.12.0.exe
+# 2. compile the installer  ->  dist\installer\NEURON-Setup-<ver>.exe
 "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\neuron.iss
 ```
 

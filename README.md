@@ -18,6 +18,46 @@ Two things to expect: Windows will say the installer is "unrecognized" (it isn't
 — the full source is in this repository), and the first start downloads **1.4–1.8 GB**, which is
 your share of the AI model. After that it just runs, and updates itself.
 
+### If your browser or Windows blocks it
+
+The installer is not code-signed, so a browser may refuse the **download itself** — not just
+warn when you run it. Chrome says *"blocked"* or *"Failed – virus detected"*, Edge says it
+*"isn't commonly downloaded"*. Nothing is wrong with the file; an unsigned 200 MB executable
+that few people have fetched yet has no reputation to check, and that is what those messages
+mean. Getting past it, in the order the blocks appear:
+
+1. **The browser blocks the download.** Chrome: open `chrome://downloads`, find the entry, and
+   click **Keep**. Edge: **Downloads** (`Ctrl+J`) → the **…** beside the file → **Keep** →
+   **Show more** → **Keep anyway**. Firefox: the download panel → right-click → **Allow
+   download**.
+2. **Check you got the real file before you run it** — this is the step that makes the rest
+   safe, and it takes one command. In PowerShell, from your Downloads folder:
+
+   ```
+   certutil -hashfile NEURON-Setup-0.20.25.exe SHA256
+   ```
+
+   It must print `039e60655cad6969b5ab21c83e63ca8491675ef4f023617f97b9360d63c72740` — the hash
+   above, which is also what `/agent/version` serves and what every installed agent checks
+   before it will run an update. The file is **217,140,114 bytes**, which Windows displays as
+   **207 MB**. If the hash matches, you have the published build exactly; if it does not, delete
+   it and download again, and please open an issue.
+3. **Windows won't open it.** *"Windows protected your PC"* → **More info** → **Run anyway**.
+4. **Still nothing when you double-click.** Windows marks files from the internet and can block
+   them silently: right-click the exe → **Properties** → on the **General** tab, tick
+   **Unblock** at the bottom → **Apply**. (That is the same dialog whose **Details** tab shows
+   the version — a build before 0.20.26 reports `File version 0.0.0.0` there, which is a missing
+   field in our installer script and not a sign of a bad download.)
+5. **Antivirus deleted it.** Some engines flag any large unsigned PyInstaller bundle. Restore it
+   from quarantine, or add the Downloads folder as an exclusion for the install, and please tell
+   us which engine — false positives can be reported and fixed.
+
+The real fix for all of this is a code-signing certificate, which the project does not have yet
+(see [PACKAGING.md](PACKAGING.md)). Until then the hash is the thing that proves the download,
+and it is worth the ten seconds.
+
+**On Linux or macOS none of this applies** — install from source, below.
+
 Android: see [ANDROID_INSTALL.md](agent/android/ANDROID_INSTALL.md) (APK coming soon)
 
 On Linux or macOS, see [For developers](#for-developers-source-install) below.

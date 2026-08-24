@@ -35,7 +35,13 @@ too big for any one computer. You earn **NRN** for that work.
   that, and never runs on battery. Change it any time from the tray's **Donation level** menu —
   `Idle` only contributes when you are away from the machine.
 - First start downloads about **1.4 GB** and takes a few minutes.
-- Windows may warn the installer is "unrecognized" — it isn't signed yet. The source is public.
+- Windows may warn the installer is "unrecognized" — it isn't signed yet, and for the same
+  reason your **browser may block the download itself** ("blocked", "not commonly downloaded").
+  Neither means the file is bad: an unsigned installer few people have fetched has no
+  reputation to check. The way past each block, and the one command that proves what you
+  downloaded, are in the README under
+  [If your browser or Windows blocks it](README.md#if-your-browser-or-windows-blocks-it).
+  The source is public.
 
 **Install:**
 ```
