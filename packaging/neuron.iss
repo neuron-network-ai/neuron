@@ -33,6 +33,12 @@ AppCopyright=Copyright (C) 2026 NEURON Labs. Apache-2.0, source at the URL above
 ; for. It does not replace code signing (PACKAGING.md, still the real fix) — it stops the file
 ; from arguing against itself in the meantime.
 ;
+; BE CLEAR ABOUT WHAT THIS DOES NOT FIX. Smart App Control blocks 0.20.25 outright and none of
+; these fields change that by one bit: SAC wants an Authenticode signature plus Intelligent
+; Security Graph standing, and no version resource substitutes for a certificate. This helps
+; where judgement is a SCALE — browser download reputation, SmartScreen, AV heuristics. Where
+; the answer is binary and the question is "is it signed", it helps not at all.
+;
 ; All of it derives from {#AppVersion}, so a release bumps one line and these follow;
 ; packaging/test_installer_identity.py refuses a build that drops them or hardcodes a version
 ; past this define.

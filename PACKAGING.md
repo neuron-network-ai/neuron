@@ -7,10 +7,24 @@ Add/Remove Programs entry, optional auto-start, clean uninstall that deregisters
 **Honest caveats first:**
 - **It's big.** The app bundles PyTorch → ~1–2 GB installed. This is not the "tiny 1 MB agent";
   that needs the llama.cpp engine (see `SCALING.md`, parked). Today it's a Python+PyTorch node, packaged.
-- **It's unsigned.** Windows SmartScreen / some antivirus will warn on an unsigned app and setup,
-  and browsers increasingly block the **download** outright rather than only warning on the run.
-  Removing that needs a code-signing certificate (~$100–400/yr). Until then users click through —
-  README.md tells them how, and the SHA-256 is what actually proves the file.
+- **It's unsigned, and on Windows 11 that is now a HARD BLOCK, not a warning.** SmartScreen and
+  most antivirus only warn, and browsers increasingly block the **download** rather than the run
+  — all of those a user can click through, and README.md tells them how.
+
+  **Smart App Control does not let them.** Seen on 2026-08-24 against 0.20.25: *"Smart App
+  Control blocked an app that may be unsafe … we could not verify its publisher"*, with only
+  *Okay* and *Get apps from the Store* as buttons. No "run anyway", no per-app allow, no
+  exclusion that reaches it. It wants a valid Authenticode signature from a Trusted Root Program
+  CA **plus** standing in Microsoft's Intelligent Security Graph, and an unsigned build can
+  never earn either. It is on by default on many clean Windows 11 installs, and switching it off
+  is one-way on most builds (reinstall to restore), so telling a volunteer to disable it is not
+  something we should be asking for.
+
+  So for those machines the installer is not "scary", it is **unusable**, and the source install
+  is the only route in. A code-signing certificate (~$100–400/yr, EV materially better for
+  reputation) has stopped being a polish item and is now the thing standing between this project
+  and every SAC-enabled machine. Sign the installer *and* the bundled binaries, then expect a
+  reputation-building period even once signed.
 
   Because there is no signature, the exe's **version resource** is a large part of what a browser
   and Defender have left to judge it by, so `[Setup]` fills all of it (`VersionInfoVersion` and
