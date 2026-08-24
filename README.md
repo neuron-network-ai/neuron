@@ -18,6 +18,69 @@ Two things to expect: Windows will say the installer is "unrecognized" (it isn't
 — the full source is in this repository), and the first start downloads **1.4–1.8 GB**, which is
 your share of the AI model. After that it just runs, and updates itself.
 
+### If your browser or Windows blocks it
+
+The installer is not code-signed, so a browser may refuse the **download itself** — not just
+warn when you run it. Chrome says *"blocked"* or *"Failed – virus detected"*, Edge says it
+*"isn't commonly downloaded"*. Nothing is wrong with the file; an unsigned 200 MB executable
+that few people have fetched yet has no reputation to check, and that is what those messages
+mean. Getting past it, in the order the blocks appear:
+
+1. **The browser blocks the download.** Chrome: open `chrome://downloads`, find the entry, and
+   click **Keep**. Edge: **Downloads** (`Ctrl+J`) → the **…** beside the file → **Keep** →
+   **Show more** → **Keep anyway**. Firefox: the download panel → right-click → **Allow
+   download**.
+2. **Check you got the real file before you run it** — this is the step that makes the rest
+   safe, and it takes one command. In PowerShell, from your Downloads folder:
+
+   ```
+   certutil -hashfile NEURON-Setup-0.20.25.exe SHA256
+   ```
+
+   It must print `039e60655cad6969b5ab21c83e63ca8491675ef4f023617f97b9360d63c72740` — the hash
+   above, which is also what `/agent/version` serves and what every installed agent checks
+   before it will run an update. The file is **217,140,114 bytes**, which Windows displays as
+   **207 MB**. If the hash matches, you have the published build exactly; if it does not, delete
+   it and download again, and please open an issue.
+3. **SmartScreen: "Windows protected your PC".** → **More info** → **Run anyway**. This one
+   has a way through.
+4. **Smart App Control: "blocked an app that may be unsafe".** **This one does not, and we will
+   not pretend otherwise.** The dialog offers only *Okay* and *Get apps from the Store* —
+   there is no "run anyway", no per-app allow, and no exclusion that reaches it. Smart App
+   Control is a different mechanism from SmartScreen: it demands a valid Authenticode signature
+   from a CA in the Microsoft Trusted Root Program **plus** standing in Microsoft's Intelligent
+   Security Graph, and an unsigned build cannot acquire either. Unblocking, re-downloading and
+   antivirus exclusions all leave it exactly where it was.
+
+   Your options today are honest ones:
+   - **Install from source instead** (below) — Python is signed, so nothing is blocked. This is
+     the recommended route while NEURON is unsigned.
+   - **Turn Smart App Control off** — Windows Security → **App & browser control** → **Smart App
+     Control settings** → **Off**. ⚠ On most builds this is **one-way**: it cannot be switched
+     back on without resetting or reinstalling Windows. Microsoft announced in December 2025
+     that a later update would make it reversible, so newer builds may differ — check before
+     you decide. Do not turn off a system-wide protection just for us; option one costs you
+     nothing.
+
+   If Smart App Control blocked you, we would genuinely like to know — it tells us how many
+   people this wall is silently turning away.
+5. **Still nothing when you double-click.** Windows marks files from the internet and can block
+   them silently: right-click the exe → **Properties** → on the **General** tab, tick
+   **Unblock** at the bottom → **Apply**. (That is the same dialog whose **Details** tab shows
+   the version — a build before 0.20.26 reports `File version 0.0.0.0` there, which is a missing
+   field in our installer script and not a sign of a bad download.)
+6. **Antivirus deleted it.** Some engines flag any large unsigned PyInstaller bundle. Restore it
+   from quarantine, or add the Downloads folder as an exclusion for the install, and please tell
+   us which engine — false positives can be reported and fixed.
+
+**The real fix is a code-signing certificate, and Smart App Control is what turns that from a
+courtesy into a blocker.** A browser warning costs a click; Smart App Control means a Windows 11
+machine with it enabled **cannot install NEURON at all** by the normal route. The project does
+not have a certificate yet — see [PACKAGING.md](PACKAGING.md). Until it does, the hash proves
+the download, and the source install is the way in.
+
+**On Linux or macOS none of this applies** — install from source, below.
+
 Android: see [ANDROID_INSTALL.md](agent/android/ANDROID_INSTALL.md) (APK coming soon)
 
 On Linux or macOS, see [For developers](#for-developers-source-install) below.

@@ -37,6 +37,11 @@ nav{background:#fff;border-bottom:1px solid #d1fae5;padding:0 2rem;display:flex;
 .btn-secondary:hover{background:#f6fdf7;text-decoration:none}
 .sha{font-size:11px;color:#6b7280;font-family:monospace;display:block;margin-bottom:12px}
 .warn-box{background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 16px;font-size:12px;color:#92400e;max-width:560px;margin:0 auto;line-height:1.5}
+.warn-box summary{cursor:pointer;font-weight:600;margin-top:8px;outline-offset:3px}
+.warn-box ol{text-align:left;margin:8px 0 0;padding-left:20px}
+.warn-box li{margin:6px 0}
+.warn-box code{background:#fef3c7;border-radius:4px;padding:1px 5px;font-size:11px;word-break:break-all}
+.warn-box a{color:#92400e}
 
 /* STATS */
 .stats-wrap{margin:0 2rem}
@@ -187,7 +192,19 @@ footer a{color:#15803d}
     <a class="btn-secondary" href="https://github.com/neuron-network-ai/neuron/blob/main-full/INSTALL.md">Source install (Linux / macOS)</a>
   </div>
   <span class="sha">~220 MB &nbsp;·&nbsp; SHA-256: <span id="dl-sha">039e60655cad6969b5ab21c83e63ca8491675ef4f023617f97b9360d63c72740</span></span>
-  <div class="warn-box">⚠ Windows will show an "unrecognized publisher" warning — the installer is not yet code-signed. The full source is public. Verify the SHA-256 above before running.</div>
+  <div class="warn-box">⚠ The installer is not code-signed yet, so Windows shows an "unrecognized publisher" warning — and your browser may refuse the download itself. Nothing is wrong with the file: an unsigned installer that few people have fetched has no reputation to check, and that is all those messages mean. The full source is public, and the SHA-256 above is what proves the download.
+    <details>
+      <summary>My browser or Windows blocked it — what now?</summary>
+      <ol>
+        <li><strong>The browser blocked the download.</strong> Chrome: <code>chrome://downloads</code> → <strong>Keep</strong>. Edge: <kbd>Ctrl</kbd>+<kbd>J</kbd> → <strong>…</strong> → <strong>Keep</strong> → <strong>Show more</strong> → <strong>Keep anyway</strong>. Firefox: the download panel → right-click → <strong>Allow download</strong>.</li>
+        <li><strong>Check what you got, before running it.</strong> In PowerShell, from your Downloads folder: <code id="dl-cmd">certutil -hashfile NEURON-Setup-0.20.25.exe SHA256</code> — it must print the SHA-256 above. That is the same hash <a href="https://neuronnet.duckdns.org/agent/version">/agent/version</a> serves and that every installed agent checks before it will run an update. If it matches, you have the published build exactly.</li>
+        <li><strong>SmartScreen: "Windows protected your PC".</strong> → <strong>More info</strong> → <strong>Run anyway</strong>. This one has a way through.</li>
+        <li><strong>Smart App Control: "blocked an app that may be unsafe".</strong> This one does not — the dialog offers only <em>Okay</em> and <em>Get apps from the Store</em>, and there is no per-app allow or exclusion that reaches it. It requires a real code-signing certificate, which NEURON does not have yet, so an unsigned build simply cannot satisfy it. <strong>Install from source instead</strong> (link above) — nothing blocks that. You <em>can</em> switch Smart App Control off under Windows Security → App &amp; browser control, but on most builds that is one-way: it cannot be turned back on without reinstalling Windows. Please don't disable a system-wide protection for us; the source install costs you nothing.</li>
+        <li><strong>Nothing happens on double-click.</strong> Right-click the file → <strong>Properties</strong> → <strong>General</strong> tab → tick <strong>Unblock</strong> → <strong>Apply</strong>.</li>
+        <li><strong>Antivirus removed it.</strong> Some engines flag any large unsigned installer. Restore it from quarantine, and please <a href="https://github.com/neuron-network-ai/neuron/issues">tell us which engine</a> — false positives can be reported and fixed.</li>
+      </ol>
+    </details>
+  </div>
 </section>
 
 <div class="stats-wrap">
@@ -460,6 +477,13 @@ function fetchRelease(){
       });
       const h = document.getElementById('dl-sha');
       if(h) h.textContent = d.sha256;
+      // The verify command names a FILE, so it is the fourth face of the same fact. Left
+      // hardcoded it would tell whoever actually checks the hash to run certutil against a
+      // filename that is not in their Downloads folder -- the careful reader punished again,
+      // which is the failure this whole block was written to stop.
+      const c = document.getElementById('dl-cmd');
+      if(c) c.textContent = 'certutil -hashfile ' +
+        d.download_url.slice(d.download_url.lastIndexOf('/') + 1) + ' SHA256';
     })
     .catch(()=>{
       // Deliberately silent: the markup already carries the release that was current when this

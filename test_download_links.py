@@ -152,6 +152,38 @@ def main():
               "; ".join(f"{f} prints {h[:8]}..." for f, h in sorted(wrong))
               + f" but the published installer hashes to {published[:8]}..." if wrong else "")
 
+    # 5. AND A FILENAME WRITTEN OUT ON ITS OWN IS A LINK WITH THE HREF FILED OFF.
+    #
+    # Everything above matches `releases/download/vX/NEURON-Setup-X.exe` — a full URL. But the
+    # blocked-download instructions added to README.md tell somebody to run
+    # `certutil -hashfile NEURON-Setup-0.20.25.exe SHA256`, and that bare filename goes stale on
+    # exactly the same release the links do, in exactly the same silence. Worse than the links,
+    # in fact: a stale LINK still downloads something, while a stale filename in a verify command
+    # names a file that is not in the folder, so the one reader careful enough to check the hash
+    # of an unsigned installer is the one who gets `The system cannot find the file specified`.
+    #
+    # PACKAGING.md carried `NEURON-Setup-0.12.0.exe` as its build-output example for thirteen
+    # releases, which is how long this goes unnoticed when nothing looks.
+    #
+    # Version-less forms (`NEURON-Setup-<ver>.exe`) are the correct way to write it where no
+    # specific build is meant, and do not match this pattern at all.
+    NAMED = re.compile(r"NEURON-Setup-([0-9]+(?:\.[0-9]+)+)\.exe")
+    if versions:
+        want = sorted(versions)[0]
+        stale_names = []
+        for rel in FILES:
+            path = os.path.join(HERE, rel)
+            if not os.path.exists(path):
+                continue
+            for v in set(NAMED.findall(open(path, encoding="utf-8").read())):
+                if v != want:
+                    stale_names.append((rel, v))
+        check("every installer filename spelled out names that same version",
+              not stale_names,
+              "; ".join(f"{f} writes NEURON-Setup-{v}.exe" for f, v in sorted(stale_names))
+              + f" while the download links serve v{want}; write NEURON-Setup-<ver>.exe where "
+                f"no particular build is meant" if stale_names else "")
+
     print(f"\n{ok} passed, {fail} failed")
     return fail == 0
 

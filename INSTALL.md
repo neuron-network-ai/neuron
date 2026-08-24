@@ -35,7 +35,17 @@ too big for any one computer. You earn **NRN** for that work.
   that, and never runs on battery. Change it any time from the tray's **Donation level** menu —
   `Idle` only contributes when you are away from the machine.
 - First start downloads about **1.4 GB** and takes a few minutes.
-- Windows may warn the installer is "unrecognized" — it isn't signed yet. The source is public.
+- Windows may warn the installer is "unrecognized" — it isn't signed yet, and for the same
+  reason your **browser may block the download itself** ("blocked", "not commonly downloaded").
+  Neither means the file is bad: an unsigned installer few people have fetched has no
+  reputation to check. Both are click-through, and the README explains how, along with the one
+  command that proves what you downloaded:
+  [If your browser or Windows blocks it](README.md#if-your-browser-or-windows-blocks-it).
+- **If Windows 11's Smart App Control is on, the installer will not run at all** — not a
+  warning you can dismiss, a block with no "run anyway" button. It requires a code-signing
+  certificate we do not have yet. **Use the source install below instead**; it is not affected,
+  and it is the recommended route on those machines. Don't switch Smart App Control off for us:
+  on most builds that cannot be undone without reinstalling Windows.
 
 **Install:**
 ```
